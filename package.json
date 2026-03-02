@@ -1,0 +1,55 @@
+{
+  "name": "context-compress",
+  "version": "1.0.0",
+  "description": "Context-aware MCP server that compresses tool output for Claude Code",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "context-compress": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc && node esbuild.config.ts",
+    "build:hooks": "esbuild src/hooks/pretooluse.ts --bundle --platform=node --format=esm --outfile=hooks/pretooluse.mjs --target=node18",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:integration": "node --import tsx --test tests/integration/*.test.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "better-sqlite3": "^12.6.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.27.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "dist/",
+    "hooks/",
+    "skills/",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Open330/context-compress"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "context",
+    "compression"
+  ]
+}
