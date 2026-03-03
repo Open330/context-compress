@@ -11,7 +11,7 @@
 
 A context-aware **MCP server** for [Claude Code](https://claude.ai/claude-code) that compresses tool output by processing it in isolated subprocesses. Raw data stays in the sandbox — only concise summaries enter your context window.
 
-[Quickstart for Agents](#quickstart-for-agents) · [Getting Started](#getting-started) · [How It Works](#how-it-works) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
+[Quickstart for Agents](#quickstart-for-agents) · [Getting Started](#getting-started) · [How It Works](#how-it-works) · [Token Reduction](#token-reduction) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -122,6 +122,32 @@ context-compress doctor
 `javascript` · `typescript` · `python` · `shell` · `ruby` · `go` · `rust` · `php` · `perl` · `r` · `elixir`
 
 > Bun auto-detected for 3-5x faster JS/TS execution.
+
+---
+
+## Token Reduction
+
+context-compress achieves **99.2% token reduction** across a typical 12-operation coding session.
+
+| Operation | Before | After | Reduction |
+|:--|--:|--:|--:|
+| Read bundled file (776KB) | 194,076 tok | 105 tok | 99.9% |
+| Playwright snapshot (56KB) | 14,000 tok | 75 tok | 99.5% |
+| Read CSV/JSON data (100KB) | 25,000 tok | 125 tok | 99.5% |
+| Read source file (21KB) | 5,250 tok | 88 tok | 98.3% |
+| npm install log (15KB) | 3,750 tok | 50 tok | 98.7% |
+| curl API response (12KB) | 3,000 tok | 88 tok | 97.1% |
+| npm test (42 tests) | 935 tok | 45 tok | 95.2% |
+| batch_execute (5 cmds) | 6,250 tok | 375 tok | 94.0% |
+| fetch_and_index (45KB page) | 11,250 tok | 750 tok | 93.3% |
+| grep (small output) | 361 tok | 361 tok | 0% |
+| **Session Total** | **267,121 tok** | **2,223 tok** | **99.2%** |
+
+Without context-compress, 12 operations consume **133% of the 200K context window** — overflowing it entirely. With context-compress, the same operations use **1.1%**, leaving 98.9% free for actual conversation.
+
+> Data isn't deleted — it's indexed in FTS5 and searchable on demand. Small outputs (<5KB) pass through uncompressed.
+
+**[Read the full Token Reduction Report](docs/token-reduction-report.md)** — includes cost analysis, architecture deep-dive, and FAQ on context loss trade-offs.
 
 ---
 
