@@ -84,6 +84,28 @@ more filler content
 		}
 	});
 
+	it("search with special-character-only query returns empty results", () => {
+		const store = new ContentStore(":memory:");
+		try {
+			store.index("Some regular content to index for searching.", "test-source");
+			const result = store.search("***###!!!");
+			assert.strictEqual(result.results.length, 0);
+		} finally {
+			store.close();
+		}
+	});
+
+	it("search with empty string returns empty results", () => {
+		const store = new ContentStore(":memory:");
+		try {
+			store.index("Some content here.", "test-source");
+			const result = store.search("");
+			assert.strictEqual(result.results.length, 0);
+		} finally {
+			store.close();
+		}
+	});
+
 	it("getStats reports source and chunk totals after indexing", () => {
 		const store = new ContentStore(":memory:");
 		try {

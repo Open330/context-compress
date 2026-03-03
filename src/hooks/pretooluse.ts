@@ -19,9 +19,14 @@ let raw = "";
 process.stdin.setEncoding("utf-8");
 for await (const chunk of process.stdin) raw += chunk;
 
-const input = JSON.parse(raw);
+let input: Record<string, unknown>;
+try {
+	input = JSON.parse(raw);
+} catch {
+	process.exit(0);
+}
 const tool = input.tool_name ?? "";
-const toolInput = input.tool_input ?? {};
+const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
 
 function respond(output: Record<string, unknown>): void {
 	console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", ...output } }));
@@ -30,7 +35,7 @@ function respond(output: Record<string, unknown>): void {
 
 // ─── Bash: redirect data-fetching commands ───
 if (tool === "Bash") {
-	const command: string = toolInput.command ?? "";
+	const command = String(toolInput.command ?? "");
 
 	// curl/wget → block and redirect
 	if (blockCurl && /(^|\s|&&|\||\;)(curl|wget)\s/i.test(command)) {
@@ -75,7 +80,7 @@ if (tool === "Grep" && nudgeOnGrep) {
 
 // ─── WebFetch: deny + redirect to sandbox ───
 if (tool === "WebFetch" && blockWebFetch) {
-	const url = toolInput.url ?? "";
+	const url = String(toolInput.url ?? "");
 	respond({
 		permissionDecision: "deny",
 		reason: `${TOOL_PREFIX}: WebFetch blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url: "${url}", source: "...") to fetch this URL in sandbox. Then use mcp__${TOOL_PREFIX}__search(queries: [...]) to query results.`,
@@ -84,8 +89,8 @@ if (tool === "WebFetch" && blockWebFetch) {
 
 // ─── Task/Agent: inject context-compress routing into subagent prompts ───
 if (tool === "Task" || tool === "Agent") {
-	const subagentType = toolInput.subagent_type ?? "";
-	const prompt: string = toolInput.prompt ?? "";
+	const subagentType = String(toolInput.subagent_type ?? "");
+	const prompt = String(toolInput.prompt ?? "");
 
 	const ROUTING_BLOCK = `
 

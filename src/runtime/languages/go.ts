@@ -11,8 +11,8 @@ export const goPlugin: LanguagePlugin = {
 
 	preprocessCode(code) {
 		// Wrap in package main if not already present
-		if (!code.includes("package ")) {
-			const hasImport = code.includes("import ");
+		if (!/^package\s/m.test(code)) {
+			const hasImport = /^import\s/m.test(code);
 			if (hasImport) {
 				return `package main\n\n${code}`;
 			}
@@ -23,7 +23,7 @@ export const goPlugin: LanguagePlugin = {
 
 	wrapWithFileContent(code, filePath) {
 		const escaped = JSON.stringify(filePath);
-		const hasPackage = code.includes("package ");
+		const hasPackage = /^package\s/m.test(code);
 		if (hasPackage) {
 			// Insert after package declaration
 			return code.replace(

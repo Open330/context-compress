@@ -16,7 +16,7 @@ export const rustPlugin: LanguagePlugin = {
 	},
 
 	preprocessCode(code) {
-		if (!code.includes("fn main")) {
+		if (!/^fn\s+main\s*\(/m.test(code)) {
 			return `fn main() {\n${code}\n}`;
 		}
 		return undefined;
@@ -25,7 +25,7 @@ export const rustPlugin: LanguagePlugin = {
 	wrapWithFileContent(code, filePath) {
 		const escaped = JSON.stringify(filePath);
 		const preamble = `use std::fs;\nlet file_content_path = ${escaped};\nlet file_content = fs::read_to_string(file_content_path).unwrap();\n`;
-		if (code.includes("fn main")) {
+		if (/^fn\s+main\s*\(/m.test(code)) {
 			return code.replace(/fn main\s*\(\s*\)\s*\{/, `fn main() {\n${preamble}`);
 		}
 		return `fn main() {\n${preamble}${code}\n}`;

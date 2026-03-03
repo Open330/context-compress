@@ -16,7 +16,9 @@
     "lint:fix": "biome check --write src/",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
-    "test:integration": "node --import tsx --test tests/integration/*.test.ts"
+    "test:integration": "node --import tsx --test tests/integration/*.test.ts",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run lint && npm run test && npm run build"
   },
   "engines": {
     "node": ">=18.0.0"

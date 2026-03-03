@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -7,24 +7,13 @@ import { z } from "zod";
 import type { Config } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
 import { debug } from "./logger.js";
+import { isPrivateHost } from "./network.js";
 import { type RuntimeMap, detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
-import type { Language } from "./types.js";
+import { ALL_LANGUAGES, type Language } from "./types.js";
 
-const LANGUAGES: [Language, ...Language[]] = [
-	"javascript",
-	"typescript",
-	"python",
-	"shell",
-	"ruby",
-	"go",
-	"rust",
-	"php",
-	"perl",
-	"r",
-	"elixir",
-];
+const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 
 const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 
@@ -60,6 +49,18 @@ export async function createServer(config: Config) {
 	const store = new ContentStore();
 	const tracker = new SessionTracker();
 
+	// Graceful shutdown: close the database on exit
+	const shutdown = () => {
+		try {
+			store.close();
+		} catch {
+			// Ignore errors during shutdown
+		}
+	};
+	process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
+	process.on("beforeExit", shutdown);
+
 	// Search throttling state
 	const searchCalls: number[] = [];
 
@@ -72,11 +73,11 @@ export async function createServer(config: Config) {
 
 	server.tool(
 		"execute",
-		`Execute code in a sandboxed subprocess. Only stdout enters context — raw data stays in the subprocess. Use instead of bash/cat when output would exceed 20 lines. ${bunDetected ? "(Bun detected — JS/TS runs 3-5x faster) " : ""}Available: ${LANGUAGES.join(", ")}.
+		`Execute code in a sandboxed subprocess. Only stdout enters context — raw data stays in the subprocess. Use instead of bash/cat when output would exceed 20 lines. ${bunDetected ? "(Bun detected — JS/TS runs 3-5x faster) " : ""}Available: ${ALL_LANGUAGES.join(", ")}.
 
 PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, pytest), git queries (git log, git diff), data processing, and ANY CLI command that may produce large output. Bash should only be used for file mutations, git writes, and navigation.`,
 		{
-			language: z.enum(LANGUAGES).describe("Runtime language"),
+			language: z.enum(LANGUAGE_ENUM).describe("Runtime language"),
 			code: z
 				.string()
 				.describe(
@@ -136,7 +137,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 		"Read a file and process it without loading contents into context. The file is read into a FILE_CONTENT variable inside the sandbox. Only your printed summary enters context.\n\nPREFER THIS OVER Read/cat for: log files, data files (CSV, JSON, XML), large source files for analysis, and any file where you need to extract specific information rather than read the entire content.",
 		{
 			path: z.string().describe("Absolute file path or relative to project root"),
-			language: z.enum(LANGUAGES).describe("Runtime language"),
+			language: z.enum(LANGUAGE_ENUM).describe("Runtime language"),
 			code: z
 				.string()
 				.describe(
@@ -225,6 +226,17 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 							{
 								type: "text" as const,
 								text: `Error: path "${filePath}" is outside the project directory`,
+							},
+						],
+					};
+				}
+				const fileStat = statSync(absPath);
+				if (fileStat.size > 50 * 1024 * 1024) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Error: file "${filePath}" is too large (${(fileStat.size / 1024 / 1024).toFixed(1)}MB). Max 50MB.`,
 							},
 						],
 					};
@@ -341,17 +353,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 						content: [{ type: "text" as const, text: "Error: only http/https URLs are allowed" }],
 					};
 				}
-				const hostname = parsed.hostname;
-				if (
-					hostname === "localhost" ||
-					hostname === "127.0.0.1" ||
-					hostname === "::1" ||
-					hostname === "0.0.0.0" ||
-					hostname.startsWith("10.") ||
-					hostname.startsWith("172.16.") ||
-					hostname.startsWith("192.168.") ||
-					hostname.startsWith("169.254.")
-				) {
+				if (isPrivateHost(parsed.hostname)) {
 					return {
 						content: [
 							{ type: "text" as const, text: "Error: internal/private URLs are not allowed" },

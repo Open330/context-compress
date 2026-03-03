@@ -130,7 +130,7 @@ function sanitizeQuery(raw: string): string {
 		.split(/\s+/)
 		.filter((w) => w.length >= 2)
 		.map((w) => `"${w}"`);
-	return words.length > 0 ? words.join(" OR ") : '""';
+	return words.length > 0 ? words.join(" OR ") : "";
 }
 
 /** Classic Levenshtein distance with O(n) space */
@@ -156,6 +156,12 @@ function levenshtein(a: string, b: string): number {
 export class ContentStore {
 	private db: Database.Database;
 	private hasTrigramTable = false;
+
+	// Cached prepared statements (initialized in initSchema, always available after constructor)
+	private insertSourceStmt!: Database.Statement;
+	private insertChunkStmt!: Database.Statement;
+	private vocabCountStmt!: Database.Statement;
+	private vocabInsertStmt!: Database.Statement;
 
 	constructor(dbPath?: string) {
 		const path = dbPath ?? join(tmpdir(), `context-compress-${process.pid}.db`);
@@ -187,6 +193,16 @@ export class ContentStore {
 				word TEXT PRIMARY KEY
 			);
 		`);
+
+		// Cache prepared statements
+		this.insertSourceStmt = this.db.prepare(
+			"INSERT INTO sources (label, chunk_count, code_chunk_count) VALUES (?, ?, ?)",
+		);
+		this.insertChunkStmt = this.db.prepare(
+			"INSERT INTO chunks (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
+		);
+		this.vocabCountStmt = this.db.prepare("SELECT COUNT(*) as cnt FROM vocabulary");
+		this.vocabInsertStmt = this.db.prepare("INSERT OR IGNORE INTO vocabulary (word) VALUES (?)");
 	}
 
 	/** Lazily create trigram table only when porter search returns 0 results */
@@ -220,12 +236,8 @@ export class ContentStore {
 			HEADING_RE.test(content) || content.includes("```") || content.includes("---");
 		const chunks = isMarkdown ? chunkMarkdown(content) : chunkPlainText(content);
 
-		const insertSource = this.db.prepare(
-			"INSERT INTO sources (label, chunk_count, code_chunk_count) VALUES (?, ?, ?)",
-		);
-		const insertChunk = this.db.prepare(
-			"INSERT INTO chunks (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
-		);
+		const insertSource = this.insertSourceStmt;
+		const insertChunk = this.insertChunkStmt;
 		const insertTrigram = this.hasTrigramTable
 			? this.db.prepare(
 					"INSERT INTO chunks_trigram (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
@@ -273,6 +285,11 @@ export class ContentStore {
 		const limit = options?.limit ?? 3;
 		const sanitized = sanitizeQuery(query);
 
+		// Empty query after sanitization — return empty results
+		if (!sanitized) {
+			return { query, results: [] };
+		}
+
 		// Layer 1: Porter stemming search
 		let hits = this.porterSearch(sanitized, options?.source, limit);
 
@@ -292,9 +309,11 @@ export class ContentStore {
 		const corrected = this.fuzzyCorrect(query);
 		if (corrected && corrected !== query) {
 			const correctedSanitized = sanitizeQuery(corrected);
-			hits = this.porterSearch(correctedSanitized, options?.source, limit);
-			if (hits.length > 0) {
-				return { query, results: hits, corrected };
+			if (correctedSanitized) {
+				hits = this.porterSearch(correctedSanitized, options?.source, limit);
+				if (hits.length > 0) {
+					return { query, results: hits, corrected };
+				}
 			}
 		}
 
@@ -401,7 +420,7 @@ export class ContentStore {
 			const maxLen = word.length + maxDist;
 
 			const candidates = this.db
-				.prepare("SELECT word FROM vocabulary WHERE length(word) BETWEEN ? AND ?")
+				.prepare("SELECT word FROM vocabulary WHERE length(word) BETWEEN ? AND ? LIMIT 500")
 				.all(minLen, maxLen) as Array<{ word: string }>;
 
 			let bestWord = word;
@@ -426,9 +445,7 @@ export class ContentStore {
 	 * Update vocabulary table from content (bounded to MAX_VOCABULARY).
 	 */
 	private updateVocabulary(content: string): void {
-		const currentCount = (
-			this.db.prepare("SELECT COUNT(*) as cnt FROM vocabulary").get() as { cnt: number }
-		).cnt;
+		const currentCount = (this.vocabCountStmt.get() as { cnt: number }).cnt;
 
 		if (currentCount >= MAX_VOCABULARY) return;
 
@@ -437,7 +454,7 @@ export class ContentStore {
 			.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
 
 		const unique = new Set(words.map((w) => w.toLowerCase()));
-		const insert = this.db.prepare("INSERT OR IGNORE INTO vocabulary (word) VALUES (?)");
+		const insert = this.vocabInsertStmt;
 
 		let added = 0;
 		for (const word of unique) {
@@ -464,7 +481,7 @@ export class ContentStore {
 		if (totalChunks === 0) return [];
 
 		const filter = sourceId ? " WHERE source_id = ?" : "";
-		const stmt = this.db.prepare(`SELECT content FROM chunks${filter}`);
+		const stmt = this.db.prepare(`SELECT content FROM chunks${filter} LIMIT 500`);
 		const rows = (sourceId ? stmt.all(sourceId) : stmt.all()) as Array<{ content: string }>;
 
 		// Count document frequency per word

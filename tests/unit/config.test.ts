@@ -6,6 +6,15 @@ const ENV_KEYS = [
 	"CONTEXT_COMPRESS_DEBUG",
 	"CONTEXT_COMPRESS_PASSTHROUGH_ENV",
 	"CONTEXT_COMPRESS_BLOCK_CURL",
+	"CONTEXT_COMPRESS_MAX_OUTPUT_BYTES",
+	"CONTEXT_COMPRESS_HARD_CAP_BYTES",
+	"CONTEXT_COMPRESS_SEARCH_MAX_BYTES",
+	"CONTEXT_COMPRESS_BATCH_MAX_BYTES",
+	"CONTEXT_COMPRESS_SEARCH_LIMIT",
+	"CONTEXT_COMPRESS_SEARCH_WINDOW_MS",
+	"CONTEXT_COMPRESS_SEARCH_REDUCE_AFTER",
+	"CONTEXT_COMPRESS_SEARCH_BLOCK_AFTER",
+	"CONTEXT_COMPRESS_INTENT_SEARCH_THRESHOLD",
 ];
 
 const ORIGINAL_HOME = process.env.HOME;
@@ -62,5 +71,29 @@ describe("config", () => {
 		const loaded = loadConfig();
 		const fetched = getConfig();
 		assert.strictEqual(fetched, loaded);
+	});
+
+	it("applies numeric ENV overrides", () => {
+		process.env.CONTEXT_COMPRESS_MAX_OUTPUT_BYTES = "200000";
+		process.env.CONTEXT_COMPRESS_SEARCH_LIMIT = "5";
+		process.env.CONTEXT_COMPRESS_INTENT_SEARCH_THRESHOLD = "10000";
+		const cfg = loadConfig();
+		assert.strictEqual(cfg.maxOutputBytes, 200000);
+		assert.strictEqual(cfg.searchLimit, 5);
+		assert.strictEqual(cfg.intentSearchThreshold, 10000);
+	});
+
+	it("ignores non-numeric ENV values", () => {
+		process.env.CONTEXT_COMPRESS_MAX_OUTPUT_BYTES = "not_a_number";
+		const cfg = loadConfig();
+		assert.strictEqual(cfg.maxOutputBytes, 102_400); // default
+	});
+
+	it("falls back to defaults on invalid file config", () => {
+		// With HOME pointing to a non-existent directory, loadFileConfig returns {}
+		// so we get defaults
+		const cfg = loadConfig("/tmp/nonexistent-dir-" + Date.now());
+		assert.strictEqual(cfg.blockCurl, true);
+		assert.strictEqual(cfg.maxOutputBytes, 102_400);
 	});
 });

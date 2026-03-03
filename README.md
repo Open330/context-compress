@@ -237,7 +237,7 @@ context-compress uninstall  # Clean removal: hooks, MCP reg, stale DBs
   [PASS] PreToolUse hook configured
   [PASS] FTS5 / better-sqlite3 works
 
-  Version: v1.0.0
+  Version: v2026.3.3
   All checks passed.
 ```
 
@@ -299,7 +299,7 @@ cd context-compress
 npm install
 npm run typecheck     # Type checking
 npm run lint          # Biome linting
-npm run test:unit     # 36 unit tests
+npm run test:unit     # Unit tests
 npm run test          # All tests (unit + integration)
 npm run build         # Compile + bundle
 ```

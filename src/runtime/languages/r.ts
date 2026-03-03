@@ -2,7 +2,7 @@ import type { LanguagePlugin } from "../plugin.js";
 
 export const rPlugin: LanguagePlugin = {
 	language: "r",
-	runtimeCandidates: ["Rscript", "r"],
+	runtimeCandidates: ["Rscript", "R"],
 	fileExtension: ".R",
 
 	buildCommand(runtime, filePath) {

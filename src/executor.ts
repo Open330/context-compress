@@ -9,8 +9,6 @@ import type { LanguagePlugin } from "./runtime/plugin.js";
 import type { ExecFileOptions, ExecOptions, ExecResult, Language } from "./types.js";
 
 const DEFAULT_TIMEOUT = 30_000;
-const DEFAULT_MAX_OUTPUT = 102_400;
-const DEFAULT_HARD_CAP = 100 * 1024 * 1024;
 
 /** Safe base environment variables */
 const SAFE_ENV_KEYS = [
@@ -212,7 +210,7 @@ export class SubprocessExecutor {
 			);
 		} finally {
 			// Defer cleanup slightly so runtime (especially Bun) fully exits
-			setTimeout(() => this.cleanupTempDir(tmpDir), 100);
+			setTimeout(() => this.cleanupTempDir(tmpDir), 100).unref();
 		}
 	}
 

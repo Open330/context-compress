@@ -11,7 +11,7 @@ export const typescriptPlugin: LanguagePlugin = {
 
 	wrapWithFileContent(code, filePath) {
 		const escaped = JSON.stringify(filePath);
-		return `const FILE_CONTENT_PATH = ${escaped};\nconst FILE_CONTENT = require("fs").readFileSync(FILE_CONTENT_PATH, "utf-8");\n${code}`;
+		return `const {readFileSync: __cm_readFileSync} = await import("node:fs");\nconst FILE_CONTENT_PATH = ${escaped};\nconst FILE_CONTENT = __cm_readFileSync(FILE_CONTENT_PATH, "utf-8");\n${code}`;
 	},
 
 	// tsx and ts-node may be .cmd shims on Windows
