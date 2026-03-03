@@ -29,6 +29,8 @@ Saves ~99% of tokens on large outputs while keeping everything searchable via FT
 npm install -g context-compress
 claude mcp add context-compress -- node $(which context-compress)
 context-compress doctor
+
+More info: https://github.com/Open330/context-compress
 ```
 
 <div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&project=context-compress" width="100%" /></div>
