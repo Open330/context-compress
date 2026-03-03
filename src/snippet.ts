@@ -33,14 +33,7 @@ export function positionsFromHighlight(highlighted: string): number[] {
  * Remove STX/ETX markers from highlighted text.
  */
 export function stripMarkers(text: string): string {
-	let result = "";
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		if (ch !== STX && ch !== ETX) {
-			result += ch;
-		}
-	}
-	return result;
+	return text.replaceAll(STX, "").replaceAll(ETX, "");
 }
 
 interface Window {

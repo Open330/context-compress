@@ -2,7 +2,7 @@ import { readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { debug, warn } from "./logger.js";
+import { debug } from "./logger.js";
 import { extractSnippet } from "./snippet.js";
 import type { Chunk, IndexResult, SearchHit, SearchResult, StoreStats } from "./types.js";
 
@@ -204,20 +204,10 @@ export class ContentStore {
 			);
 		`);
 
-		// Backfill from existing chunks
-		const rows = this.db
-			.prepare("SELECT title, content, source_id, content_type FROM chunks")
-			.all() as Array<{ title: string; content: string; source_id: number; content_type: string }>;
-
-		const insert = this.db.prepare(
-			"INSERT INTO chunks_trigram (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
+		// Backfill from existing chunks using SQL-level INSERT
+		this.db.exec(
+			"INSERT INTO chunks_trigram (title, content, source_id, content_type) SELECT title, content, source_id, content_type FROM chunks",
 		);
-		const tx = this.db.transaction(() => {
-			for (const row of rows) {
-				insert.run(row.title, row.content, row.source_id, row.content_type);
-			}
-		});
-		tx();
 
 		this.hasTrigramTable = true;
 	}

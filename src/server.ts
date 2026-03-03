@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import type { Config } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
-import { debug, error as logError } from "./logger.js";
+import { debug } from "./logger.js";
 import { type RuntimeMap, detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
@@ -25,6 +25,13 @@ const LANGUAGES: [Language, ...Language[]] = [
 	"r",
 	"elixir",
 ];
+
+const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+
+function isWithinProject(absPath: string): boolean {
+	const normalized = resolve(absPath);
+	return normalized === projectDir || normalized.startsWith(`${projectDir}/`);
+}
 
 function getVersion(): string {
 	try {
@@ -139,7 +146,17 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			timeout: z.number().default(30000).describe("Max execution time in ms"),
 		},
 		async ({ path: filePath, language, code, intent, timeout }) => {
-			const absPath = resolve(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), filePath);
+			const absPath = resolve(projectDir, filePath);
+			if (!isWithinProject(absPath)) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: path "${filePath}" is outside the project directory`,
+						},
+					],
+				};
+			}
 
 			const result = await executor.executeFile({
 				language,
@@ -201,7 +218,17 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			let label = source ?? "indexed content";
 
 			if (filePath) {
-				const absPath = resolve(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), filePath);
+				const absPath = resolve(projectDir, filePath);
+				if (!isWithinProject(absPath)) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Error: path "${filePath}" is outside the project directory`,
+							},
+						],
+					};
+				}
 				text = readFileSync(absPath, "utf-8");
 				label = source ?? filePath;
 			} else if (content) {
@@ -306,6 +333,37 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			source: z.string().optional().describe("Label for the indexed content"),
 		},
 		async ({ url, source }) => {
+			// SSRF protection: only allow http/https and block internal addresses
+			try {
+				const parsed = new URL(url);
+				if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+					return {
+						content: [{ type: "text" as const, text: "Error: only http/https URLs are allowed" }],
+					};
+				}
+				const hostname = parsed.hostname;
+				if (
+					hostname === "localhost" ||
+					hostname === "127.0.0.1" ||
+					hostname === "::1" ||
+					hostname === "0.0.0.0" ||
+					hostname.startsWith("10.") ||
+					hostname.startsWith("172.16.") ||
+					hostname.startsWith("192.168.") ||
+					hostname.startsWith("169.254.")
+				) {
+					return {
+						content: [
+							{ type: "text" as const, text: "Error: internal/private URLs are not allowed" },
+						],
+					};
+				}
+			} catch {
+				return {
+					content: [{ type: "text" as const, text: `Error: invalid URL "${url}"` }],
+				};
+			}
+
 			const label = source ?? url;
 
 			// Use executor to fetch and convert HTML to markdown in subprocess

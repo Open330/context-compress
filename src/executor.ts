@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
-import { debug, error as logError, warn } from "./logger.js";
+import { debug } from "./logger.js";
 import type { RuntimeMap } from "./runtime/index.js";
 import type { LanguagePlugin } from "./runtime/plugin.js";
 import type { ExecFileOptions, ExecOptions, ExecResult, Language } from "./types.js";
@@ -118,12 +118,12 @@ function smartTruncate(output: string, maxBytes: number): string {
 	const truncatedLines = lines.length - headEnd - (lines.length - tailStart);
 	const truncatedBytes = Buffer.byteLength(output) - headBytes - tailBytes;
 
-	const separator = `\n... [${truncatedLines} lines / ${formatSize(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
+	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
 
 	return headLines.join("\n") + separator + tailLines.join("\n");
 }
 
-function formatSize(bytes: number): string {
+export function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes}B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
 	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
@@ -251,11 +251,12 @@ export class SubprocessExecutor {
 	): Promise<ExecResult> {
 		return new Promise((resolve) => {
 			const hardCap = this.config.hardCapBytes;
-			let stdoutBuf = Buffer.alloc(0);
-			let stderrBuf = Buffer.alloc(0);
+			const stdoutChunks: Buffer[] = [];
+			const stderrChunks: Buffer[] = [];
 			let totalBytes = 0;
 			let killed = false;
 			let networkBytes: number | undefined;
+			let resolved = false;
 
 			const proc = spawn(cmd, args, {
 				cwd,
@@ -273,7 +274,7 @@ export class SubprocessExecutor {
 					if (proc.pid) killProcessTree(proc.pid);
 					return;
 				}
-				stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
+				stdoutChunks.push(chunk);
 			});
 
 			proc.stderr?.on("data", (chunk: Buffer) => {
@@ -283,16 +284,28 @@ export class SubprocessExecutor {
 					if (proc.pid) killProcessTree(proc.pid);
 					return;
 				}
-				stderrBuf = Buffer.concat([stderrBuf, chunk]);
+				stderrChunks.push(chunk);
 			});
 
 			proc.on("error", (err) => {
 				debug("Process error:", err.message);
+				if (!resolved) {
+					resolved = true;
+					resolve({
+						stdout: "",
+						stderr: err.message,
+						exitCode: 1,
+						truncated: false,
+						killed: false,
+					});
+				}
 			});
 
 			proc.on("close", (code) => {
-				let stdout = stdoutBuf.toString("utf-8");
-				let stderr = stderrBuf.toString("utf-8");
+				if (resolved) return;
+				resolved = true;
+				let stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+				let stderr = Buffer.concat(stderrChunks).toString("utf-8");
 
 				// Extract network bytes from JS/TS stderr marker
 				const netMatch = stderr.match(/__CM_NET__:(\d+)/);
@@ -302,7 +315,7 @@ export class SubprocessExecutor {
 				}
 
 				if (killed) {
-					stdout += `\n[output capped at ${formatSize(hardCap)} — process killed]`;
+					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
 				}
 
 				const truncated = Buffer.byteLength(stdout) > maxOutput;
@@ -342,7 +355,7 @@ export class SubprocessExecutor {
  */
 function wrapWithNetworkTracking(code: string): string {
 	const preamble =
-		"let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.clone();const b=await cl.arrayBuffer();__cm_net+=b.byteLength}catch{}return r};}";
+		"let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.headers.get('content-length');if(cl){__cm_net+=parseInt(cl,10)}else{const b=await r.clone().arrayBuffer();__cm_net+=b.byteLength}}catch{}return r};}";
 	const epilogue = `\nprocess.stderr.write('__CM_NET__:'+__cm_net+'\\n');`;
 
 	// Wrap in async IIFE
