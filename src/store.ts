@@ -1,7 +1,7 @@
-import Database from "better-sqlite3";
 import { readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { debug, warn } from "./logger.js";
 import { extractSnippet } from "./snippet.js";
 import type { Chunk, IndexResult, SearchHit, SearchResult, StoreStats } from "./types.js";
@@ -9,18 +9,108 @@ import type { Chunk, IndexResult, SearchHit, SearchResult, StoreStats } from "./
 const MAX_VOCABULARY = 10_000;
 
 const STOPWORDS = new Set([
-	"the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-	"her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
-	"new", "now", "old", "see", "way", "who", "did", "get", "got", "let",
-	"say", "she", "too", "use", "will", "with", "this", "that", "from",
-	"they", "been", "have", "many", "some", "them", "than", "each", "make",
-	"like", "just", "over", "such", "take", "into", "year", "your", "good",
-	"could", "would", "about", "which", "their", "there", "other", "after",
-	"should", "through", "also", "more", "most", "only", "very", "when",
-	"what", "then", "these", "those", "being", "does", "done", "both",
-	"same", "still", "while", "where", "here", "were", "much",
-	"update", "updates", "updated", "deps", "dev", "tests", "test",
-	"add", "added", "fix", "fixed", "run", "running", "using",
+	"the",
+	"and",
+	"for",
+	"are",
+	"but",
+	"not",
+	"you",
+	"all",
+	"can",
+	"had",
+	"her",
+	"was",
+	"one",
+	"our",
+	"out",
+	"has",
+	"his",
+	"how",
+	"its",
+	"may",
+	"new",
+	"now",
+	"old",
+	"see",
+	"way",
+	"who",
+	"did",
+	"get",
+	"got",
+	"let",
+	"say",
+	"she",
+	"too",
+	"use",
+	"will",
+	"with",
+	"this",
+	"that",
+	"from",
+	"they",
+	"been",
+	"have",
+	"many",
+	"some",
+	"them",
+	"than",
+	"each",
+	"make",
+	"like",
+	"just",
+	"over",
+	"such",
+	"take",
+	"into",
+	"year",
+	"your",
+	"good",
+	"could",
+	"would",
+	"about",
+	"which",
+	"their",
+	"there",
+	"other",
+	"after",
+	"should",
+	"through",
+	"also",
+	"more",
+	"most",
+	"only",
+	"very",
+	"when",
+	"what",
+	"then",
+	"these",
+	"those",
+	"being",
+	"does",
+	"done",
+	"both",
+	"same",
+	"still",
+	"while",
+	"where",
+	"here",
+	"were",
+	"much",
+	"update",
+	"updates",
+	"updated",
+	"deps",
+	"dev",
+	"tests",
+	"test",
+	"add",
+	"added",
+	"fix",
+	"fixed",
+	"run",
+	"running",
+	"using",
 ]);
 
 const HEADING_RE = /^(#{1,4})\s+(.+)$/;
@@ -35,7 +125,7 @@ const WORD_SPLIT_RE = /[^\p{L}\p{N}_-]+/u;
  * Removes special characters and wraps words in quotes with OR.
  */
 function sanitizeQuery(raw: string): string {
-	let q = raw.replace(FTS_SPECIAL_RE, " ").replace(FTS_OPERATORS_RE, " ").trim();
+	const q = raw.replace(FTS_SPECIAL_RE, " ").replace(FTS_OPERATORS_RE, " ").trim();
 	const words = q
 		.split(/\s+/)
 		.filter((w) => w.length >= 2)
@@ -166,10 +256,9 @@ export class ContentStore {
 			}
 
 			// Update code chunk count
-			this.db.prepare("UPDATE sources SET code_chunk_count = ? WHERE id = ?").run(
-				codeChunks,
-				sourceId,
-			);
+			this.db
+				.prepare("UPDATE sources SET code_chunk_count = ? WHERE id = ?")
+				.run(codeChunks, sourceId);
 
 			// Update vocabulary
 			this.updateVocabulary(content);
@@ -223,9 +312,7 @@ export class ContentStore {
 	}
 
 	private porterSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
-		const sourceFilter = source
-			? "AND sources.label LIKE '%' || ? || '%'"
-			: "";
+		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
 		const params: (string | number)[] = [sanitized];
 		if (source) params.push(source);
 		params.push(limit);
@@ -267,9 +354,7 @@ export class ContentStore {
 	}
 
 	private trigramSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
-		const sourceFilter = source
-			? "AND sources.label LIKE '%' || ? || '%'"
-			: "";
+		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
 		const params: (string | number)[] = [sanitized];
 		if (source) params.push(source);
 		params.push(limit);
@@ -357,9 +442,9 @@ export class ContentStore {
 
 		if (currentCount >= MAX_VOCABULARY) return;
 
-		const words = content.split(WORD_SPLIT_RE).filter(
-			(w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()),
-		);
+		const words = content
+			.split(WORD_SPLIT_RE)
+			.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
 
 		const unique = new Set(words.map((w) => w.toLowerCase()));
 		const insert = this.db.prepare("INSERT OR IGNORE INTO vocabulary (word) VALUES (?)");
@@ -434,9 +519,8 @@ export class ContentStore {
 		const sources = (
 			this.db.prepare("SELECT COUNT(*) as cnt FROM sources").get() as { cnt: number }
 		).cnt;
-		const chunks = (
-			this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number }
-		).cnt;
+		const chunks = (this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number })
+			.cnt;
 		const vocab = (
 			this.db.prepare("SELECT COUNT(*) as cnt FROM vocabulary").get() as { cnt: number }
 		).cnt;
@@ -470,8 +554,7 @@ function chunkMarkdown(content: string): Chunk[] {
 	function flush() {
 		const text = currentLines.join("\n").trim();
 		if (text.length > 0) {
-			const title =
-				headingStack.length > 0 ? headingStack.join(" > ") : text.slice(0, 80);
+			const title = headingStack.length > 0 ? headingStack.join(" > ") : text.slice(0, 80);
 			chunks.push({ title, content: text, hasCode });
 		}
 		currentLines = [];
@@ -530,11 +613,7 @@ function chunkPlainText(content: string, linesPerChunk = 20, overlap = 2): Chunk
 
 	// Strategy 1: Blank-line splitting (for naturally-sectioned output)
 	const sections = content.split(/\n\s*\n/);
-	if (
-		sections.length >= 3 &&
-		sections.length <= 200 &&
-		sections.every((s) => s.length < 5120)
-	) {
+	if (sections.length >= 3 && sections.length <= 200 && sections.every((s) => s.length < 5120)) {
 		return sections
 			.map((section) => {
 				const trimmed = section.trim();
@@ -586,7 +665,7 @@ export function cleanupStaleDbs(): number {
 			const match = file.match(dbPattern);
 			if (!match) continue;
 
-			const pid = parseInt(match[1], 10);
+			const pid = Number.parseInt(match[1], 10);
 			if (pid === process.pid) continue;
 
 			// Check if process is still alive

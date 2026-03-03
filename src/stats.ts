@@ -11,8 +11,7 @@ export class SessionTracker {
 
 	trackCall(toolName: string, responseBytes: number): void {
 		this.stats.calls[toolName] = (this.stats.calls[toolName] ?? 0) + 1;
-		this.stats.bytesReturned[toolName] =
-			(this.stats.bytesReturned[toolName] ?? 0) + responseBytes;
+		this.stats.bytesReturned[toolName] = (this.stats.bytesReturned[toolName] ?? 0) + responseBytes;
 	}
 
 	trackIndexed(bytes: number): void {
@@ -53,7 +52,9 @@ export class SessionTracker {
 		lines.push(`| Kept in sandbox | ${formatBytes(keptOut)} |`);
 		lines.push(`| Context consumed | ${formatBytes(totalReturned)} |`);
 		lines.push(`| Est. tokens | ~${estTokens.toLocaleString()} |`);
-		lines.push(`| **Savings ratio** | **${savingsRatio.toFixed(1)}x** (${reductionPct}% reduction) |`);
+		lines.push(
+			`| **Savings ratio** | **${savingsRatio.toFixed(1)}x** (${reductionPct}% reduction) |`,
+		);
 
 		if (totalCalls > 0) {
 			lines.push("\n## Per-Tool Breakdown\n");
@@ -62,7 +63,9 @@ export class SessionTracker {
 
 			for (const [name, calls] of Object.entries(snap.calls)) {
 				const bytes = snap.bytesReturned[name] ?? 0;
-				lines.push(`| ${name} | ${calls} | ${formatBytes(bytes)} | ~${Math.round(bytes / 4).toLocaleString()} |`);
+				lines.push(
+					`| ${name} | ${calls} | ${formatBytes(bytes)} | ~${Math.round(bytes / 4).toLocaleString()} |`,
+				);
 			}
 		}
 

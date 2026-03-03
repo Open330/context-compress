@@ -44,7 +44,7 @@ function buildEnv(config: Config): Record<string, string> {
 	// Copy safe base variables
 	for (const key of SAFE_ENV_KEYS) {
 		if (process.env[key]) {
-			env[key] = process.env[key]!;
+			env[key] = process.env[key] as string;
 		}
 	}
 
@@ -57,7 +57,7 @@ function buildEnv(config: Config): Record<string, string> {
 	// Opt-in passthrough (security fix: default is empty)
 	for (const key of config.passthroughEnvVars) {
 		if (process.env[key]) {
-			env[key] = process.env[key]!;
+			env[key] = process.env[key] as string;
 		}
 	}
 
@@ -297,7 +297,7 @@ export class SubprocessExecutor {
 				// Extract network bytes from JS/TS stderr marker
 				const netMatch = stderr.match(/__CM_NET__:(\d+)/);
 				if (netMatch) {
-					networkBytes = parseInt(netMatch[1], 10);
+					networkBytes = Number.parseInt(netMatch[1], 10);
 					stderr = stderr.replace(/__CM_NET__:\d+\n?/, "");
 				}
 
@@ -341,7 +341,8 @@ export class SubprocessExecutor {
  * Wrap JS/TS code with fetch interceptor for network tracking.
  */
 function wrapWithNetworkTracking(code: string): string {
-	const preamble = `let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.clone();const b=await cl.arrayBuffer();__cm_net+=b.byteLength}catch{}return r};}`;
+	const preamble =
+		"let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.clone();const b=await cl.arrayBuffer();__cm_net+=b.byteLength}catch{}return r};}";
 	const epilogue = `\nprocess.stderr.write('__CM_NET__:'+__cm_net+'\\n');`;
 
 	// Wrap in async IIFE

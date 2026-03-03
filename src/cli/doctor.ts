@@ -1,19 +1,17 @@
-import { accessSync, constants, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { constants, accessSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { SubprocessExecutor } from "../executor.js";
 import { loadConfig } from "../config.js";
+import { SubprocessExecutor } from "../executor.js";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function getVersion(): string {
 	try {
-		const pkg = JSON.parse(
-			readFileSync(resolve(__dirname, "..", "..", "package.json"), "utf-8"),
-		);
+		const pkg = JSON.parse(readFileSync(resolve(__dirname, "..", "..", "package.json"), "utf-8"));
 		return pkg.version ?? "unknown";
 	} catch {
 		return "unknown";
@@ -80,7 +78,9 @@ export async function doctor(): Promise<number> {
 	const settings = readSettings();
 	if (settings) {
 		const hooks = settings.hooks as Record<string, unknown[]> | undefined;
-		const preToolUse = hooks?.PreToolUse as Array<{ hooks?: Array<{ command?: string }> }> | undefined;
+		const preToolUse = hooks?.PreToolUse as
+			| Array<{ hooks?: Array<{ command?: string }> }>
+			| undefined;
 		if (preToolUse?.some((e) => e.hooks?.some((h) => h.command?.includes("pretooluse.mjs")))) {
 			console.log("  [PASS] PreToolUse hook configured");
 		} else {
@@ -105,9 +105,11 @@ export async function doctor(): Promise<number> {
 		const db = new Database(":memory:");
 		db.exec("CREATE VIRTUAL TABLE fts_test USING fts5(content)");
 		db.exec("INSERT INTO fts_test(content) VALUES ('hello world')");
-		const row = db.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as {
-			content: string;
-		} | undefined;
+		const row = db.prepare("SELECT * FROM fts_test WHERE fts_test MATCH 'hello'").get() as
+			| {
+					content: string;
+			  }
+			| undefined;
 		db.close();
 		if (row?.content === "hello world") {
 			console.log("  [PASS] FTS5 / better-sqlite3 works");

@@ -17,14 +17,17 @@ export async function uninstall(): Promise<void> {
 			const before = hooks.PreToolUse.length;
 			hooks.PreToolUse = (hooks.PreToolUse as Array<Record<string, unknown>>).filter((entry) => {
 				const entryHooks = entry.hooks as Array<{ command?: string }> | undefined;
-				return !entryHooks?.some((h) => h.command?.includes("context-compress") || h.command?.includes("pretooluse.mjs"));
+				return !entryHooks?.some(
+					(h) => h.command?.includes("context-compress") || h.command?.includes("pretooluse.mjs"),
+				);
 			});
 			if (hooks.PreToolUse.length === 0) {
+				// biome-ignore lint/performance/noDelete: removing key from JSON object
 				delete hooks.PreToolUse;
 			}
 			if (hooks.PreToolUse === undefined || hooks.PreToolUse.length < before) {
 				settings.hooks = hooks;
-				writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+				writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 				changes.push("Removed PreToolUse hooks from settings.json");
 			}
 		}
@@ -39,8 +42,8 @@ export async function uninstall(): Promise<void> {
 		const settings = JSON.parse(readFileSync(mcpPath, "utf-8"));
 		const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
 		if (mcpServers && "context-compress" in mcpServers) {
-			delete mcpServers["context-compress"];
-			writeFileSync(mcpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+			mcpServers["context-compress"] = undefined;
+			writeFileSync(mcpPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 			changes.push("Removed context-compress MCP server from settings");
 		}
 	} catch {
@@ -54,8 +57,8 @@ export async function uninstall(): Promise<void> {
 		const mcp = JSON.parse(readFileSync(mcpJson, "utf-8"));
 		const servers = mcp.mcpServers as Record<string, unknown> | undefined;
 		if (servers && "context-compress" in servers) {
-			delete servers["context-compress"];
-			writeFileSync(mcpJson, JSON.stringify(mcp, null, 2) + "\n", "utf-8");
+			servers["context-compress"] = undefined;
+			writeFileSync(mcpJson, `${JSON.stringify(mcp, null, 2)}\n`, "utf-8");
 			changes.push("Removed context-compress from .mcp.json");
 		}
 	} catch {
@@ -97,7 +100,5 @@ export async function uninstall(): Promise<void> {
 		console.log("  Nothing to clean up.");
 	}
 
-	console.log(
-		"\n  Uninstall complete. Restart Claude Code to apply changes.\n",
-	);
+	console.log("\n  Uninstall complete. Restart Claude Code to apply changes.\n");
 }

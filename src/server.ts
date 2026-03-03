@@ -13,8 +13,17 @@ import { ContentStore, cleanupStaleDbs } from "./store.js";
 import type { Language } from "./types.js";
 
 const LANGUAGES: [Language, ...Language[]] = [
-	"javascript", "typescript", "python", "shell", "ruby",
-	"go", "rust", "php", "perl", "r", "elixir",
+	"javascript",
+	"typescript",
+	"python",
+	"shell",
+	"ruby",
+	"go",
+	"rust",
+	"php",
+	"perl",
+	"r",
+	"elixir",
 ];
 
 function getVersion(): string {
@@ -61,8 +70,17 @@ export async function createServer(config: Config) {
 PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, pytest), git queries (git log, git diff), data processing, and ANY CLI command that may produce large output. Bash should only be used for file mutations, git writes, and navigation.`,
 		{
 			language: z.enum(LANGUAGES).describe("Runtime language"),
-			code: z.string().describe("Source code to execute. Use console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell), echo (PHP), fmt.Println (Go), or IO.puts (Elixir) to output a summary to context."),
-			intent: z.string().optional().describe("What you're looking for in the output. When provided and output is large (>5KB), indexes output into knowledge base and returns section titles + previews — not full content. Use search(queries: [...]) to retrieve specific sections."),
+			code: z
+				.string()
+				.describe(
+					"Source code to execute. Use console.log (JS/TS), print (Python/Ruby/Perl/R), echo (Shell), echo (PHP), fmt.Println (Go), or IO.puts (Elixir) to output a summary to context.",
+				),
+			intent: z
+				.string()
+				.optional()
+				.describe(
+					"What you're looking for in the output. When provided and output is large (>5KB), indexes output into knowledge base and returns section titles + previews — not full content. Use search(queries: [...]) to retrieve specific sections.",
+				),
 			timeout: z.number().default(30000).describe("Max execution time in ms"),
 		},
 		async ({ language, code, intent, timeout }) => {
@@ -93,7 +111,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				if (terms.length > 0) {
 					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
 				}
-				filtered += `\nUse search(queries: [...]) to retrieve full content of any section.`;
+				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
 				output = filtered;
 			}
 
@@ -112,7 +130,11 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 		{
 			path: z.string().describe("Absolute file path or relative to project root"),
 			language: z.enum(LANGUAGES).describe("Runtime language"),
-			code: z.string().describe("Code to process FILE_CONTENT. Print summary via console.log/print/echo/IO.puts."),
+			code: z
+				.string()
+				.describe(
+					"Code to process FILE_CONTENT. Print summary via console.log/print/echo/IO.puts.",
+				),
 			intent: z.string().optional().describe("What you're looking for in the output."),
 			timeout: z.number().default(30000).describe("Max execution time in ms"),
 		},
@@ -147,7 +169,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				if (terms.length > 0) {
 					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
 				}
-				filtered += `\nUse search(queries: [...]) to retrieve full content of any section.`;
+				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
 				output = filtered;
 			}
 
@@ -162,10 +184,16 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 	server.tool(
 		"index",
-		'Index documentation or knowledge content into a searchable BM25 knowledge base. Chunks markdown by headings (keeping code blocks intact) and stores in ephemeral FTS5 database. The full content does NOT stay in context — only a brief summary is returned.\n\nWHEN TO USE:\n- Documentation (API docs, framework guides, code examples)\n- README files, migration guides, changelog entries\n- Any content with code examples you may need to reference precisely\n\nAfter indexing, use \'search\' to retrieve specific sections on-demand.',
+		"Index documentation or knowledge content into a searchable BM25 knowledge base. Chunks markdown by headings (keeping code blocks intact) and stores in ephemeral FTS5 database. The full content does NOT stay in context — only a brief summary is returned.\n\nWHEN TO USE:\n- Documentation (API docs, framework guides, code examples)\n- README files, migration guides, changelog entries\n- Any content with code examples you may need to reference precisely\n\nAfter indexing, use 'search' to retrieve specific sections on-demand.",
 		{
-			content: z.string().optional().describe("Raw text/markdown to index. Provide this OR path, not both."),
-			path: z.string().optional().describe("File path to read and index (content never enters context)."),
+			content: z
+				.string()
+				.optional()
+				.describe("Raw text/markdown to index. Provide this OR path, not both."),
+			path: z
+				.string()
+				.optional()
+				.describe("File path to read and index (content never enters context)."),
 			source: z.string().optional().describe("Label for the indexed content"),
 		},
 		async ({ content, path: filePath, source }) => {
@@ -198,10 +226,15 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 	server.tool(
 		"search",
-		'Search indexed content. Pass ALL search questions as queries array in ONE call.\n\nTIPS: 2-4 specific terms per query. Use \'source\' to scope results.',
+		"Search indexed content. Pass ALL search questions as queries array in ONE call.\n\nTIPS: 2-4 specific terms per query. Use 'source' to scope results.",
 		{
-			queries: z.array(z.string()).describe("Array of search queries. Batch ALL questions in one call."),
-			source: z.string().optional().describe("Filter to a specific indexed source (partial match)."),
+			queries: z
+				.array(z.string())
+				.describe("Array of search queries. Batch ALL questions in one call."),
+			source: z
+				.string()
+				.optional()
+				.describe("Filter to a specific indexed source (partial match)."),
 			limit: z.number().default(3).describe("Results per query (default: 3)"),
 		},
 		async ({ queries, source, limit }) => {
@@ -216,12 +249,14 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			const callCount = searchCalls.length;
 
 			if (callCount > config.searchBlockAfter) {
-				const msg = "Too many search calls in quick succession. Use batch_execute instead to run commands and search in one call.";
+				const msg =
+					"Too many search calls in quick succession. Use batch_execute instead to run commands and search in one call.";
 				tracker.trackCall("search", Buffer.byteLength(msg));
 				return { content: [{ type: "text" as const, text: msg }] };
 			}
 
-			const effectiveLimit = callCount > config.searchReduceAfter ? 1 : Math.min(limit, config.searchLimit);
+			const effectiveLimit =
+				callCount > config.searchReduceAfter ? 1 : Math.min(limit, config.searchLimit);
 
 			const allResults: string[] = [];
 			let totalBytes = 0;
@@ -249,7 +284,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			if (callCount > config.searchReduceAfter) {
-				allResults.push(`\n⚠ Search rate limited (${callCount} calls in ${config.searchWindowMs / 1000}s). Results reduced to 1 per query.`);
+				allResults.push(
+					`\n⚠ Search rate limited (${callCount} calls in ${config.searchWindowMs / 1000}s). Results reduced to 1 per query.`,
+				);
 			}
 
 			const output = allResults.join("\n---\n\n");
@@ -315,11 +352,19 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 		"batch_execute",
 		"Execute multiple commands in ONE call, auto-index all output, and search with multiple queries. Returns search results directly — no follow-up calls needed.\n\nTHIS IS THE PRIMARY TOOL. Use this instead of multiple execute() calls.\n\nOne batch_execute call replaces 30+ execute calls + 10+ search calls.\nProvide all commands to run and all queries to search — everything happens in one round trip.",
 		{
-			commands: z.array(z.object({
-				label: z.string().describe("Section header for this command's output"),
-				command: z.string().describe("Shell command to execute"),
-			})).describe("Commands to execute as a batch."),
-			queries: z.array(z.string()).describe("Search queries to extract information from indexed output. Use 5-8 comprehensive queries."),
+			commands: z
+				.array(
+					z.object({
+						label: z.string().describe("Section header for this command's output"),
+						command: z.string().describe("Shell command to execute"),
+					}),
+				)
+				.describe("Commands to execute as a batch."),
+			queries: z
+				.array(z.string())
+				.describe(
+					"Search queries to extract information from indexed output. Use 5-8 comprehensive queries.",
+				),
 			timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
 		},
 		async ({ commands, queries, timeout }) => {

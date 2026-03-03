@@ -23,16 +23,7 @@ export async function setup(): Promise<void> {
 	}
 
 	// Step 3: Missing optional runtimes
-	const all = [
-		"python",
-		"ruby",
-		"go",
-		"rust",
-		"php",
-		"perl",
-		"r",
-		"elixir",
-	] as const;
+	const all = ["python", "ruby", "go", "rust", "php", "perl", "r", "elixir"] as const;
 	const missing = all.filter((lang) => !runtimes.has(lang));
 	if (missing.length > 0) {
 		console.log(`  Optional runtimes not found: ${missing.join(", ")}`);

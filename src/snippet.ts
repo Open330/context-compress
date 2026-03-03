@@ -52,10 +52,7 @@ interface Window {
  * Extract snippet windows around match positions.
  * Returns concatenated windows with ellipsis separators.
  */
-export function extractSnippet(
-	highlighted: string,
-	maxLen: number = DEFAULT_MAX_LEN,
-): string {
+export function extractSnippet(highlighted: string, maxLen: number = DEFAULT_MAX_LEN): string {
 	const positions = positionsFromHighlight(highlighted);
 	const clean = stripMarkers(highlighted);
 

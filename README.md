@@ -19,27 +19,11 @@ A context-aware **MCP server** for [Claude Code](https://claude.ai/claude-code) 
 
 ## Quickstart for Agents
 
-<div><img src="https://quickstart-for-agents.vercel.app/api/header.svg?theme=claude-code&title=Install+and+configure+context-compress&mascot=thinking&lang=MCP" width="100%" /></div>
-
 ```
-Install context-compress — a context-aware MCP server that compresses tool output
-for Claude Code. It keeps raw data in sandboxed subprocesses so only concise
-summaries enter the context window. Supports 11 languages (JS, TS, Python, Shell,
-Ruby, Go, Rust, PHP, Perl, R, Elixir) with FTS5 search and smart truncation.
-
-Steps:
-1. Run: npm install -g context-compress
-2. Run: claude mcp add context-compress -- node $(which context-compress)
-3. Run: context-compress doctor   # verify runtimes, hooks, FTS5
-4. Optionally create .context-compress.json with:
-   { "passthroughEnvVars": ["GH_TOKEN"], "debug": false }
-
-After setup, the PreToolUse hook auto-redirects data-fetching tools through
-the sandbox. Use execute() instead of Bash for large outputs, execute_file()
-instead of Read for large files, and fetch_and_index() instead of WebFetch.
+npm install -g context-compress && claude mcp add context-compress -- node $(which context-compress)
 ```
 
-<div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&tokens=4.2k&model=Opus+4.6&project=context-compress" width="100%" /></div>
+MCP server that compresses tool output for Claude Code — raw data stays in sandboxed subprocesses, only concise summaries enter your context window.
 
 ---
 

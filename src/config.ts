@@ -76,8 +76,7 @@ function loadEnvConfig(): Partial<Config> {
 		partial.debug = true;
 	}
 	if (process.env.CONTEXT_COMPRESS_PASSTHROUGH_ENV) {
-		partial.passthroughEnvVars = process.env.CONTEXT_COMPRESS_PASSTHROUGH_ENV
-			.split(",")
+		partial.passthroughEnvVars = process.env.CONTEXT_COMPRESS_PASSTHROUGH_ENV.split(",")
 			.map((s) => s.trim())
 			.filter(Boolean);
 	}

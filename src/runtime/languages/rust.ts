@@ -26,10 +26,7 @@ export const rustPlugin: LanguagePlugin = {
 		const escaped = JSON.stringify(filePath);
 		const preamble = `use std::fs;\nlet file_content_path = ${escaped};\nlet file_content = fs::read_to_string(file_content_path).unwrap();\n`;
 		if (code.includes("fn main")) {
-			return code.replace(
-				/fn main\s*\(\s*\)\s*\{/,
-				`fn main() {\n${preamble}`,
-			);
+			return code.replace(/fn main\s*\(\s*\)\s*\{/, `fn main() {\n${preamble}`);
 		}
 		return `fn main() {\n${preamble}${code}\n}`;
 	},
