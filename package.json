@@ -8,7 +8,7 @@
     "context-compress": "dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc && node esbuild.config.ts",
+    "build": "tsc && node esbuild.config.mjs",
     "build:hooks": "esbuild src/hooks/pretooluse.ts --bundle --platform=node --format=esm --outfile=hooks/pretooluse.mjs --target=node18",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
