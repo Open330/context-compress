@@ -22,12 +22,16 @@ A context-aware **MCP server** for [Claude Code](https://claude.ai/claude-code) 
 <div><img src="https://quickstart-for-agents.vercel.app/api/header.svg?theme=claude-code&title=context-compress&lang=Agents&mascot=thinking" width="100%" /></div>
 
 ```
-npm install -g context-compress && claude mcp add context-compress -- node $(which context-compress)
+Install context-compress — an MCP server that compresses tool output for Claude Code.
+Raw data stays in sandboxed subprocesses, only concise summaries enter your context window.
+Saves ~99% of tokens on large outputs while keeping everything searchable via FTS5.
+
+npm install -g context-compress
+claude mcp add context-compress -- node $(which context-compress)
+context-compress doctor
 ```
 
 <div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&project=context-compress" width="100%" /></div>
-
-MCP server that compresses tool output for Claude Code — raw data stays in sandboxed subprocesses, only concise summaries enter your context window.
 
 ---
 
