@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
+export type CompressionLevel = "normal" | "compact" | "ultra";
+
 export interface Config {
 	/** Environment variables to pass through to subprocesses (default: none) */
 	passthroughEnvVars: string[];
@@ -34,6 +36,8 @@ export interface Config {
 	searchReduceAfter: number;
 	/** Number of search calls before blocking */
 	searchBlockAfter: number;
+	/** Compression level: normal (default), compact (shorter labels), ultra (minimal output) */
+	compressionLevel: CompressionLevel;
 }
 
 const DEFAULTS: Config = {
@@ -52,6 +56,26 @@ const DEFAULTS: Config = {
 	searchWindowMs: 60_000,
 	searchReduceAfter: 3,
 	searchBlockAfter: 8,
+	compressionLevel: "normal",
+};
+
+/** Overrides applied per compression level */
+const LEVEL_OVERRIDES: Record<CompressionLevel, Partial<Config>> = {
+	normal: {},
+	compact: {
+		maxOutputBytes: 51_200,
+		searchMaxBytes: 20_480,
+		batchMaxBytes: 40_960,
+		searchLimit: 2,
+		intentSearchThreshold: 3_000,
+	},
+	ultra: {
+		maxOutputBytes: 25_600,
+		searchMaxBytes: 10_240,
+		batchMaxBytes: 20_480,
+		searchLimit: 1,
+		intentSearchThreshold: 2_000,
+	},
 };
 
 const ConfigSchema = z.object({
@@ -70,6 +94,7 @@ const ConfigSchema = z.object({
 	searchWindowMs: z.number().int().positive().optional(),
 	searchReduceAfter: z.number().int().nonnegative().optional(),
 	searchBlockAfter: z.number().int().positive().optional(),
+	compressionLevel: z.enum(["normal", "compact", "ultra"]).optional(),
 });
 
 function parseIntEnv(key: string): number | undefined {
@@ -154,6 +179,11 @@ function loadEnvConfig(): Partial<Config> {
 	const intentThreshold = parseIntEnv("CONTEXT_COMPRESS_INTENT_SEARCH_THRESHOLD");
 	if (intentThreshold !== undefined) partial.intentSearchThreshold = intentThreshold;
 
+	const level = process.env.CONTEXT_COMPRESS_LEVEL;
+	if (level === "normal" || level === "compact" || level === "ultra") {
+		partial.compressionLevel = level;
+	}
+
 	return partial;
 }
 
@@ -165,8 +195,17 @@ export function loadConfig(projectDir?: string): Config {
 	const fileConfig = loadFileConfig(projectDir);
 	const envConfig = loadEnvConfig();
 
-	// Priority: ENV > file > defaults
-	_config = { ...DEFAULTS, ...fileConfig, ...envConfig };
+	// Priority: ENV > file > level overrides > defaults
+	const merged = { ...DEFAULTS, ...fileConfig, ...envConfig };
+	const levelOverrides = LEVEL_OVERRIDES[merged.compressionLevel];
+	// Level overrides only apply to values not explicitly set by user
+	for (const [key, value] of Object.entries(levelOverrides)) {
+		const k = key as keyof Config;
+		if (!(k in fileConfig) && !(k in envConfig)) {
+			(merged as Record<string, unknown>)[k] = value;
+		}
+	}
+	_config = merged;
 	return _config;
 }
 

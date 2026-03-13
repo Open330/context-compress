@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { Config } from "./config.js";
+import type { CompressionLevel, Config } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
 import { debug } from "./logger.js";
 import { isPrivateHost } from "./network.js";
@@ -31,6 +31,24 @@ function getVersion(): string {
 	} catch {
 		return "1.0.0";
 	}
+}
+
+/** Shorten labels based on compression level */
+function compactLabel(normal: string, level: CompressionLevel): string {
+	if (level === "ultra") {
+		// Ultra: strip markdown, minimize verbiage
+		return normal
+			.replace(/\*\*/g, "")
+			.replace(/Use search\(queries: \[\.\.\.]\) to retrieve.*$/gm, "→ search() for more")
+			.replace(/Searchable terms: .+$/gm, "");
+	}
+	if (level === "compact") {
+		return normal.replace(
+			/Use search\(queries: \[\.\.\.]\) to retrieve full content of any section\./,
+			"→ search() for details",
+		);
+	}
+	return normal;
 }
 
 export async function createServer(config: Config) {
@@ -116,11 +134,11 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				for (const hit of searchResults.results) {
 					filtered += `  - **${hit.title}**: ${hit.snippet.slice(0, 200)}\n`;
 				}
-				if (terms.length > 0) {
+				if (terms.length > 0 && config.compressionLevel !== "ultra") {
 					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
 				}
 				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
-				output = filtered;
+				output = compactLabel(filtered, config.compressionLevel);
 			}
 
 			const responseBytes = Buffer.byteLength(output);
@@ -184,11 +202,11 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				for (const hit of searchResults.results) {
 					filtered += `  - **${hit.title}**: ${hit.snippet.slice(0, 200)}\n`;
 				}
-				if (terms.length > 0) {
+				if (terms.length > 0 && config.compressionLevel !== "ultra") {
 					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
 				}
 				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
-				output = filtered;
+				output = compactLabel(filtered, config.compressionLevel);
 			}
 
 			const responseBytes = Buffer.byteLength(output);
@@ -508,12 +526,97 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 	server.tool(
 		"stats",
-		"Returns context consumption statistics for the current session. Shows total bytes returned to context, breakdown by tool, call counts, estimated token usage, and context savings ratio.",
+		"Returns context consumption statistics for the current session. Shows total bytes returned to context, breakdown by tool, call counts, estimated token usage, context savings ratio, and visual charts.",
 		{},
 		async () => {
 			const report = tracker.formatReport();
 			tracker.trackCall("stats", Buffer.byteLength(report));
 			return { content: [{ type: "text" as const, text: report }] };
+		},
+	);
+
+	// ─── Tool: discover ─────────────────────────────────────
+
+	server.tool(
+		"discover",
+		"Shows what's in the knowledge base and suggests optimization opportunities. Lists all indexed sources, chunk counts, searchable terms, and recommends next actions. Use this to understand what data is available for search.",
+		{},
+		async () => {
+			const storeStats = store.getStats();
+			const snap = tracker.getSnapshot();
+			const lines: string[] = [];
+
+			lines.push("## Knowledge Base Discovery\n");
+
+			if (storeStats.totalSources === 0) {
+				lines.push("No content indexed yet. Use these tools to build the knowledge base:\n");
+				lines.push("- `batch_execute` — run commands and auto-index output");
+				lines.push("- `execute` with `intent` — auto-indexes large output");
+				lines.push("- `index` — index documentation or files");
+				lines.push("- `fetch_and_index` — fetch and index web pages");
+			} else {
+				lines.push("| Metric | Value |");
+				lines.push("|--------|-------|");
+				lines.push(`| Indexed sources | ${storeStats.totalSources} |`);
+				lines.push(`| Total chunks | ${storeStats.totalChunks} |`);
+				lines.push(`| Vocabulary size | ${storeStats.vocabularySize} |`);
+				lines.push(
+					`| Trigram index | ${storeStats.hasTrigramTable ? "active" : "lazy (not yet needed)"} |`,
+				);
+
+				// List indexed sources
+				const sources = store.listSources();
+				if (sources.length > 0) {
+					lines.push("\n### Indexed Sources\n");
+					for (const src of sources) {
+						lines.push(
+							`- **${src.label}** — ${src.chunkCount} chunks${src.codeChunks > 0 ? ` (${src.codeChunks} with code)` : ""}`,
+						);
+					}
+				}
+
+				// Show top searchable terms
+				const terms = store.getDistinctiveTerms();
+				if (terms.length > 0) {
+					lines.push("\n### Top Searchable Terms\n");
+					lines.push(terms.slice(0, 20).join(", "));
+				}
+			}
+
+			// Optimization suggestions
+			lines.push("\n### Optimization Suggestions\n");
+			const totalCalls = Object.values(snap.calls).reduce((a, b) => a + b, 0);
+
+			if (totalCalls === 0) {
+				lines.push("- Start by using `batch_execute` to run multiple commands at once");
+			} else {
+				const searchCalls = snap.calls.search ?? 0;
+				const executeCalls = snap.calls.execute ?? 0;
+				const batchCalls = snap.calls.batch_execute ?? 0;
+
+				if (executeCalls > 3 && batchCalls === 0) {
+					lines.push(
+						"- **Use batch_execute** — you've made multiple execute calls that could be batched into one",
+					);
+				}
+				if (searchCalls > 5) {
+					lines.push("- **Batch your searches** — pass multiple queries in a single search() call");
+				}
+				if (storeStats.totalChunks > 50) {
+					lines.push(
+						"- **Use source filtering** — scope searches with `source` parameter for faster, targeted results",
+					);
+				}
+				if (storeStats.totalSources === 0 && totalCalls > 2) {
+					lines.push(
+						"- **Index more content** — use `intent` parameter in execute calls to auto-index large output",
+					);
+				}
+			}
+
+			const output = lines.join("\n");
+			tracker.trackCall("discover", Buffer.byteLength(output));
+			return { content: [{ type: "text" as const, text: output }] };
 		},
 	);
 

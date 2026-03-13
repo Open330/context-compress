@@ -81,6 +81,110 @@ function killProcessTree(pid: number): void {
 }
 
 /**
+ * Deduplicate consecutive repeated lines.
+ * Replaces N identical consecutive lines with "line (×N)".
+ */
+function deduplicateLines(output: string): string {
+	const lines = output.split("\n");
+	if (lines.length < 3) return output;
+
+	const result: string[] = [];
+	let prevLine = lines[0];
+	let count = 1;
+
+	for (let i = 1; i < lines.length; i++) {
+		if (lines[i] === prevLine && prevLine.trim().length > 0) {
+			count++;
+		} else {
+			if (count > 2) {
+				result.push(prevLine);
+				result.push(`  ... (×${count} identical lines)`);
+			} else {
+				for (let j = 0; j < count; j++) result.push(prevLine);
+			}
+			prevLine = lines[i];
+			count = 1;
+		}
+	}
+	// Flush last group
+	if (count > 2) {
+		result.push(prevLine);
+		result.push(`  ... (×${count} identical lines)`);
+	} else {
+		for (let j = 0; j < count; j++) result.push(prevLine);
+	}
+
+	return result.join("\n");
+}
+
+/**
+ * Group similar error/warning lines by pattern.
+ * Collapses "ERROR: foo at line 1", "ERROR: foo at line 2" → "ERROR: foo (×2 occurrences, lines: 1, 2)"
+ */
+function groupErrorLines(output: string): string {
+	const lines = output.split("\n");
+	if (lines.length < 5) return output;
+
+	// Detect error/warning patterns
+	const ERROR_RE =
+		/^(.*?(?:error|warning|Error|Warning|ERR|WARN)[:\s])\s*(.+?)(?:\s+(?:at|in|on)\s+(?:line\s+)?(\d+))?$/i;
+	const errorGroups = new Map<string, { message: string; locations: string[]; count: number }>();
+	const resultLines: string[] = [];
+	let groupedCount = 0;
+
+	for (const line of lines) {
+		const match = line.match(ERROR_RE);
+		if (match) {
+			const prefix = match[1].trim();
+			const msg = match[2].trim();
+			const key = `${prefix}|${msg}`;
+
+			const existing = errorGroups.get(key);
+			if (existing) {
+				existing.count++;
+				if (match[3]) existing.locations.push(match[3]);
+				groupedCount++;
+				continue;
+			}
+			errorGroups.set(key, {
+				message: `${prefix} ${msg}`,
+				locations: match[3] ? [match[3]] : [],
+				count: 1,
+			});
+			groupedCount++;
+			continue;
+		}
+		resultLines.push(line);
+	}
+
+	// Only apply grouping if it actually reduces output
+	if (groupedCount < 4 || errorGroups.size === groupedCount) return output;
+
+	const grouped: string[] = [];
+	for (const [, group] of errorGroups) {
+		if (group.count === 1) {
+			grouped.push(
+				group.message + (group.locations.length ? ` at line ${group.locations[0]}` : ""),
+			);
+		} else {
+			let line = `${group.message} (×${group.count})`;
+			if (group.locations.length > 0) {
+				line += ` [lines: ${group.locations.join(", ")}]`;
+			}
+			grouped.push(line);
+		}
+	}
+
+	if (grouped.length > 0) {
+		resultLines.push("");
+		resultLines.push(`── Grouped errors/warnings (${groupedCount} → ${errorGroups.size}) ──`);
+		resultLines.push(...grouped);
+	}
+
+	return resultLines.join("\n");
+}
+
+/**
  * Smart truncation: keep 60% head + 40% tail, snapping to line boundaries.
  */
 function smartTruncate(output: string, maxBytes: number): string {
@@ -120,6 +224,8 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	return headLines.join("\n") + separator + tailLines.join("\n");
 }
+
+export { deduplicateLines, groupErrorLines };
 
 export function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes}B`;
@@ -315,6 +421,10 @@ export class SubprocessExecutor {
 				if (killed) {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
 				}
+
+				// Post-process: dedup repeated lines + group similar errors
+				stdout = deduplicateLines(stdout);
+				stdout = groupErrorLines(stdout);
 
 				const truncated = Buffer.byteLength(stdout) > maxOutput;
 				if (truncated) {

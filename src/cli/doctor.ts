@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants, accessSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -90,11 +91,32 @@ export async function doctor(): Promise<number> {
 		console.log("  [WARN] Could not read ~/.claude/settings.json");
 	}
 
-	// 4. Hook script
+	// 4. Hook script + integrity
 	const hookPath = resolve(__dirname, "..", "..", "hooks", "pretooluse.mjs");
 	try {
 		accessSync(hookPath, constants.R_OK);
 		console.log("  [PASS] Hook script exists");
+
+		// SHA-256 integrity check
+		const hookContent = readFileSync(hookPath);
+		const hash = createHash("sha256").update(hookContent).digest("hex");
+		const checksumPath = resolve(__dirname, "..", "..", "hooks", "pretooluse.sha256");
+		try {
+			const expectedHash = readFileSync(checksumPath, "utf-8").trim();
+			if (hash === expectedHash) {
+				console.log(`  [PASS] Hook integrity: SHA-256 verified (${hash.slice(0, 12)}...)`);
+			} else {
+				console.log("  [WARN] Hook integrity: SHA-256 MISMATCH");
+				console.log(`         Expected: ${expectedHash.slice(0, 16)}...`);
+				console.log(`         Got:      ${hash.slice(0, 16)}...`);
+				console.log("         Hook may have been modified. Rebuild with: npm run build:hooks");
+			}
+		} catch {
+			// No checksum file yet — show hash for reference
+			console.log(
+				`  [INFO] Hook SHA-256: ${hash.slice(0, 12)}... (no checksum file to verify against)`,
+			);
+		}
 	} catch {
 		console.log(`  [WARN] Hook script not found at ${hookPath}`);
 	}

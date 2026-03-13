@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc && node esbuild.config.mjs",
-    "build:hooks": "esbuild src/hooks/pretooluse.ts --bundle --platform=node --format=esm --outfile=hooks/pretooluse.mjs --target=node18",
+    "build:hooks": "esbuild src/hooks/pretooluse.ts --bundle --platform=node --format=esm --outfile=hooks/pretooluse.mjs --target=node18 && node -e \"const{createHash}=require('crypto'),{readFileSync,writeFileSync}=require('fs');const h=createHash('sha256').update(readFileSync('hooks/pretooluse.mjs')).digest('hex');writeFileSync('hooks/pretooluse.sha256',h+'\\n')\"",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/",

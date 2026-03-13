@@ -520,6 +520,36 @@ export class ContentStore {
 	}
 
 	/**
+	 * List all indexed sources with metadata.
+	 */
+	listSources(): Array<{
+		id: number;
+		label: string;
+		chunkCount: number;
+		codeChunks: number;
+		indexedAt: string;
+	}> {
+		const rows = this.db
+			.prepare(
+				"SELECT id, label, chunk_count, code_chunk_count, indexed_at FROM sources ORDER BY indexed_at DESC",
+			)
+			.all() as Array<{
+			id: number;
+			label: string;
+			chunk_count: number;
+			code_chunk_count: number;
+			indexed_at: string;
+		}>;
+		return rows.map((row) => ({
+			id: row.id,
+			label: row.label,
+			chunkCount: row.chunk_count,
+			codeChunks: row.code_chunk_count,
+			indexedAt: row.indexed_at,
+		}));
+	}
+
+	/**
 	 * Get store statistics.
 	 */
 	getStats(): StoreStats {

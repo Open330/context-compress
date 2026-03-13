@@ -1,6 +1,21 @@
 import { formatBytes } from "./executor.js";
 import type { SessionStats } from "./types.js";
 
+const BAR_WIDTH = 20;
+
+/** Render an ASCII bar: [████████░░░░] 80% */
+function asciiBar(ratio: number, width = BAR_WIDTH): string {
+	const filled = Math.round(ratio * width);
+	const empty = width - filled;
+	return `[${"█".repeat(filled)}${"░".repeat(empty)}] ${(ratio * 100).toFixed(0)}%`;
+}
+
+/** Format token count with cost estimate ($3/MTok input for Claude) */
+function tokenCost(tokens: number): string {
+	const cost = (tokens / 1_000_000) * 3;
+	return cost >= 0.01 ? `~$${cost.toFixed(2)}` : "<$0.01";
+}
+
 export class SessionTracker {
 	private stats: SessionStats = {
 		calls: {},
@@ -41,6 +56,7 @@ export class SessionTracker {
 		const reductionPct =
 			totalProcessed > 0 ? ((1 - totalReturned / totalProcessed) * 100).toFixed(1) : "0.0";
 		const estTokens = Math.round(totalReturned / 4);
+		const estTokensAvoided = Math.round(keptOut / 4);
 
 		const lines: string[] = [];
 
@@ -52,20 +68,36 @@ export class SessionTracker {
 		lines.push(`| Total data processed | ${formatBytes(totalProcessed)} |`);
 		lines.push(`| Kept in sandbox | ${formatBytes(keptOut)} |`);
 		lines.push(`| Context consumed | ${formatBytes(totalReturned)} |`);
-		lines.push(`| Est. tokens | ~${estTokens.toLocaleString()} |`);
+		lines.push(`| Est. tokens used | ~${estTokens.toLocaleString()} (${tokenCost(estTokens)}) |`);
+		lines.push(
+			`| Est. tokens saved | ~${estTokensAvoided.toLocaleString()} (${tokenCost(estTokensAvoided)}) |`,
+		);
 		lines.push(
 			`| **Savings ratio** | **${savingsRatio.toFixed(1)}x** (${reductionPct}% reduction) |`,
 		);
 
+		// Visual savings bar
+		if (totalProcessed > 0) {
+			const savingsBar = asciiBar(keptOut / totalProcessed);
+			lines.push(`\n**Context savings:** ${savingsBar}`);
+			lines.push(
+				`  Sandbox: ${formatBytes(keptOut)} kept out | Context: ${formatBytes(totalReturned)} entered`,
+			);
+		}
+
 		if (totalCalls > 0) {
 			lines.push("\n## Per-Tool Breakdown\n");
-			lines.push("| Tool | Calls | Context bytes | Est. tokens |");
-			lines.push("|------|-------|--------------|-------------|");
+
+			// Find max bytes for bar scaling
+			const maxBytes = Math.max(...Object.values(snap.bytesReturned));
 
 			for (const [name, calls] of Object.entries(snap.calls)) {
 				const bytes = snap.bytesReturned[name] ?? 0;
+				const tokens = Math.round(bytes / 4);
+				const barRatio = maxBytes > 0 ? bytes / maxBytes : 0;
+				const bar = "█".repeat(Math.max(1, Math.round(barRatio * 15)));
 				lines.push(
-					`| ${name} | ${calls} | ${formatBytes(bytes)} | ~${Math.round(bytes / 4).toLocaleString()} |`,
+					`  ${name.padEnd(16)} ${String(calls).padStart(3)} calls  ${bar} ${formatBytes(bytes)} (~${tokens.toLocaleString()} tok)`,
 				);
 			}
 		}
