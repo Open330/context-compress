@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { loadConfig, resetConfig } from "../../src/config.js";
-import { SubprocessExecutor } from "../../src/executor.js";
+import { SubprocessExecutor, deduplicateLines, groupErrorLines } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime/index.js";
 
 const ORIGINAL_HOME = process.env.HOME;
@@ -142,4 +142,103 @@ describe("SubprocessExecutor", () => {
 			assert.match(result.stdout, /missing/);
 		},
 	);
+});
+
+describe("deduplicateLines", () => {
+	it("collapses 3+ identical consecutive lines", () => {
+		const input = ["aaa", "aaa", "aaa", "aaa"].join("\n");
+		const result = deduplicateLines(input);
+		assert.ok(result.includes("(×4 identical lines)"));
+		// The original line should appear once
+		const lines = result.split("\n");
+		assert.strictEqual(lines.filter((l) => l === "aaa").length, 1);
+	});
+
+	it("does not collapse exactly 2 identical consecutive lines", () => {
+		const input = ["aaa", "aaa", "bbb"].join("\n");
+		const result = deduplicateLines(input);
+		assert.ok(!result.includes("×"));
+		assert.strictEqual(result, input);
+	});
+
+	it("returns input as-is when fewer than 3 lines", () => {
+		const one = "single line";
+		assert.strictEqual(deduplicateLines(one), one);
+
+		const two = "first\nsecond";
+		assert.strictEqual(deduplicateLines(two), two);
+	});
+
+	it("handles mixed runs of duplicates and unique lines", () => {
+		const input = [
+			"unique1",
+			"dup",
+			"dup",
+			"dup",
+			"dup",
+			"unique2",
+			"another",
+			"another",
+			"unique3",
+		].join("\n");
+		const result = deduplicateLines(input);
+		// "dup" run should be collapsed
+		assert.ok(result.includes("(×4 identical lines)"));
+		// "another" run (only 2) should NOT be collapsed
+		assert.ok(!result.includes("×2"));
+		// unique lines preserved
+		assert.ok(result.includes("unique1"));
+		assert.ok(result.includes("unique2"));
+		assert.ok(result.includes("unique3"));
+	});
+});
+
+describe("groupErrorLines", () => {
+	it("groups multiple similar error lines with count", () => {
+		const input = [
+			"some preamble",
+			"Error: unused variable at line 10",
+			"Error: unused variable at line 20",
+			"Error: unused variable at line 30",
+			"Error: unused variable at line 40",
+			"Error: unused variable at line 50",
+		].join("\n");
+		const result = groupErrorLines(input);
+		// Should contain grouped output with a count
+		assert.ok(result.includes("×5"));
+		assert.ok(result.includes("Grouped errors/warnings"));
+	});
+
+	it("returns input as-is when fewer than 5 lines", () => {
+		const input = ["Error: a", "Error: b", "Error: c"].join("\n");
+		const result = groupErrorLines(input);
+		assert.strictEqual(result, input);
+	});
+
+	it("returns input as-is when there are no error patterns", () => {
+		const input = [
+			"line one",
+			"line two",
+			"line three",
+			"line four",
+			"line five",
+			"line six",
+		].join("\n");
+		const result = groupErrorLines(input);
+		assert.strictEqual(result, input);
+	});
+
+	it("returns input as-is when grouped count is below threshold", () => {
+		const input = [
+			"line one",
+			"line two",
+			"line three",
+			"Error: something at line 5",
+			"Error: other thing at line 10",
+			"line six",
+		].join("\n");
+		const result = groupErrorLines(input);
+		// Only 2 error lines grouped → below threshold of 4
+		assert.strictEqual(result, input);
+	});
 });

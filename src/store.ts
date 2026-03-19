@@ -599,6 +599,11 @@ function chunkMarkdown(content: string): Chunk[] {
 		currentLines.push(line);
 	}
 
+	if (inFence) {
+		debug("Warning: unclosed code fence detected during markdown chunking");
+		hasCode = true;
+	}
+
 	flush();
 	return chunks;
 }
@@ -619,7 +624,7 @@ function chunkPlainText(content: string, linesPerChunk = 20, overlap = 2): Chunk
 				return {
 					title: trimmed.split("\n")[0].slice(0, 80),
 					content: trimmed,
-					hasCode: FENCE_RE.test(trimmed),
+					hasCode: /`{3,}/.test(trimmed),
 				};
 			})
 			.filter(Boolean) as Chunk[];

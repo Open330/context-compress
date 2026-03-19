@@ -221,19 +221,44 @@ export function loadConfig(projectDir?: string): Config {
 		}
 	}
 
-	// Sanity checks on final config
-	merged.maxOutputBytes = Math.max(merged.maxOutputBytes, 1024); // minimum 1KB
-	merged.hardCapBytes = Math.max(merged.hardCapBytes, merged.maxOutputBytes);
-	merged.intentSearchThreshold = Math.max(merged.intentSearchThreshold, 0);
-	merged.searchLimit = Math.max(merged.searchLimit, 1);
-	merged.searchWindowMs = Math.max(merged.searchWindowMs, 1000);
-	merged.searchReduceAfter = Math.max(merged.searchReduceAfter, 1);
-	merged.searchBlockAfter = Math.max(
-		merged.searchBlockAfter,
-		merged.searchReduceAfter + 1,
-	);
-	merged.searchMaxBytes = Math.max(merged.searchMaxBytes, 1024);
-	merged.batchMaxBytes = Math.max(merged.batchMaxBytes, 1024);
+	// Sanity checks on final config (log when values are clamped)
+	if (merged.maxOutputBytes < 1024) {
+		console.error(`[context-compress] Config: maxOutputBytes clamped from ${merged.maxOutputBytes} to 1024`);
+		merged.maxOutputBytes = 1024;
+	}
+	if (merged.hardCapBytes < merged.maxOutputBytes) {
+		console.error(`[context-compress] Config: hardCapBytes clamped from ${merged.hardCapBytes} to ${merged.maxOutputBytes}`);
+		merged.hardCapBytes = merged.maxOutputBytes;
+	}
+	if (merged.intentSearchThreshold < 0) {
+		console.error(`[context-compress] Config: intentSearchThreshold clamped from ${merged.intentSearchThreshold} to 0`);
+		merged.intentSearchThreshold = 0;
+	}
+	if (merged.searchLimit < 1) {
+		console.error(`[context-compress] Config: searchLimit clamped from ${merged.searchLimit} to 1`);
+		merged.searchLimit = 1;
+	}
+	if (merged.searchWindowMs < 1000) {
+		console.error(`[context-compress] Config: searchWindowMs clamped from ${merged.searchWindowMs} to 1000`);
+		merged.searchWindowMs = 1000;
+	}
+	if (merged.searchReduceAfter < 1) {
+		console.error(`[context-compress] Config: searchReduceAfter clamped from ${merged.searchReduceAfter} to 1`);
+		merged.searchReduceAfter = 1;
+	}
+	if (merged.searchBlockAfter < merged.searchReduceAfter + 1) {
+		const minVal = merged.searchReduceAfter + 1;
+		console.error(`[context-compress] Config: searchBlockAfter clamped from ${merged.searchBlockAfter} to ${minVal}`);
+		merged.searchBlockAfter = minVal;
+	}
+	if (merged.searchMaxBytes < 1024) {
+		console.error(`[context-compress] Config: searchMaxBytes clamped from ${merged.searchMaxBytes} to 1024`);
+		merged.searchMaxBytes = 1024;
+	}
+	if (merged.batchMaxBytes < 1024) {
+		console.error(`[context-compress] Config: batchMaxBytes clamped from ${merged.batchMaxBytes} to 1024`);
+		merged.batchMaxBytes = 1024;
+	}
 
 	// dbDir implies persistDb
 	if (merged.dbDir) merged.persistDb = true;

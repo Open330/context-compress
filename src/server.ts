@@ -113,11 +113,13 @@ export async function createServer(config: Config) {
 
 	const executor = new SubprocessExecutor(runtimes, config);
 	let store: ContentStore;
+	let dbFallback = false;
 	try {
 		store = new ContentStore({ persistDb: config.persistDb, dbDir: config.dbDir });
 	} catch (e) {
 		debug("Failed to create DB, falling back to in-memory:", e);
 		store = new ContentStore(":memory:");
+		dbFallback = true;
 	}
 	const tracker = new SessionTracker();
 
@@ -699,6 +701,10 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 						"- **Index more content** — use `intent` parameter in execute calls to auto-index large output",
 					);
 				}
+			}
+
+			if (dbFallback) {
+				lines.push("\n⚠ **Warning:** Persistent DB creation failed — using in-memory storage. Indexed data will not survive restarts.");
 			}
 
 			const output = lines.join("\n");
