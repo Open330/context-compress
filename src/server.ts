@@ -58,7 +58,10 @@ function compactLabel(normal: string, level: CompressionLevel): string {
 	return normal;
 }
 
-async function limitConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<PromiseSettledResult<T>[]> {
+async function limitConcurrency<T>(
+	tasks: (() => Promise<T>)[],
+	limit: number,
+): Promise<PromiseSettledResult<T>[]> {
 	const results: PromiseSettledResult<T>[] = new Array(tasks.length);
 	let nextIndex = 0;
 
@@ -67,9 +70,9 @@ async function limitConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): 
 			const index = nextIndex++;
 			try {
 				const value = await tasks[index]();
-				results[index] = { status: 'fulfilled', value };
+				results[index] = { status: "fulfilled", value };
 			} catch (reason) {
-				results[index] = { status: 'rejected', reason };
+				results[index] = { status: "rejected", reason };
 			}
 		}
 	}
@@ -85,7 +88,10 @@ function detectInjectionPatterns(content: string): string[] {
 	const patterns = [
 		{ re: /ignore\s+(all\s+)?previous\s+instructions/i, label: "instruction override" },
 		{ re: /you\s+are\s+now\s+/i, label: "role reassignment" },
-		{ re: /(?:^|\n)\s*system\s*:\s*(?:you are|you're|as an? )/im, label: "system prompt injection" },
+		{
+			re: /(?:^|\n)\s*system\s*:\s*(?:you are|you're|as an? )/im,
+			label: "system prompt injection",
+		},
 		{ re: /\[INST\]|\[\/INST\]|<\|im_start\|>|<\|im_end\|>/i, label: "chat template injection" },
 		{ re: /\n\n(?:Human|Assistant):/m, label: "chat delimiter injection" },
 		{ re: /reveal\s+(your|the)\s+(system|secret|confidential)/i, label: "data exfiltration" },
@@ -123,11 +129,7 @@ export async function createServer(config: Config) {
 	}
 	const tracker = new SessionTracker();
 
-	function applyIntentFilter(
-		output: string,
-		intent: string,
-		sourceLabel: string,
-	): string {
+	function applyIntentFilter(output: string, intent: string, sourceLabel: string): string {
 		if (Buffer.byteLength(output) <= config.intentSearchThreshold) return output;
 
 		const indexed = store.index(output, sourceLabel);
@@ -315,7 +317,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 					label = source ?? filePath;
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
-					return { content: [{ type: "text" as const, text: `Error reading "${filePath}": ${msg}` }] };
+					return {
+						content: [{ type: "text" as const, text: `Error reading "${filePath}": ${msg}` }],
+					};
 				}
 			} else if (content) {
 				const contentBytes = Buffer.byteLength(content);
@@ -704,7 +708,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			if (dbFallback) {
-				lines.push("\n⚠ **Warning:** Persistent DB creation failed — using in-memory storage. Indexed data will not survive restarts.");
+				lines.push(
+					"\n⚠ **Warning:** Persistent DB creation failed — using in-memory storage. Indexed data will not survive restarts.",
+				);
 			}
 
 			const output = lines.join("\n");

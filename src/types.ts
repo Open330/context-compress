@@ -86,4 +86,3 @@ export interface SessionStats {
 	bytesSandboxed: number;
 	sessionStart: number;
 }
-

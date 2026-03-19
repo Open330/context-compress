@@ -150,8 +150,7 @@ export class ContentStore {
 			path = options;
 		} else if (options?.persistDb || options?.dbDir) {
 			const dir =
-				options.dbDir ??
-				join(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), ".context-compress");
+				options.dbDir ?? join(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), ".context-compress");
 			mkdirSync(dir, { recursive: true });
 			path = join(dir, "store.db");
 			debug("Using persistent DB at", path);
@@ -315,7 +314,12 @@ export class ContentStore {
 		return { query, results: [] };
 	}
 
-	private ftsSearch(table: "chunks" | "chunks_trigram", sanitized: string, source: string | undefined, limit: number): SearchHit[] {
+	private ftsSearch(
+		table: "chunks" | "chunks_trigram",
+		sanitized: string,
+		source: string | undefined,
+		limit: number,
+	): SearchHit[] {
 		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
 		const params: (string | number)[] = [sanitized];
 		if (source) params.push(source);

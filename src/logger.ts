@@ -5,4 +5,3 @@ export function debug(...args: unknown[]): void {
 		process.stderr.write(`[context-compress] ${args.map(String).join(" ")}\n`);
 	}
 }
-

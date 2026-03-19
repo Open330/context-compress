@@ -52,7 +52,9 @@ export function isPrivateHost(hostname: string): boolean {
  * This prevents attackers from using DNS to resolve a public hostname to a private IP.
  * Throws an error if the resolved IP is private.
  */
-export async function resolveAndValidate(url: string): Promise<{ url: string; resolvedIp: string | null }> {
+export async function resolveAndValidate(
+	url: string,
+): Promise<{ url: string; resolvedIp: string | null }> {
 	const parsed = new URL(url);
 	const hostname = parsed.hostname;
 
@@ -72,9 +74,7 @@ export async function resolveAndValidate(url: string): Promise<{ url: string; re
 	try {
 		const { address } = await dns.promises.lookup(hostname, { family: 4 });
 		if (isPrivateHost(address)) {
-			throw new Error(
-				`Blocked: ${hostname} resolved to private IP ${address}`,
-			);
+			throw new Error(`Blocked: ${hostname} resolved to private IP ${address}`);
 		}
 		resolvedIp = address;
 	} catch (err) {
@@ -88,9 +88,7 @@ export async function resolveAndValidate(url: string): Promise<{ url: string; re
 	try {
 		const { address } = await dns.promises.lookup(hostname, { family: 6 });
 		if (isPrivateHost(address)) {
-			throw new Error(
-				`Blocked: ${hostname} resolved to private IPv6 ${address}`,
-			);
+			throw new Error(`Blocked: ${hostname} resolved to private IPv6 ${address}`);
 		}
 		if (!resolvedIp) resolvedIp = address;
 	} catch (err) {
