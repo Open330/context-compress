@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -18,8 +18,15 @@ const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 
 function isWithinProject(absPath: string): boolean {
-	const normalized = resolve(absPath);
-	return normalized === projectDir || normalized.startsWith(`${projectDir}/`);
+	try {
+		const normalized = realpathSync(resolve(absPath));
+		const realProjectDir = realpathSync(projectDir);
+		return normalized === realProjectDir || normalized.startsWith(`${realProjectDir}/`);
+	} catch {
+		// Path doesn't exist yet — fall back to string check
+		const normalized = resolve(absPath);
+		return normalized === projectDir || normalized.startsWith(`${projectDir}/`);
+	}
 }
 
 function getVersion(): string {
@@ -105,11 +112,39 @@ export async function createServer(config: Config) {
 	debug("Runtimes detected:", runtimes.size);
 
 	const executor = new SubprocessExecutor(runtimes, config);
-	const store = new ContentStore({
-		persistDb: config.persistDb,
-		dbDir: config.dbDir,
-	});
+	let store: ContentStore;
+	try {
+		store = new ContentStore({ persistDb: config.persistDb, dbDir: config.dbDir });
+	} catch (e) {
+		debug("Failed to create DB, falling back to in-memory:", e);
+		store = new ContentStore(":memory:");
+	}
 	const tracker = new SessionTracker();
+
+	function applyIntentFilter(
+		output: string,
+		intent: string,
+		sourceLabel: string,
+	): string {
+		if (Buffer.byteLength(output) <= config.intentSearchThreshold) return output;
+
+		const indexed = store.index(output, sourceLabel);
+		tracker.trackIndexed(Buffer.byteLength(output));
+
+		const searchResults = store.search(intent, { limit: 3 });
+		const terms = store.getDistinctiveTerms(indexed.sourceId);
+
+		let filtered = `Indexed ${indexed.totalChunks} sections from ${sourceLabel}.\n`;
+		filtered += `${searchResults.results.length} sections matched "${intent}":\n\n`;
+		for (const hit of searchResults.results) {
+			filtered += `  - **${hit.title}**: ${hit.snippet.slice(0, 200)}\n`;
+		}
+		if (terms.length > 0 && config.compressionLevel !== "ultra") {
+			filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
+		}
+		filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
+		return compactLabel(filtered, config.compressionLevel);
+	}
 
 	// Graceful shutdown: close the database on exit
 	const shutdown = () => {
@@ -135,7 +170,7 @@ export async function createServer(config: Config) {
 
 	server.tool(
 		"execute",
-		`Execute code in a sandboxed subprocess. Only stdout enters context — raw data stays in the subprocess. Use instead of bash/cat when output would exceed 20 lines. ${bunDetected ? "(Bun detected — JS/TS runs 3-5x faster) " : ""}Available: ${ALL_LANGUAGES.join(", ")}.
+		`Execute code in a sandboxed subprocess. Only stdout enters context — raw data stays in the subprocess. Use instead of bash/cat when output would exceed ~5KB. ${bunDetected ? "(Bun detected — JS/TS runs 3-5x faster) " : ""}Available: ${ALL_LANGUAGES.join(", ")}.
 
 PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, pytest), git queries (git log, git diff), data processing, and ANY CLI command that may produce large output. Bash should only be used for file mutations, git writes, and navigation.`,
 		{
@@ -166,23 +201,8 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			// Intent-driven filtering for large outputs
-			if (intent && Buffer.byteLength(output) > config.intentSearchThreshold) {
-				const indexed = store.index(output, `execute:${language}`);
-				tracker.trackIndexed(Buffer.byteLength(output));
-
-				const searchResults = store.search(intent, { limit: 3 });
-				const terms = store.getDistinctiveTerms(indexed.sourceId);
-
-				let filtered = `Indexed ${indexed.totalChunks} sections from execute output.\n`;
-				filtered += `${searchResults.results.length} sections matched "${intent}":\n\n`;
-				for (const hit of searchResults.results) {
-					filtered += `  - **${hit.title}**: ${hit.snippet.slice(0, 200)}\n`;
-				}
-				if (terms.length > 0 && config.compressionLevel !== "ultra") {
-					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
-				}
-				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
-				output = compactLabel(filtered, config.compressionLevel);
+			if (intent) {
+				output = applyIntentFilter(output, intent, `execute:${language}`);
 			}
 
 			const responseBytes = Buffer.byteLength(output);
@@ -234,23 +254,8 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			// Intent-driven filtering
-			if (intent && Buffer.byteLength(output) > config.intentSearchThreshold) {
-				const indexed = store.index(output, `file:${filePath}`);
-				tracker.trackIndexed(Buffer.byteLength(output));
-
-				const searchResults = store.search(intent, { limit: 3 });
-				const terms = store.getDistinctiveTerms(indexed.sourceId);
-
-				let filtered = `Indexed ${indexed.totalChunks} sections from "${filePath}" into knowledge base.\n`;
-				filtered += `${searchResults.results.length} sections matched "${intent}":\n\n`;
-				for (const hit of searchResults.results) {
-					filtered += `  - **${hit.title}**: ${hit.snippet.slice(0, 200)}\n`;
-				}
-				if (terms.length > 0 && config.compressionLevel !== "ultra") {
-					filtered += `\nSearchable terms: ${terms.join(", ")}\n`;
-				}
-				filtered += "\nUse search(queries: [...]) to retrieve full content of any section.";
-				output = compactLabel(filtered, config.compressionLevel);
+			if (intent) {
+				output = applyIntentFilter(output, intent, `file:${filePath}`);
 			}
 
 			const responseBytes = Buffer.byteLength(output);
@@ -292,20 +297,36 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 						],
 					};
 				}
-				const fileStat = statSync(absPath);
-				if (fileStat.size > 50 * 1024 * 1024) {
+				try {
+					const fileStat = statSync(absPath);
+					if (fileStat.size > 50 * 1024 * 1024) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `Error: file "${filePath}" is too large (${(fileStat.size / 1024 / 1024).toFixed(1)}MB). Max 50MB.`,
+								},
+							],
+						};
+					}
+					text = readFileSync(absPath, "utf-8");
+					label = source ?? filePath;
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					return { content: [{ type: "text" as const, text: `Error reading "${filePath}": ${msg}` }] };
+				}
+			} else if (content) {
+				const contentBytes = Buffer.byteLength(content);
+				if (contentBytes > 50 * 1024 * 1024) {
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `Error: file "${filePath}" is too large (${(fileStat.size / 1024 / 1024).toFixed(1)}MB). Max 50MB.`,
+								text: `Error: content too large (${(contentBytes / 1024 / 1024).toFixed(1)}MB). Max 50MB.`,
 							},
 						],
 					};
 				}
-				text = readFileSync(absPath, "utf-8");
-				label = source ?? filePath;
-			} else if (content) {
 				text = content;
 			} else {
 				return {
@@ -708,11 +729,11 @@ function buildFetchCode(url: string, resolvedIp?: string | null): string {
 		pinnedUrl.hostname = resolvedIp;
 		fetchSetup = `
 const url = ${JSON.stringify(pinnedUrl.toString())};
-const resp = await fetch(url, { headers: { 'Host': ${JSON.stringify(originalHost)} } });`;
+const resp = await fetch(url, { headers: { 'Host': ${JSON.stringify(originalHost)} }, redirect: 'error' });`;
 	} else {
 		fetchSetup = `
 const url = ${JSON.stringify(url)};
-const resp = await fetch(url);`;
+const resp = await fetch(url, { redirect: 'error' });`;
 	}
 	return `${fetchSetup}
 if (!resp.ok) { console.error("HTTP " + resp.status); process.exit(1); }

@@ -46,23 +46,11 @@ export interface ExecResult {
 	networkBytes?: number;
 }
 
-export interface IndexOptions {
-	content?: string;
-	path?: string;
-	source?: string;
-}
-
 export interface IndexResult {
 	sourceId: number;
 	label: string;
 	totalChunks: number;
 	codeChunks: number;
-}
-
-export interface SearchOptions {
-	queries: string[];
-	source?: string;
-	limit?: number;
 }
 
 export interface SearchResult {
@@ -99,13 +87,3 @@ export interface SessionStats {
 	sessionStart: number;
 }
 
-export interface BatchCommand {
-	label: string;
-	command: string;
-}
-
-export interface BatchExecuteOptions {
-	commands: BatchCommand[];
-	queries: string[];
-	timeout?: number;
-}

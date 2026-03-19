@@ -315,7 +315,7 @@ export class ContentStore {
 		return { query, results: [] };
 	}
 
-	private porterSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
+	private ftsSearch(table: "chunks" | "chunks_trigram", sanitized: string, source: string | undefined, limit: number): SearchHit[] {
 		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
 		const params: (string | number)[] = [sanitized];
 		if (source) params.push(source);
@@ -323,15 +323,15 @@ export class ContentStore {
 
 		const sql = `
 			SELECT
-				chunks.title,
-				chunks.content,
-				chunks.content_type,
+				${table}.title,
+				${table}.content,
+				${table}.content_type,
 				sources.label,
-				bm25(chunks, 2.0, 1.0) AS rank,
-				highlight(chunks, 1, char(2), char(3)) AS highlighted
-			FROM chunks
-			JOIN sources ON sources.id = chunks.source_id
-			WHERE chunks MATCH ? ${sourceFilter}
+				bm25(${table}, 2.0, 1.0) AS rank,
+				highlight(${table}, 1, char(2), char(3)) AS highlighted
+			FROM ${table}
+			JOIN sources ON sources.id = ${table}.source_id
+			WHERE ${table} MATCH ? ${sourceFilter}
 			ORDER BY rank
 			LIMIT ?
 		`;
@@ -352,51 +352,17 @@ export class ContentStore {
 				score: Math.abs(row.rank),
 			}));
 		} catch (e) {
-			debug("Porter search error:", e);
+			debug(`FTS search error (${table}):`, e);
 			return [];
 		}
 	}
 
+	private porterSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
+		return this.ftsSearch("chunks", sanitized, source, limit);
+	}
+
 	private trigramSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
-		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
-		const params: (string | number)[] = [sanitized];
-		if (source) params.push(source);
-		params.push(limit);
-
-		const sql = `
-			SELECT
-				chunks_trigram.title,
-				chunks_trigram.content,
-				chunks_trigram.content_type,
-				sources.label,
-				bm25(chunks_trigram, 2.0, 1.0) AS rank,
-				highlight(chunks_trigram, 1, char(2), char(3)) AS highlighted
-			FROM chunks_trigram
-			JOIN sources ON sources.id = chunks_trigram.source_id
-			WHERE chunks_trigram MATCH ? ${sourceFilter}
-			ORDER BY rank
-			LIMIT ?
-		`;
-
-		try {
-			const rows = this.db.prepare(sql).all(...params) as Array<{
-				title: string;
-				content: string;
-				label: string;
-				rank: number;
-				highlighted: string;
-			}>;
-
-			return rows.map((row) => ({
-				title: row.title,
-				snippet: extractSnippet(row.highlighted),
-				source: row.label,
-				score: Math.abs(row.rank),
-			}));
-		} catch (e) {
-			debug("Trigram search error:", e);
-			return [];
-		}
+		return this.ftsSearch("chunks_trigram", sanitized, source, limit);
 	}
 
 	/**

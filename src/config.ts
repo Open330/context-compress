@@ -220,6 +220,21 @@ export function loadConfig(projectDir?: string): Config {
 			(merged as Record<string, unknown>)[k] = value;
 		}
 	}
+
+	// Sanity checks on final config
+	merged.maxOutputBytes = Math.max(merged.maxOutputBytes, 1024); // minimum 1KB
+	merged.hardCapBytes = Math.max(merged.hardCapBytes, merged.maxOutputBytes);
+	merged.intentSearchThreshold = Math.max(merged.intentSearchThreshold, 0);
+	merged.searchLimit = Math.max(merged.searchLimit, 1);
+	merged.searchWindowMs = Math.max(merged.searchWindowMs, 1000);
+	merged.searchReduceAfter = Math.max(merged.searchReduceAfter, 1);
+	merged.searchBlockAfter = Math.max(
+		merged.searchBlockAfter,
+		merged.searchReduceAfter + 1,
+	);
+	merged.searchMaxBytes = Math.max(merged.searchMaxBytes, 1024);
+	merged.batchMaxBytes = Math.max(merged.batchMaxBytes, 1024);
+
 	// dbDir implies persistDb
 	if (merged.dbDir) merged.persistDb = true;
 	_config = merged;
