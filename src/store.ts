@@ -148,7 +148,7 @@ export class ContentStore {
 		if (typeof options === "string") {
 			// Backward-compatible: accept a plain DB path string
 			path = options;
-		} else if (options?.persistDb) {
+		} else if (options?.persistDb || options?.dbDir) {
 			const dir =
 				options.dbDir ??
 				join(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), ".context-compress");

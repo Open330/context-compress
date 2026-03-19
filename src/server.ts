@@ -78,8 +78,9 @@ function detectInjectionPatterns(content: string): string[] {
 	const patterns = [
 		{ re: /ignore\s+(all\s+)?previous\s+instructions/i, label: "instruction override" },
 		{ re: /you\s+are\s+now\s+/i, label: "role reassignment" },
-		{ re: /system\s*:\s*/i, label: "system prompt injection" },
+		{ re: /(?:^|\n)\s*system\s*:\s*(?:you are|you're|as an? )/im, label: "system prompt injection" },
 		{ re: /\[INST\]|\[\/INST\]|<\|im_start\|>|<\|im_end\|>/i, label: "chat template injection" },
+		{ re: /\n\n(?:Human|Assistant):/m, label: "chat delimiter injection" },
 		{ re: /reveal\s+(your|the)\s+(system|secret|confidential)/i, label: "data exfiltration" },
 		{ re: /act\s+as\s+(if\s+you\s+are|a)\s+/i, label: "role manipulation" },
 	];
@@ -428,8 +429,10 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			// DNS rebinding protection: resolve hostname and verify the IP is not private
+			let resolvedIp: string | null = null;
 			try {
-				await resolveAndValidate(url);
+				const validated = await resolveAndValidate(url);
+				resolvedIp = validated.resolvedIp;
 			} catch (err) {
 				return {
 					content: [
@@ -444,7 +447,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			const label = source ?? url;
 
 			// Use executor to fetch and convert HTML to markdown in subprocess
-			const fetchCode = buildFetchCode(url);
+			const fetchCode = buildFetchCode(url, resolvedIp);
 			const result = await executor.execute({
 				language: "javascript",
 				code: fetchCode,
@@ -696,11 +699,22 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 // ─── HTML to Markdown conversion code (runs in subprocess) ──
 
-function buildFetchCode(url: string): string {
-	const escaped = JSON.stringify(url);
-	return `
-const url = ${escaped};
-const resp = await fetch(url);
+function buildFetchCode(url: string, resolvedIp?: string | null): string {
+	let fetchSetup: string;
+	if (resolvedIp) {
+		// Pin connection to the resolved IP to prevent DNS rebinding (TOCTOU)
+		const pinnedUrl = new URL(url);
+		const originalHost = pinnedUrl.host;
+		pinnedUrl.hostname = resolvedIp;
+		fetchSetup = `
+const url = ${JSON.stringify(pinnedUrl.toString())};
+const resp = await fetch(url, { headers: { 'Host': ${JSON.stringify(originalHost)} } });`;
+	} else {
+		fetchSetup = `
+const url = ${JSON.stringify(url)};
+const resp = await fetch(url);`;
+	}
+	return `${fetchSetup}
 if (!resp.ok) { console.error("HTTP " + resp.status); process.exit(1); }
 const html = await resp.text();
 
@@ -736,15 +750,15 @@ md = md.replace(/<br\\s*\\/?>/gi, "\\n");
 md = md.replace(/<[^>]+>/g, "");
 
 // Decode entities
-md = md.replace(/&amp;/g, "&")
-  .replace(/&lt;/g, "<")
+md = md.replace(/&lt;/g, "<")
   .replace(/&gt;/g, ">")
   .replace(/&quot;/g, '"')
   .replace(/&#39;/g, "'")
   .replace(/&apos;/g, "'")
   .replace(/&nbsp;/g, " ")
-  .replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-  .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+  .replace(/&#(\\d+);/g, (_, n) => { const c = parseInt(n, 10); return c > 0 && c <= 0x10FFFF ? String.fromCodePoint(c) : ''; })
+  .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => { const c = parseInt(h, 16); return c > 0 && c <= 0x10FFFF ? String.fromCodePoint(c) : ''; })
+  .replace(/&amp;/g, "&");
 
 // Clean whitespace
 md = md.replace(/\\n{3,}/g, "\\n\\n").trim();

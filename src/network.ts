@@ -11,6 +11,9 @@ export function isPrivateHost(hostname: string): boolean {
 	// Localhost variants
 	if (lower === "localhost" || lower === "0.0.0.0") return true;
 
+	// IPv4 "this network" range: 0.0.0.0/8
+	if (/^0\./.test(h)) return true;
+
 	// IPv4 loopback: 127.0.0.0/8
 	if (/^127\./.test(h)) return true;
 
@@ -27,6 +30,9 @@ export function isPrivateHost(hostname: string): boolean {
 
 	// IPv6 loopback
 	if (lower === "::1") return true;
+
+	// IPv6 unspecified address
+	if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
 
 	// IPv6 mapped IPv4: ::ffff:127.0.0.1, ::ffff:10.*, etc.
 	const mappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
@@ -46,7 +52,7 @@ export function isPrivateHost(hostname: string): boolean {
  * This prevents attackers from using DNS to resolve a public hostname to a private IP.
  * Throws an error if the resolved IP is private.
  */
-export async function resolveAndValidate(url: string): Promise<string> {
+export async function resolveAndValidate(url: string): Promise<{ url: string; resolvedIp: string | null }> {
 	const parsed = new URL(url);
 	const hostname = parsed.hostname;
 
@@ -55,8 +61,12 @@ export async function resolveAndValidate(url: string): Promise<string> {
 		if (isPrivateHost(hostname)) {
 			throw new Error(`Blocked: resolved IP ${hostname} is a private/internal address`);
 		}
-		return url;
+		return { url, resolvedIp: null };
 	}
+
+	let resolvedIp: string | null = null;
+	let v4Error = false;
+	let v6Error = false;
 
 	// Resolve IPv4
 	try {
@@ -66,10 +76,12 @@ export async function resolveAndValidate(url: string): Promise<string> {
 				`Blocked: ${hostname} resolved to private IP ${address}`,
 			);
 		}
+		resolvedIp = address;
 	} catch (err) {
 		// If it's our own block error, re-throw
 		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
-		// IPv4 resolution failed — that's okay, try IPv6 below
+		// IPv4 resolution failed — track it
+		v4Error = true;
 	}
 
 	// Resolve IPv6
@@ -80,10 +92,17 @@ export async function resolveAndValidate(url: string): Promise<string> {
 				`Blocked: ${hostname} resolved to private IPv6 ${address}`,
 			);
 		}
+		if (!resolvedIp) resolvedIp = address;
 	} catch (err) {
 		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
-		// IPv6 resolution failed — that's okay if IPv4 succeeded
+		// IPv6 resolution failed — track it
+		v6Error = true;
 	}
 
-	return url;
+	// If BOTH resolutions failed (not blocked, just DNS errors), fail closed
+	if (v4Error && v6Error) {
+		throw new Error(`DNS resolution failed for ${hostname}: unable to verify host safety`);
+	}
+
+	return { url, resolvedIp };
 }

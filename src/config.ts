@@ -220,6 +220,8 @@ export function loadConfig(projectDir?: string): Config {
 			(merged as Record<string, unknown>)[k] = value;
 		}
 	}
+	// dbDir implies persistDb
+	if (merged.dbDir) merged.persistDb = true;
 	_config = merged;
 	return _config;
 }

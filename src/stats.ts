@@ -54,13 +54,15 @@ export class SessionTracker {
 		const totalReturned = Object.values(snap.bytesReturned).reduce((a, b) => a + b, 0);
 		const keptOut = snap.bytesIndexed + snap.bytesSandboxed;
 		const totalProcessed = keptOut + totalReturned;
-		const savingsRatio = totalReturned > 0 ? totalProcessed / totalReturned : 1;
+		const savingsRatio = totalReturned > 0 ? totalProcessed / totalReturned : (keptOut > 0 ? Infinity : 1);
 		const reductionPct =
 			totalProcessed > 0 ? ((1 - totalReturned / totalProcessed) * 100).toFixed(1) : "0.0";
 		const estTokensLo = Math.round(totalReturned / 5);
 		const estTokensHi = Math.round(totalReturned / 3);
 		const estTokensAvoidedLo = Math.round(keptOut / 5);
 		const estTokensAvoidedHi = Math.round(keptOut / 3);
+		const estTokensMid = Math.round(totalReturned / 4);
+		const estTokensAvoidedMid = Math.round(keptOut / 4);
 
 		const lines: string[] = [];
 
@@ -72,12 +74,13 @@ export class SessionTracker {
 		lines.push(`| Total data processed | ${formatBytes(totalProcessed)} |`);
 		lines.push(`| Kept in sandbox | ${formatBytes(keptOut)} |`);
 		lines.push(`| Context consumed | ${formatBytes(totalReturned)} |`);
-		lines.push(`| Est. tokens used | ~${estTokensLo.toLocaleString()}-${estTokensHi.toLocaleString()} tokens (${tokenCost(estTokensHi)}) |`);
+		lines.push(`| Est. tokens used | ~${estTokensLo.toLocaleString()}-${estTokensHi.toLocaleString()} tokens (${tokenCost(estTokensMid)}) |`);
 		lines.push(
-			`| Est. tokens saved | ~${estTokensAvoidedLo.toLocaleString()}-${estTokensAvoidedHi.toLocaleString()} tokens (${tokenCost(estTokensAvoidedHi)}) |`,
+			`| Est. tokens saved | ~${estTokensAvoidedLo.toLocaleString()}-${estTokensAvoidedHi.toLocaleString()} tokens (${tokenCost(estTokensAvoidedMid)}) |`,
 		);
+		const savingsLabel = Number.isFinite(savingsRatio) ? `${savingsRatio.toFixed(1)}x` : "∞";
 		lines.push(
-			`| **Savings ratio** | **${savingsRatio.toFixed(1)}x** (${reductionPct}% reduction) |`,
+			`| **Savings ratio** | **${savingsLabel}** (${reductionPct}% reduction) |`,
 		);
 
 		// Visual savings bar

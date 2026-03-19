@@ -20,8 +20,18 @@ describe("isPrivateHost", () => {
 		assert.strictEqual(isPrivateHost("::1"), true);
 	});
 
+	it("blocks IPv6 unspecified address (::)", () => {
+		assert.strictEqual(isPrivateHost("::"), true);
+		assert.strictEqual(isPrivateHost("0:0:0:0:0:0:0:0"), true);
+	});
+
 	it("blocks 0.0.0.0", () => {
 		assert.strictEqual(isPrivateHost("0.0.0.0"), true);
+	});
+
+	it("blocks 0.0.0.0/8 'this network' range", () => {
+		assert.strictEqual(isPrivateHost("0.1.2.3"), true);
+		assert.strictEqual(isPrivateHost("0.0.0.1"), true);
 	});
 
 	it("blocks 10.x.x.x", () => {
@@ -97,7 +107,7 @@ describe("resolveAndValidate", () => {
 			family: 4,
 		}));
 		const result = await resolveAndValidate("https://example.com/page");
-		assert.strictEqual(result, "https://example.com/page");
+		assert.deepStrictEqual(result, { url: "https://example.com/page", resolvedIp: "93.184.216.34" });
 		lookup.mock.restore();
 	});
 
@@ -167,16 +177,20 @@ describe("resolveAndValidate", () => {
 
 	it("allows raw public IPv4 addresses", async () => {
 		const result = await resolveAndValidate("https://8.8.8.8/dns");
-		assert.strictEqual(result, "https://8.8.8.8/dns");
+		assert.deepStrictEqual(result, { url: "https://8.8.8.8/dns", resolvedIp: null });
 	});
 
-	it("handles DNS resolution failure gracefully", async () => {
+	it("rejects when DNS resolution fails for both families (fail-closed)", async () => {
 		const lookup = mock.method(dns.promises, "lookup", async () => {
 			throw new Error("ENOTFOUND");
 		});
-		// If both IPv4 and IPv6 fail, the URL should still pass (no private IP found)
-		const result = await resolveAndValidate("https://nonexistent.example.com");
-		assert.strictEqual(result, "https://nonexistent.example.com");
+		await assert.rejects(
+			() => resolveAndValidate("https://nonexistent.example.com"),
+			(err: Error) => {
+				assert.ok(err.message.includes("DNS resolution failed"));
+				return true;
+			},
+		);
 		lookup.mock.restore();
 	});
 });
