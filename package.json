@@ -1,6 +1,6 @@
 {
   "name": "context-compress",
-  "version": "2026.3.3",
+  "version": "2026.3.13",
   "description": "Context-aware MCP server that compresses tool output for Claude Code",
   "type": "module",
   "main": "dist/server.js",
