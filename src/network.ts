@@ -1,3 +1,5 @@
+import dns from "node:dns";
+
 /**
  * SSRF protection: detect private/internal hostnames.
  */
@@ -37,4 +39,51 @@ export function isPrivateHost(hostname: string): boolean {
 	if (/^f[cd]/i.test(h)) return true;
 
 	return false;
+}
+
+/**
+ * DNS rebinding protection: resolve hostname to IP and validate it is not private.
+ * This prevents attackers from using DNS to resolve a public hostname to a private IP.
+ * Throws an error if the resolved IP is private.
+ */
+export async function resolveAndValidate(url: string): Promise<string> {
+	const parsed = new URL(url);
+	const hostname = parsed.hostname;
+
+	// Skip DNS resolution for raw IP addresses — isPrivateHost already handles them
+	if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":")) {
+		if (isPrivateHost(hostname)) {
+			throw new Error(`Blocked: resolved IP ${hostname} is a private/internal address`);
+		}
+		return url;
+	}
+
+	// Resolve IPv4
+	try {
+		const { address } = await dns.promises.lookup(hostname, { family: 4 });
+		if (isPrivateHost(address)) {
+			throw new Error(
+				`Blocked: ${hostname} resolved to private IP ${address}`,
+			);
+		}
+	} catch (err) {
+		// If it's our own block error, re-throw
+		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
+		// IPv4 resolution failed — that's okay, try IPv6 below
+	}
+
+	// Resolve IPv6
+	try {
+		const { address } = await dns.promises.lookup(hostname, { family: 6 });
+		if (isPrivateHost(address)) {
+			throw new Error(
+				`Blocked: ${hostname} resolved to private IPv6 ${address}`,
+			);
+		}
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
+		// IPv6 resolution failed — that's okay if IPv4 succeeded
+	}
+
+	return url;
 }

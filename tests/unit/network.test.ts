@@ -1,6 +1,7 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
-import { isPrivateHost } from "../../src/network.js";
+import dns from "node:dns";
+import { describe, it, mock } from "node:test";
+import { isPrivateHost, resolveAndValidate } from "../../src/network.js";
 
 describe("isPrivateHost", () => {
 	it("blocks localhost", () => {
@@ -86,5 +87,96 @@ describe("isPrivateHost", () => {
 	it("allows public hostnames", () => {
 		assert.strictEqual(isPrivateHost("example.com"), false);
 		assert.strictEqual(isPrivateHost("api.github.com"), false);
+	});
+});
+
+describe("resolveAndValidate", () => {
+	it("allows URLs with public resolved IPs", async () => {
+		const lookup = mock.method(dns.promises, "lookup", async () => ({
+			address: "93.184.216.34",
+			family: 4,
+		}));
+		const result = await resolveAndValidate("https://example.com/page");
+		assert.strictEqual(result, "https://example.com/page");
+		lookup.mock.restore();
+	});
+
+	it("blocks hostnames that resolve to 127.0.0.1 (DNS rebinding)", async () => {
+		const lookup = mock.method(dns.promises, "lookup", async () => ({
+			address: "127.0.0.1",
+			family: 4,
+		}));
+		await assert.rejects(
+			() => resolveAndValidate("https://evil.com/steal"),
+			(err: Error) => {
+				assert.ok(err.message.includes("Blocked"));
+				assert.ok(err.message.includes("127.0.0.1"));
+				return true;
+			},
+		);
+		lookup.mock.restore();
+	});
+
+	it("blocks hostnames that resolve to private IPv4 (10.x)", async () => {
+		const lookup = mock.method(dns.promises, "lookup", async () => ({
+			address: "10.0.0.1",
+			family: 4,
+		}));
+		await assert.rejects(
+			() => resolveAndValidate("https://evil.com"),
+			(err: Error) => {
+				assert.ok(err.message.includes("Blocked"));
+				assert.ok(err.message.includes("10.0.0.1"));
+				return true;
+			},
+		);
+		lookup.mock.restore();
+	});
+
+	it("blocks hostnames that resolve to private IPv6 (::1)", async () => {
+		const lookup = mock.method(
+			dns.promises,
+			"lookup",
+			async (_hostname: string, opts: { family: number }) => {
+				if (opts.family === 4) {
+					throw new Error("ENOTFOUND");
+				}
+				return { address: "::1", family: 6 };
+			},
+		);
+		await assert.rejects(
+			() => resolveAndValidate("https://evil.com"),
+			(err: Error) => {
+				assert.ok(err.message.includes("Blocked"));
+				assert.ok(err.message.includes("::1"));
+				return true;
+			},
+		);
+		lookup.mock.restore();
+	});
+
+	it("blocks raw private IPv4 addresses without DNS lookup", async () => {
+		await assert.rejects(
+			() => resolveAndValidate("https://127.0.0.1/admin"),
+			(err: Error) => {
+				assert.ok(err.message.includes("Blocked"));
+				return true;
+			},
+		);
+	});
+
+	it("allows raw public IPv4 addresses", async () => {
+		const result = await resolveAndValidate("https://8.8.8.8/dns");
+		assert.strictEqual(result, "https://8.8.8.8/dns");
+	});
+
+	it("handles DNS resolution failure gracefully", async () => {
+		const lookup = mock.method(dns.promises, "lookup", async () => {
+			throw new Error("ENOTFOUND");
+		});
+		// If both IPv4 and IPv6 fail, the URL should still pass (no private IP found)
+		const result = await resolveAndValidate("https://nonexistent.example.com");
+		assert.strictEqual(result, "https://nonexistent.example.com");
+		lookup.mock.restore();
 	});
 });

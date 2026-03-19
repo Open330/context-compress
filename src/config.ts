@@ -38,6 +38,10 @@ export interface Config {
 	searchBlockAfter: number;
 	/** Compression level: normal (default), compact (shorter labels), ultra (minimal output) */
 	compressionLevel: CompressionLevel;
+	/** Persist the knowledge base DB across MCP server restarts (default: false) */
+	persistDb: boolean;
+	/** Custom directory for the persistent DB (default: null, uses .context-compress/ in project dir) */
+	dbDir: string | null;
 }
 
 const DEFAULTS: Config = {
@@ -57,6 +61,8 @@ const DEFAULTS: Config = {
 	searchReduceAfter: 3,
 	searchBlockAfter: 8,
 	compressionLevel: "normal",
+	persistDb: false,
+	dbDir: null,
 };
 
 /** Overrides applied per compression level */
@@ -95,6 +101,8 @@ const ConfigSchema = z.object({
 	searchReduceAfter: z.number().int().nonnegative().optional(),
 	searchBlockAfter: z.number().int().positive().optional(),
 	compressionLevel: z.enum(["normal", "compact", "ultra"]).optional(),
+	persistDb: z.boolean().optional(),
+	dbDir: z.string().nullable().optional(),
 });
 
 function parseIntEnv(key: string): number | undefined {
@@ -182,6 +190,13 @@ function loadEnvConfig(): Partial<Config> {
 	const level = process.env.CONTEXT_COMPRESS_LEVEL;
 	if (level === "normal" || level === "compact" || level === "ultra") {
 		partial.compressionLevel = level;
+	}
+
+	if (process.env.CONTEXT_COMPRESS_PERSIST_DB === "1") {
+		partial.persistDb = true;
+	}
+	if (process.env.CONTEXT_COMPRESS_DB_DIR) {
+		partial.dbDir = process.env.CONTEXT_COMPRESS_DB_DIR;
 	}
 
 	return partial;

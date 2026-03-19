@@ -1,4 +1,4 @@
-import { readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -29,20 +29,15 @@ const STOPWORDS = new Set([
 	"how",
 	"its",
 	"may",
-	"new",
 	"now",
 	"old",
 	"see",
 	"way",
 	"who",
 	"did",
-	"get",
-	"got",
-	"let",
 	"say",
 	"she",
 	"too",
-	"use",
 	"will",
 	"with",
 	"this",
@@ -56,7 +51,6 @@ const STOPWORDS = new Set([
 	"them",
 	"than",
 	"each",
-	"make",
 	"like",
 	"just",
 	"over",
@@ -97,20 +91,6 @@ const STOPWORDS = new Set([
 	"here",
 	"were",
 	"much",
-	"update",
-	"updates",
-	"updated",
-	"deps",
-	"dev",
-	"tests",
-	"test",
-	"add",
-	"added",
-	"fix",
-	"fixed",
-	"run",
-	"running",
-	"using",
 ]);
 
 const HEADING_RE = /^(#{1,4})\s+(.+)$/;
@@ -163,8 +143,23 @@ export class ContentStore {
 	private vocabCountStmt!: Database.Statement;
 	private vocabInsertStmt!: Database.Statement;
 
-	constructor(dbPath?: string) {
-		const path = dbPath ?? join(tmpdir(), `context-compress-${process.pid}.db`);
+	constructor(options?: string | { dbPath?: string; persistDb?: boolean; dbDir?: string | null }) {
+		let path: string;
+		if (typeof options === "string") {
+			// Backward-compatible: accept a plain DB path string
+			path = options;
+		} else if (options?.persistDb) {
+			const dir =
+				options.dbDir ??
+				join(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), ".context-compress");
+			mkdirSync(dir, { recursive: true });
+			path = join(dir, "store.db");
+			debug("Using persistent DB at", path);
+		} else {
+			path =
+				(typeof options === "object" ? options?.dbPath : undefined) ??
+				join(tmpdir(), `context-compress-${process.pid}.db`);
+		}
 		this.db = new Database(path);
 		this.db.pragma("journal_mode = WAL");
 		this.db.pragma("synchronous = NORMAL");

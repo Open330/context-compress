@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { CompressionLevel, Config } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
 import { debug } from "./logger.js";
-import { isPrivateHost } from "./network.js";
+import { isPrivateHost, resolveAndValidate } from "./network.js";
 import { type RuntimeMap, detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
@@ -51,6 +51,46 @@ function compactLabel(normal: string, level: CompressionLevel): string {
 	return normal;
 }
 
+async function limitConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<PromiseSettledResult<T>[]> {
+	const results: PromiseSettledResult<T>[] = new Array(tasks.length);
+	let nextIndex = 0;
+
+	async function runNext(): Promise<void> {
+		while (nextIndex < tasks.length) {
+			const index = nextIndex++;
+			try {
+				const value = await tasks[index]();
+				results[index] = { status: 'fulfilled', value };
+			} catch (reason) {
+				results[index] = { status: 'rejected', reason };
+			}
+		}
+	}
+
+	const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => runNext());
+	await Promise.all(workers);
+	return results;
+}
+
+/** Detect potential prompt injection patterns in content */
+function detectInjectionPatterns(content: string): string[] {
+	const warnings: string[] = [];
+	const patterns = [
+		{ re: /ignore\s+(all\s+)?previous\s+instructions/i, label: "instruction override" },
+		{ re: /you\s+are\s+now\s+/i, label: "role reassignment" },
+		{ re: /system\s*:\s*/i, label: "system prompt injection" },
+		{ re: /\[INST\]|\[\/INST\]|<\|im_start\|>|<\|im_end\|>/i, label: "chat template injection" },
+		{ re: /reveal\s+(your|the)\s+(system|secret|confidential)/i, label: "data exfiltration" },
+		{ re: /act\s+as\s+(if\s+you\s+are|a)\s+/i, label: "role manipulation" },
+	];
+	for (const { re, label } of patterns) {
+		if (re.test(content)) {
+			warnings.push(label);
+		}
+	}
+	return warnings;
+}
+
 export async function createServer(config: Config) {
 	const version = getVersion();
 	debug("Version:", version);
@@ -64,7 +104,10 @@ export async function createServer(config: Config) {
 	debug("Runtimes detected:", runtimes.size);
 
 	const executor = new SubprocessExecutor(runtimes, config);
-	const store = new ContentStore();
+	const store = new ContentStore({
+		persistDb: config.persistDb,
+		dbDir: config.dbDir,
+	});
 	const tracker = new SessionTracker();
 
 	// Graceful shutdown: close the database on exit
@@ -384,6 +427,20 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
+			// DNS rebinding protection: resolve hostname and verify the IP is not private
+			try {
+				await resolveAndValidate(url);
+			} catch (err) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: ${err instanceof Error ? err.message : "DNS validation failed"}`,
+						},
+					],
+				};
+			}
+
 			const label = source ?? url;
 
 			// Use executor to fetch and convert HTML to markdown in subprocess
@@ -403,6 +460,8 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			const markdown = result.stdout;
 			tracker.trackSandboxed(result.networkBytes ?? 0);
 
+			const injectionWarnings = detectInjectionPatterns(markdown);
+
 			const indexed = store.index(markdown, label);
 			tracker.trackIndexed(Buffer.byteLength(markdown));
 
@@ -417,6 +476,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				output += `\n\nSearchable terms: ${terms.join(", ")}`;
 			}
 			output += "\n\nUse search(queries: [...]) to retrieve full content of any section.";
+			if (injectionWarnings.length > 0) {
+				output += `\n\n⚠ Content safety notice: detected patterns (${injectionWarnings.join(", ")}). Review indexed content before relying on it.`;
+			}
 
 			tracker.trackCall("fetch_and_index", Buffer.byteLength(output));
 
@@ -446,9 +508,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
 		},
 		async ({ commands, queries, timeout }) => {
-			// Performance fix: Execute all commands in parallel with Promise.allSettled
-			const commandResults = await Promise.allSettled(
-				commands.map(async (cmd) => {
+			// Execute commands with bounded concurrency (max 4 parallel)
+			const commandResults = await limitConcurrency(
+				commands.map((cmd) => async () => {
 					const result = await executor.execute({
 						language: "shell",
 						code: cmd.command,
@@ -456,6 +518,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 					});
 					return { label: cmd.label, result };
 				}),
+				4,
 			);
 
 			// Build combined output with markdown sections
@@ -678,7 +741,10 @@ md = md.replace(/&amp;/g, "&")
   .replace(/&gt;/g, ">")
   .replace(/&quot;/g, '"')
   .replace(/&#39;/g, "'")
-  .replace(/&nbsp;/g, " ");
+  .replace(/&apos;/g, "'")
+  .replace(/&nbsp;/g, " ")
+  .replace(/&#(\\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+  .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
 // Clean whitespace
 md = md.replace(/\\n{3,}/g, "\\n\\n").trim();
