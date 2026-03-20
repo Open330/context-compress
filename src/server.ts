@@ -11,7 +11,7 @@ import { isPrivateHost, resolveAndValidate } from "./network.js";
 import { type RuntimeMap, detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
-import { ALL_LANGUAGES, type Language } from "./types.js";
+import { ALL_LANGUAGES, type ExecResult, type Language } from "./types.js";
 import { detectInjectionPatterns, limitConcurrency } from "./utils.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
@@ -190,7 +190,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
-			let result;
+			let result: ExecResult;
 			try {
 				result = await withExecutionLimit(() => executor.execute({ language, code, timeout }));
 			} catch (e) {
@@ -260,7 +260,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
-			let result;
+			let result: ExecResult;
 			try {
 				result = await withExecutionLimit(() =>
 					executor.executeFile({
@@ -498,7 +498,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 			// Use executor to fetch and convert HTML to markdown in subprocess
 			const fetchCode = buildFetchCode(url, resolvedIp);
-			let result;
+			let result: ExecResult;
 			try {
 				result = await withExecutionLimit(() =>
 					executor.execute({
