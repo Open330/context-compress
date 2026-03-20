@@ -113,8 +113,8 @@ function sanitizeQuery(raw: string): string {
 	return words.length > 0 ? words.join(" OR ") : "";
 }
 
-/** Classic Levenshtein distance with O(n) space */
-function levenshtein(a: string, b: string): number {
+/** Classic Levenshtein distance with O(n) space and optional early-exit */
+function levenshtein(a: string, b: string, maxDist?: number): number {
 	if (a.length === 0) return b.length;
 	if (b.length === 0) return a.length;
 
@@ -123,10 +123,13 @@ function levenshtein(a: string, b: string): number {
 
 	for (let i = 1; i <= a.length; i++) {
 		curr[0] = i;
+		let rowMin = curr[0];
 		for (let j = 1; j <= b.length; j++) {
 			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
 			curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+			if (curr[j] < rowMin) rowMin = curr[j];
 		}
+		if (maxDist !== undefined && rowMin > maxDist) return maxDist + 1;
 		[prev, curr] = [curr, prev];
 	}
 
@@ -392,7 +395,7 @@ export class ContentStore {
 			let bestDist = maxDist + 1;
 
 			for (const { word: candidate } of candidates) {
-				const dist = levenshtein(word.toLowerCase(), candidate.toLowerCase());
+				const dist = levenshtein(word.toLowerCase(), candidate.toLowerCase(), maxDist);
 				if (dist < bestDist && dist <= maxDist) {
 					bestDist = dist;
 					bestWord = candidate;
@@ -414,7 +417,9 @@ export class ContentStore {
 
 		if (currentCount >= MAX_VOCABULARY) return;
 
-		const words = content
+		// Sample first 50KB to avoid processing entire large documents
+		const sample = content.length > 51_200 ? content.slice(0, 51_200) : content;
+		const words = sample
 			.split(WORD_SPLIT_RE)
 			.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
 

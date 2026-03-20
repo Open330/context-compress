@@ -12,6 +12,7 @@ import { type RuntimeMap, detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
 import { ALL_LANGUAGES, type Language } from "./types.js";
+import { detectInjectionPatterns, limitConcurrency } from "./utils.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 
@@ -58,53 +59,6 @@ function compactLabel(normal: string, level: CompressionLevel): string {
 	return normal;
 }
 
-async function limitConcurrency<T>(
-	tasks: (() => Promise<T>)[],
-	limit: number,
-): Promise<PromiseSettledResult<T>[]> {
-	const results: PromiseSettledResult<T>[] = new Array(tasks.length);
-	let nextIndex = 0;
-
-	async function runNext(): Promise<void> {
-		while (nextIndex < tasks.length) {
-			const index = nextIndex++;
-			try {
-				const value = await tasks[index]();
-				results[index] = { status: "fulfilled", value };
-			} catch (reason) {
-				results[index] = { status: "rejected", reason };
-			}
-		}
-	}
-
-	const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => runNext());
-	await Promise.all(workers);
-	return results;
-}
-
-/** Detect potential prompt injection patterns in content */
-function detectInjectionPatterns(content: string): string[] {
-	const warnings: string[] = [];
-	const patterns = [
-		{ re: /ignore\s+(all\s+)?previous\s+instructions/i, label: "instruction override" },
-		{ re: /you\s+are\s+now\s+/i, label: "role reassignment" },
-		{
-			re: /(?:^|\n)\s*system\s*:\s*(?:you are|you're|as an? )/im,
-			label: "system prompt injection",
-		},
-		{ re: /\[INST\]|\[\/INST\]|<\|im_start\|>|<\|im_end\|>/i, label: "chat template injection" },
-		{ re: /\n\n(?:Human|Assistant):/m, label: "chat delimiter injection" },
-		{ re: /reveal\s+(your|the)\s+(system|secret|confidential)/i, label: "data exfiltration" },
-		{ re: /act\s+as\s+(if\s+you\s+are|a)\s+/i, label: "role manipulation" },
-	];
-	for (const { re, label } of patterns) {
-		if (re.test(content)) {
-			warnings.push(label);
-		}
-	}
-	return warnings;
-}
-
 export async function createServer(config: Config) {
 	const version = getVersion();
 	debug("Version:", version);
@@ -129,6 +83,28 @@ export async function createServer(config: Config) {
 	}
 	const tracker = new SessionTracker();
 
+	let activeExecutions = 0;
+	const MAX_CONCURRENT_EXECUTIONS = 8;
+
+	async function withExecutionLimit<T>(fn: () => Promise<T>): Promise<T> {
+		if (activeExecutions >= MAX_CONCURRENT_EXECUTIONS) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: "Error: too many concurrent executions. Try again shortly.",
+					},
+				],
+			} as T;
+		}
+		activeExecutions++;
+		try {
+			return await fn();
+		} finally {
+			activeExecutions--;
+		}
+	}
+
 	function applyIntentFilter(output: string, intent: string, sourceLabel: string): string {
 		if (Buffer.byteLength(output) <= config.intentSearchThreshold) return output;
 
@@ -150,8 +126,13 @@ export async function createServer(config: Config) {
 		return compactLabel(filtered, config.compressionLevel);
 	}
 
-	// Graceful shutdown: close the database on exit
+	// Graceful shutdown: kill subprocesses and close the database on exit
 	const shutdown = () => {
+		try {
+			executor.shutdown();
+		} catch {
+			// Ignore errors during shutdown
+		}
 		try {
 			store.close();
 		} catch {
@@ -161,6 +142,16 @@ export async function createServer(config: Config) {
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
 	process.on("beforeExit", shutdown);
+	process.on("uncaughtException", (err) => {
+		debug("Uncaught exception:", err);
+		shutdown();
+		process.exit(1);
+	});
+	process.on("unhandledRejection", (err) => {
+		debug("Unhandled rejection:", err);
+		shutdown();
+		process.exit(1);
+	});
 
 	// Search throttling state
 	const searchCalls: number[] = [];
@@ -193,7 +184,19 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			timeout: z.number().default(30000).describe("Max execution time in ms"),
 		},
 		async ({ language, code, intent, timeout }) => {
-			const result = await executor.execute({ language, code, timeout });
+			const codeBytes = Buffer.byteLength(code);
+			if (codeBytes > 1_024_000) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: code too large (${(codeBytes / 1024).toFixed(0)}KB). Max 1MB.`,
+						},
+					],
+				};
+			}
+
+			const result = await withExecutionLimit(() => executor.execute({ language, code, timeout }));
 
 			if (result.networkBytes) {
 				tracker.trackSandboxed(result.networkBytes);
@@ -233,6 +236,18 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			timeout: z.number().default(30000).describe("Max execution time in ms"),
 		},
 		async ({ path: filePath, language, code, intent, timeout }) => {
+			const codeBytes = Buffer.byteLength(code);
+			if (codeBytes > 1_024_000) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: code too large (${(codeBytes / 1024).toFixed(0)}KB). Max 1MB.`,
+						},
+					],
+				};
+			}
+
 			const absPath = resolve(projectDir, filePath);
 			if (!isWithinProject(absPath)) {
 				return {
@@ -245,12 +260,14 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
-			const result = await executor.executeFile({
-				language,
-				code,
-				filePath: absPath,
-				timeout,
-			});
+			const result = await withExecutionLimit(() =>
+				executor.executeFile({
+					language,
+					code,
+					filePath: absPath,
+					timeout,
+				}),
+			);
 
 			let output = result.stdout;
 			if (result.stderr && result.exitCode !== 0) {
@@ -475,11 +492,13 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 			// Use executor to fetch and convert HTML to markdown in subprocess
 			const fetchCode = buildFetchCode(url, resolvedIp);
-			const result = await executor.execute({
-				language: "javascript",
-				code: fetchCode,
-				timeout: 30_000,
-			});
+			const result = await withExecutionLimit(() =>
+				executor.execute({
+					language: "javascript",
+					code: fetchCode,
+					timeout: 30_000,
+				}),
+			);
 
 			if (result.exitCode !== 0 || !result.stdout.trim()) {
 				const errMsg = `Failed to fetch ${url}: ${result.stderr || "empty response"}`;
@@ -541,11 +560,13 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			// Execute commands with bounded concurrency (max 4 parallel)
 			const commandResults = await limitConcurrency(
 				commands.map((cmd) => async () => {
-					const result = await executor.execute({
-						language: "shell",
-						code: cmd.command,
-						timeout,
-					});
+					const result = await withExecutionLimit(() =>
+						executor.execute({
+							language: "shell",
+							code: cmd.command,
+							timeout,
+						}),
+					);
 					return { label: cmd.label, result };
 				}),
 				4,
@@ -749,7 +770,14 @@ const resp = await fetch(url, { redirect: 'error' });`;
 	}
 	return `${fetchSetup}
 if (!resp.ok) { console.error("HTTP " + resp.status); process.exit(1); }
+const cl = resp.headers.get('content-length');
+if (cl && parseInt(cl, 10) > 10 * 1024 * 1024) {
+    console.error("Response too large: " + cl + " bytes"); process.exit(1);
+}
 const html = await resp.text();
+if (html.length > 10 * 1024 * 1024) {
+    console.error("Response body too large: " + html.length + " chars"); process.exit(1);
+}
 
 // Strip unwanted tags
 let md = html

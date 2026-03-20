@@ -70,30 +70,29 @@ export async function resolveAndValidate(
 	let v4Error = false;
 	let v6Error = false;
 
-	// Resolve IPv4
-	try {
-		const { address } = await dns.promises.lookup(hostname, { family: 4 });
-		if (isPrivateHost(address)) {
-			throw new Error(`Blocked: ${hostname} resolved to private IP ${address}`);
+	// Resolve IPv4 and IPv6 in parallel
+	const [v4Result, v6Result] = await Promise.allSettled([
+		dns.promises.lookup(hostname, { family: 4 }),
+		dns.promises.lookup(hostname, { family: 6 }),
+	]);
+
+	// Process v4
+	if (v4Result.status === "fulfilled") {
+		if (isPrivateHost(v4Result.value.address)) {
+			throw new Error(`Blocked: ${hostname} resolved to private IP ${v4Result.value.address}`);
 		}
-		resolvedIp = address;
-	} catch (err) {
-		// If it's our own block error, re-throw
-		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
-		// IPv4 resolution failed — track it
+		resolvedIp = v4Result.value.address;
+	} else {
 		v4Error = true;
 	}
 
-	// Resolve IPv6
-	try {
-		const { address } = await dns.promises.lookup(hostname, { family: 6 });
-		if (isPrivateHost(address)) {
-			throw new Error(`Blocked: ${hostname} resolved to private IPv6 ${address}`);
+	// Process v6
+	if (v6Result.status === "fulfilled") {
+		if (isPrivateHost(v6Result.value.address)) {
+			throw new Error(`Blocked: ${hostname} resolved to private IPv6 ${v6Result.value.address}`);
 		}
-		if (!resolvedIp) resolvedIp = address;
-	} catch (err) {
-		if (err instanceof Error && err.message.startsWith("Blocked:")) throw err;
-		// IPv6 resolution failed — track it
+		if (!resolvedIp) resolvedIp = v6Result.value.address;
+	} else {
 		v6Error = true;
 	}
 

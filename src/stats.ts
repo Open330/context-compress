@@ -1,5 +1,5 @@
-import { formatBytes } from "./executor.js";
 import type { SessionStats } from "./types.js";
+import { formatBytes } from "./utils.js";
 
 const BAR_WIDTH = 20;
 

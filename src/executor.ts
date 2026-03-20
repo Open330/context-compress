@@ -7,6 +7,7 @@ import { debug } from "./logger.js";
 import type { RuntimeMap } from "./runtime/index.js";
 import type { LanguagePlugin } from "./runtime/plugin.js";
 import type { ExecFileOptions, ExecOptions, ExecResult, Language } from "./types.js";
+import { formatBytes } from "./utils.js";
 
 const DEFAULT_TIMEOUT = 30_000;
 
@@ -227,21 +228,28 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 export { deduplicateLines, groupErrorLines };
 
-export function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes}B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
 export class SubprocessExecutor {
 	private runtimes: RuntimeMap;
 	private config: Config;
 	private env: Record<string, string>;
+	private activeProcesses = new Set<import("node:child_process").ChildProcess>();
 
 	constructor(runtimes: RuntimeMap, config: Config) {
 		this.runtimes = runtimes;
 		this.config = config;
 		this.env = buildEnv(config);
+	}
+
+	/** Kill all active child processes and their process trees. */
+	shutdown(): void {
+		for (const proc of this.activeProcesses) {
+			try {
+				if (proc.pid) killProcessTree(proc.pid);
+			} catch {
+				/* ignore */
+			}
+		}
+		this.activeProcesses.clear();
 	}
 
 	/**
@@ -371,6 +379,8 @@ export class SubprocessExecutor {
 				detached: process.platform !== "win32",
 			});
 
+			this.activeProcesses.add(proc);
+
 			proc.stdout?.on("data", (chunk: Buffer) => {
 				totalBytes += chunk.length;
 				if (totalBytes > hardCap) {
@@ -393,6 +403,7 @@ export class SubprocessExecutor {
 
 			proc.on("error", (err) => {
 				debug("Process error:", err.message);
+				this.activeProcesses.delete(proc);
 				if (!resolved) {
 					resolved = true;
 					resolve({
@@ -406,6 +417,7 @@ export class SubprocessExecutor {
 			});
 
 			proc.on("close", (code) => {
+				this.activeProcesses.delete(proc);
 				if (resolved) return;
 				resolved = true;
 				let stdout = Buffer.concat(stdoutChunks).toString("utf-8");
@@ -422,9 +434,11 @@ export class SubprocessExecutor {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
 				}
 
-				// Post-process: dedup repeated lines + group similar errors
-				stdout = deduplicateLines(stdout);
-				stdout = groupErrorLines(stdout);
+				// Post-process: dedup repeated lines + group similar errors (skip for small outputs)
+				if (stdout.length > 10_000) {
+					stdout = deduplicateLines(stdout);
+					stdout = groupErrorLines(stdout);
+				}
 
 				const truncated = Buffer.byteLength(stdout) > maxOutput;
 				if (truncated) {
