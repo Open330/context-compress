@@ -85,17 +85,11 @@ export async function createServer(config: Config) {
 
 	let activeExecutions = 0;
 	const MAX_CONCURRENT_EXECUTIONS = 8;
+	const EXECUTION_LIMIT_ERROR = "Error: too many concurrent executions. Try again shortly.";
 
 	async function withExecutionLimit<T>(fn: () => Promise<T>): Promise<T> {
 		if (activeExecutions >= MAX_CONCURRENT_EXECUTIONS) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: "Error: too many concurrent executions. Try again shortly.",
-					},
-				],
-			} as T;
+			throw new Error(EXECUTION_LIMIT_ERROR);
 		}
 		activeExecutions++;
 		try {
@@ -196,7 +190,13 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
-			const result = await withExecutionLimit(() => executor.execute({ language, code, timeout }));
+			let result;
+			try {
+				result = await withExecutionLimit(() => executor.execute({ language, code, timeout }));
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				return { content: [{ type: "text" as const, text: msg }] };
+			}
 
 			if (result.networkBytes) {
 				tracker.trackSandboxed(result.networkBytes);
@@ -260,14 +260,20 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				};
 			}
 
-			const result = await withExecutionLimit(() =>
-				executor.executeFile({
-					language,
-					code,
-					filePath: absPath,
-					timeout,
-				}),
-			);
+			let result;
+			try {
+				result = await withExecutionLimit(() =>
+					executor.executeFile({
+						language,
+						code,
+						filePath: absPath,
+						timeout,
+					}),
+				);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				return { content: [{ type: "text" as const, text: msg }] };
+			}
 
 			let output = result.stdout;
 			if (result.stderr && result.exitCode !== 0) {
@@ -492,13 +498,19 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 			// Use executor to fetch and convert HTML to markdown in subprocess
 			const fetchCode = buildFetchCode(url, resolvedIp);
-			const result = await withExecutionLimit(() =>
-				executor.execute({
-					language: "javascript",
-					code: fetchCode,
-					timeout: 30_000,
-				}),
-			);
+			let result;
+			try {
+				result = await withExecutionLimit(() =>
+					executor.execute({
+						language: "javascript",
+						code: fetchCode,
+						timeout: 30_000,
+					}),
+				);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				return { content: [{ type: "text" as const, text: msg }] };
+			}
 
 			if (result.exitCode !== 0 || !result.stdout.trim()) {
 				const errMsg = `Failed to fetch ${url}: ${result.stderr || "empty response"}`;
