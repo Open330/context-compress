@@ -6,6 +6,8 @@
 > provides a detailed before/after comparison for 12 common operations,
 > and addresses the natural question: "doesn't less tokens mean losing context?"
 
+**Version**: 2026.3.21 | **Last updated**: 2026-03-22
+
 ---
 
 ## Table of Contents
@@ -17,6 +19,7 @@
 - [Context Window Impact](#context-window-impact)
 - [Cost Impact](#cost-impact)
 - [Deep Dive: How Playwright Snapshot Goes from 56KB to 299B](#deep-dive-how-playwright-snapshot-goes-from-56kb-to-299b)
+- [Security and Reliability](#security-and-reliability)
 - [FAQ: Doesn't Less Tokens Mean Losing Context?](#faq-doesnt-less-tokens-mean-losing-context)
 
 ---
@@ -26,16 +29,18 @@
 Every byte of tool output that enters Claude Code's context window **consumes tokens permanently**. In a typical coding session:
 
 ```
-Read a bundled file          →  776KB  →  194,076 tokens
-Playwright browser snapshot  →   56KB  →   14,000 tokens
-npm test (42 tests)          →    4KB  →      935 tokens
-git diff (3 commits)         →    8KB  →    2,000 tokens
+Read a bundled file          →  776KB  →  155K-259K tokens
+Playwright browser snapshot  →   56KB  →   11K-19K tokens
+npm test (42 tests)          →    4KB  →     748-1,246 tokens
+git diff (3 commits)         →    8KB  →   1,600-2,667 tokens
                                          ─────────────────
-                                Total:    211,011 tokens
-                                         ← already exceeds 200K window
+                                Total:    169K-282K tokens
+                                         ← can overflow 200K window
 ```
 
-With just 4 operations, you've **overflowed the entire context window**. Earlier conversation messages get compressed or lost. The agent forgets what you asked. Quality degrades.
+> **Token estimation**: 1 token ≈ 3-5 bytes depending on content. We use a range (bytes/5 to bytes/3) because Anthropic does not publish a local tokenizer for Claude 3+ models.
+
+With just 4 operations, you risk **overflowing the entire context window**. Earlier conversation messages get compressed or lost. The agent forgets what you asked. Quality degrades.
 
 The worst part: **99% of that tool output is noise** — import statements, boilerplate, minified code, irrelevant test output. The agent doesn't benefit from seeing it. It just crowds out the conversation.
 
@@ -47,7 +52,7 @@ context-compress doesn't delete data — it **defers** it. All data is preserved
 
 ### Layer 1: Sandbox Execution
 
-The agent writes code to process data. Only `console.log()` output enters context.
+The agent writes code to process data. Only `console.log()` output enters context. 11 languages supported: JavaScript, TypeScript, Python, Shell, Ruby, Go, Rust, PHP, Perl, R, Elixir.
 
 ```
 execute_file("server.bundle.mjs", code: `
@@ -61,9 +66,11 @@ Context:       420 bytes (the extracted schema)
 
 The agent isn't blindly losing context — it's **choosing** what matters via code.
 
+**Safeguards**: Code input limited to 1MB. Subprocess timeout (default 30s). Output hard cap (100MB). Process group kill on timeout. Concurrent executions limited to 8 globally.
+
 ### Layer 2: FTS5 Knowledge Base
 
-Full data is stored in a searchable SQLite FTS5 database with BM25 ranking, Porter stemming, and fuzzy matching. The agent can query it at any time.
+Full data is stored in a searchable SQLite FTS5 database with BM25 ranking, Porter stemming, trigram matching, and Levenshtein fuzzy correction (with early-exit optimization).
 
 ```
 index(path: "snapshot.md")          → 56KB stored, 42 chunks created
@@ -73,6 +80,8 @@ search("order table row headers")   → 180B match returned
 ```
 
 Data is **not lost**. It's **indexed and searchable on demand**.
+
+**Persistence option**: Set `persistDb: true` in config to survive MCP server restarts.
 
 ### Layer 3: Intent-Based Auto-Filter
 
@@ -93,103 +102,107 @@ Small outputs are **never compressed**. Large outputs are filtered by what was a
 
 The following comparison uses realistic output sizes measured from the context-compress project itself.
 
-> **Token calculation**: 1 token ≈ 4 bytes (English text average)
+> **Token calculation**: 1 token ≈ 3-5 bytes. The "Tokens" column shows the midpoint estimate (bytes/4). See [Cost Impact](#cost-impact) for range-based calculations.
 
 ### 1. Read large source file (server.ts ~21KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 21,000 | 5,250 | `Read` tool → full file dumped into context |
-| **After** | 350 | 88 | `execute_file` → agent prints only what it needs |
-| **Saved** | | **5,162** | **98.3% reduction** |
+| **Before** | 21,000 | ~5,250 | `Read` tool → full file dumped into context |
+| **After** | 350 | ~88 | `execute_file` → agent prints only what it needs |
+| **Saved** | | **~5,162** | **98.3% reduction** |
 
 ### 2. Read bundled file (server.bundle.mjs ~776KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 776,304 | 194,076 | `Read` tool → full file in context (truncated at 2000 lines) |
-| **After** | 420 | 105 | `execute_file` → extract specific function/pattern |
-| **Saved** | | **193,971** | **99.9% reduction** |
+| **Before** | 776,304 | ~194,076 | `Read` tool → full file in context (truncated at 2000 lines) |
+| **After** | 420 | ~105 | `execute_file` → extract specific function/pattern |
+| **Saved** | | **~193,971** | **99.9% reduction** |
 
 ### 3. npm test output (42 tests, ~3.7KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 3,739 | 935 | `Bash` → full stdout in context |
-| **After** | 180 | 45 | `execute` with `intent: "failing tests"` → summary only |
-| **Saved** | | **890** | **95.2% reduction** |
+| **Before** | 3,739 | ~935 | `Bash` → full stdout in context |
+| **After** | 180 | ~45 | `execute` with `intent: "failing tests"` → summary only |
+| **Saved** | | **~890** | **95.2% reduction** |
 
 ### 4. git log (full history, ~5KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 5,000 | 1,250 | `Bash git log` → all commits in context |
-| **After** | 250 | 63 | `execute` + `search` for specific commits |
-| **Saved** | | **1,187** | **95.0% reduction** |
+| **Before** | 5,000 | ~1,250 | `Bash git log` → all commits in context |
+| **After** | 250 | ~63 | `execute` + `search` for specific commits |
+| **Saved** | | **~1,187** | **95.0% reduction** |
 
 ### 5. git diff (3 commits, ~8KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 8,000 | 2,000 | `Bash git diff` → full patch in context |
-| **After** | 400 | 100 | `execute` + `search` for changed functions |
-| **Saved** | | **1,900** | **95.0% reduction** |
+| **Before** | 8,000 | ~2,000 | `Bash git diff` → full patch in context |
+| **After** | 400 | ~100 | `execute` + `search` for changed functions |
+| **Saved** | | **~1,900** | **95.0% reduction** |
 
 ### 6. grep across codebase (~1.4KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 1,442 | 361 | `Grep` → all matching lines in context |
-| **After** | 1,442 | 361 | Same — small output passes through as-is |
+| **Before** | 1,442 | ~361 | `Grep` → all matching lines in context |
+| **After** | 1,442 | ~361 | Same — small output passes through as-is |
 | **Saved** | | **0** | **0% — no overhead for small outputs** |
 
 ### 7. Playwright browser_snapshot (~56KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 56,000 | 14,000 | `browser_snapshot` → full accessibility tree in context |
-| **After** | 299 | 75 | save → `index` → `search` for specific elements |
-| **Saved** | | **13,925** | **99.5% reduction** |
+| **Before** | 56,000 | ~14,000 | `browser_snapshot` → full accessibility tree in context |
+| **After** | 299 | ~75 | save → `index` → `search` for specific elements |
+| **Saved** | | **~13,925** | **99.5% reduction** |
 
 ### 8. curl API response (JSON ~12KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 12,000 | 3,000 | `Bash curl` → full JSON response in context |
-| **After** | 350 | 88 | `execute` → extract specific fields with code |
-| **Saved** | | **2,912** | **97.1% reduction** |
+| **Before** | 12,000 | ~3,000 | `Bash curl` → full JSON response in context |
+| **After** | 350 | ~88 | `execute` → extract specific fields with code |
+| **Saved** | | **~2,912** | **97.1% reduction** |
 
 ### 9. fetch_and_index (web docs ~45KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 45,000 | 11,250 | `WebFetch` → full page markdown in context |
-| **After** | 3,000 | 750 | `fetch_and_index` → 3KB preview + rest searchable |
-| **Saved** | | **10,500** | **93.3% reduction** |
+| **Before** | 45,000 | ~11,250 | `WebFetch` → full page markdown in context |
+| **After** | 3,000 | ~750 | `fetch_and_index` → 3KB preview + rest searchable |
+| **Saved** | | **~10,500** | **93.3% reduction** |
+
+**Security**: SSRF protection with DNS rebinding prevention, IP pinning, redirect blocking, and 10MB response size limit. Prompt injection detection on fetched content.
 
 ### 10. batch_execute (5 commands, ~25KB total)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 25,000 | 6,250 | 5x `Bash` → all output in context |
-| **After** | 1,500 | 375 | `batch_execute` + search across all in 1 call |
-| **Saved** | | **5,875** | **94.0% reduction** |
+| **Before** | 25,000 | ~6,250 | 5x `Bash` → all output in context |
+| **After** | 1,500 | ~375 | `batch_execute` + search across all in 1 call |
+| **Saved** | | **~5,875** | **94.0% reduction** |
+
+**Performance**: Commands run with bounded concurrency (max 4 parallel). Global execution limit of 8 prevents resource exhaustion.
 
 ### 11. Read CSV/JSON data file (~100KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 100,000 | 25,000 | `Read` → file contents in context |
-| **After** | 500 | 125 | `execute_file` → extract/aggregate specific data |
-| **Saved** | | **24,875** | **99.5% reduction** |
+| **Before** | 100,000 | ~25,000 | `Read` → file contents in context |
+| **After** | 500 | ~125 | `execute_file` → extract/aggregate specific data |
+| **Saved** | | **~24,875** | **99.5% reduction** |
 
 ### 12. npm install log (~15KB)
 
-| | Bytes | Tokens | Method |
+| | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
-| **Before** | 15,000 | 3,750 | `Bash npm install` → full install log in context |
-| **After** | 200 | 50 | `execute` with `intent: "errors"` → only issues shown |
-| **Saved** | | **3,700** | **98.7% reduction** |
+| **Before** | 15,000 | ~3,750 | `Bash npm install` → full install log in context |
+| **After** | 200 | ~50 | `execute` with `intent: "errors"` → only issues shown |
+| **Saved** | | **~3,700** | **98.7% reduction** |
 
 ---
 
@@ -198,10 +211,10 @@ The following comparison uses realistic output sizes measured from the context-c
 Combining all 12 operations from a single coding session:
 
 ```
-BEFORE:  1,043 KB  →  267,121 tokens consumed
-AFTER:       9 KB  →    2,223 tokens consumed
+BEFORE:  1,043 KB  →  ~261K tokens consumed (bytes/4 midpoint)
+AFTER:       9 KB  →    ~2.2K tokens consumed
                        ────────────────────────
-SAVED:   1,035 KB  →  264,898 tokens
+SAVED:   1,035 KB  →  ~259K tokens
 REDUCTION:                99.2%
 ```
 
@@ -216,42 +229,43 @@ Claude Code uses a 200K token context window.
 │                   200,000 token context window               │
 │                                                              │
 │  WITHOUT context-compress:                                   │
-│  ████████████████████████████████████████████████████ 133.6% │
+│  ████████████████████████████████████████████████████ ~131%  │
 │  ← 12 operations OVERFLOW the window. Conversation lost.     │
 │                                                              │
 │  WITH context-compress:                                      │
-│  █ 1.1%                                                      │
-│  ← 12 operations use 1.1%. 98.9% free for conversation.     │
+│  █ ~1.1%                                                     │
+│  ← 12 operations use ~1.1%. ~98.9% free for conversation.   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 | Metric | Before | After |
 |:--|--:|--:|
-| Tokens consumed | 267,121 | 2,223 |
-| % of context window | 133.6% | 1.1% |
+| Tokens consumed (est.) | ~261,000 | ~2,200 |
+| % of context window | ~131% | ~1.1% |
 | Operations before compaction | ~9 | **~1,100** |
-| Conversation longevity | Short | **~121x longer** |
+| Conversation longevity | Short | **~119x longer** |
 
 ---
 
 ## Cost Impact
 
-Input token pricing (per session, 12 operations):
+Input token pricing (per session, 12 operations). Using midpoint estimate (bytes/4):
 
 | Model | Before | After | Saved per Session |
 |:--|--:|--:|--:|
-| Sonnet 4 ($3/MTok) | $0.80 | $0.007 | **$0.79** |
-| Opus 4 ($15/MTok) | $4.01 | $0.033 | **$3.97** |
+| Haiku 4.5 ($0.80/MTok) | $0.21 | $0.002 | **$0.21** |
+| Sonnet 4.6 ($3/MTok) | $0.78 | $0.007 | **$0.78** |
+| Opus 4.6 ($15/MTok) | $3.92 | $0.033 | **$3.89** |
 
-### Extrapolated Savings
+### Extrapolated Monthly Savings
 
-| Usage | Sonnet Monthly | Opus Monthly |
-|:--|--:|--:|
-| 5 sessions/day | $118.50 | $592.50 |
-| 10 sessions/day | $237.00 | **$1,185.00** |
-| 20 sessions/day | $474.00 | **$2,370.00** |
+| Usage | Haiku | Sonnet | Opus |
+|:--|--:|--:|--:|
+| 5 sessions/day | $31.05 | $116.44 | **$582.19** |
+| 10 sessions/day | $62.10 | $232.88 | **$1,164.38** |
+| 20 sessions/day | $124.20 | $465.75 | **$2,328.75** |
 
-> Note: These are input token savings only. Actual savings vary based on session complexity. Output tokens are unaffected.
+> Note: These are input token savings only. Actual savings vary based on session complexity. Output tokens are unaffected. Token estimates use bytes/4 midpoint; actual counts may vary 20-30%.
 
 ---
 
@@ -317,7 +331,7 @@ The `browser_snapshot()` tool returns a full accessibility tree:
   ... (thousands more lines for a real application)
 ```
 
-**All 56,000 bytes (14,000 tokens) dumped into context. Gone.**
+**All 56,000 bytes (~14,000 tokens) dumped into context. Gone.**
 
 The agent probably only needed the login form. But it paid for the entire page.
 
@@ -363,6 +377,36 @@ The other 55,701 bytes are still in FTS5 — fully searchable. Need the order ta
 
 ---
 
+## Security and Reliability
+
+context-compress v2026.3.21 includes comprehensive security and reliability features:
+
+### Security
+
+| Feature | Description |
+|:--|:--|
+| Environment isolation | Opt-in credential passthrough (`passthroughEnvVars` defaults to empty) |
+| SSRF protection | 4-layer defense: hostname validation, DNS rebinding prevention, IP pinning, redirect blocking |
+| Input limits | Code: 1MB max. Fetch response: 10MB max. Index content: 50MB max |
+| Concurrency control | Global limit of 8 concurrent executions. batch_execute: max 4 parallel |
+| Prompt injection detection | Regex-based advisory warnings on fetched content (7 patterns) |
+| Path traversal protection | `realpathSync` with symlink resolution + project boundary enforcement |
+| Process isolation | Timeout, output caps (100MB), process group kill, safe environment |
+
+### Reliability
+
+| Feature | Description |
+|:--|:--|
+| Graceful shutdown | Active subprocess tracking, SIGTERM/SIGINT cleanup, uncaughtException handling |
+| DB resilience | In-memory fallback on disk-full. WAL mode for crash recovery. Stale DB cleanup |
+| Output processing | Line deduplication, error grouping, smart 60/40 head/tail truncation |
+| Search fallback | 3-layer: Porter stemming → trigram (lazy) → Levenshtein fuzzy correction |
+| Configuration | ENV > file > defaults with Zod validation and sanity clamping |
+
+For the full security model, see [SECURITY.md](../SECURITY.md).
+
+---
+
 ## FAQ: Doesn't Less Tokens Mean Losing Context?
 
 **This is the right question to ask.** If we're feeding the agent fewer tokens, doesn't it see less?
@@ -374,7 +418,7 @@ The other 55,701 bytes are still in FTS5 — fully searchable. Need the order ta
 ```
 WITHOUT context-compress (passive exposure):
 ┌──────────────────────────────────────────────────────┐
-│ 194,076 tokens loaded into context                   │
+│ ~194,000 tokens loaded into context                   │
 │                                                      │
 │  99% = imports, boilerplate, minified code,          │
 │        source maps, irrelevant functions...          │
@@ -390,7 +434,7 @@ WITHOUT context-compress (passive exposure):
 
 WITH context-compress (active retrieval):
 ┌──────────────────────────────────────────────────────┐
-│ 105 tokens loaded into context                       │
+│ ~105 tokens loaded into context                       │
 │                                                      │
 │  100% = exactly the function you care about          │
 │                                                      │
@@ -443,11 +487,13 @@ context-compress trades **passive exposure to noise** for **active retrieval of 
 
 | Tool | Mechanism | Best For |
 |:--|:--|:--|
-| `execute` | Runs code in sandbox. Only `console.log` enters context | CLI commands, API calls, test runners |
+| `execute` | Runs code in sandbox (11 languages). Only `console.log` enters context | CLI commands, API calls, test runners |
 | `execute_file` | Reads file into sandbox. Only printed summary enters context | Large source files, CSVs, logs, data files |
 | `index` + `search` | FTS5 stores all data. BM25 returns only matching chunks | Documentation, snapshots, large datasets |
 | `fetch_and_index` | HTML → markdown → FTS5. Returns 3KB preview + searchable index | Web pages, API docs, reference material |
-| `batch_execute` | Runs N commands, indexes all output, searches across all in 1 call | Multi-step workflows, exploration |
+| `batch_execute` | Runs N commands (max 4 parallel), indexes all output, searches across all in 1 call | Multi-step workflows, exploration |
+| `discover` | Shows knowledge base inventory and optimization suggestions | Understanding available indexed data |
+| `stats` | Real-time session statistics with token range estimates and cost | Monitoring compression effectiveness |
 
 The core principle:
 
@@ -455,5 +501,6 @@ The core principle:
 
 ---
 
-*Generated from real benchmarks on the context-compress v1.0.0 codebase.*
-*Token calculation: 1 token ≈ 4 bytes (English text average).*
+*Generated from real benchmarks on the context-compress v2026.3.21 codebase.*
+*Token estimates use bytes/4 midpoint. Actual token counts may vary by 20-30% depending on content type.*
+*See SECURITY.md for the full trust model and security architecture.*
