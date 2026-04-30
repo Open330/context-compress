@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
+import { applyCommandFilter } from "./filters.js";
 import { debug } from "./logger.js";
 import type { RuntimeMap } from "./runtime/index.js";
 import type { LanguagePlugin } from "./runtime/plugin.js";
@@ -10,6 +11,13 @@ import type { ExecFileOptions, ExecOptions, ExecResult, Language } from "./types
 import { formatBytes } from "./utils.js";
 
 const DEFAULT_TIMEOUT = 30_000;
+
+/** Strip ANSI escape codes from output */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires \x1b
+const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/;
+function stripAnsi(str: string): string {
+	return str.replace(new RegExp(ANSI_RE.source, "g"), "");
+}
 
 /** Safe base environment variables */
 const SAFE_ENV_KEYS = [
@@ -79,6 +87,31 @@ function killProcessTree(pid: number): void {
 			// Process already exited
 		}
 	}
+}
+
+/**
+ * Strip progress/spinner lines that add no informational value.
+ * Removes: percentage bars, spinner characters, ANSI escape codes, download progress.
+ */
+function stripProgressLines(output: string): string {
+	const lines = output.split("\n");
+	const filtered = lines.filter((l) => {
+		const trimmed = l.trim();
+		// ANSI escape sequences (colors, cursor movement)
+		if (ANSI_RE.test(l) && trimmed.replace(new RegExp(ANSI_RE.source, "g"), "").trim() === "")
+			return false;
+		// Pure progress bars: [=====>    ] 45%  or  ████░░░░ 45%
+		if (/^[\s\[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) && trimmed.length > 3) return false;
+		// Spinner lines: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ or - \ | /
+		if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\-\\|/]\s/.test(trimmed)) return false;
+		// Download progress: "Downloading 45.2 MB / 100.3 MB"
+		if (/(?:downloading|uploading|fetching|resolving)\s+[\d.]+\s*[kmg]?b/i.test(trimmed))
+			return false;
+		// ETA/speed lines: "2.3 MB/s, ETA 5s"
+		if (/\d+\.?\d*\s*[kmg]?b\/s/i.test(trimmed) && /eta|remaining/i.test(trimmed)) return false;
+		return true;
+	});
+	return filtered.join("\n");
 }
 
 /**
@@ -226,7 +259,7 @@ function smartTruncate(output: string, maxBytes: number): string {
 	return headLines.join("\n") + separator + tailLines.join("\n");
 }
 
-export { deduplicateLines, groupErrorLines };
+export { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines };
 
 export class SubprocessExecutor {
 	private runtimes: RuntimeMap;
@@ -321,6 +354,7 @@ export class SubprocessExecutor {
 				timeout,
 				maxOutput,
 				plugin.needsShell,
+				opts.language === "shell" ? opts.code : undefined,
 			);
 		} finally {
 			// Defer cleanup slightly so runtime (especially Bun) fully exits
@@ -360,6 +394,7 @@ export class SubprocessExecutor {
 		timeout: number,
 		maxOutput: number,
 		useShell?: boolean,
+		shellCode?: string,
 	): Promise<ExecResult> {
 		return new Promise((resolve) => {
 			const hardCap = this.config.hardCapBytes;
@@ -434,8 +469,20 @@ export class SubprocessExecutor {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
 				}
 
-				// Post-process: dedup repeated lines + group similar errors (skip for small outputs)
+				// Apply command-specific filter for shell commands (before generic pipeline)
+				if (shellCode && stdout) {
+					const filtered = applyCommandFilter(shellCode, stdout);
+					if (filtered.filtered) {
+						stdout = filtered.output;
+					}
+				}
+
+				// Strip ANSI codes (always — they are pure noise in LLM context)
+				stdout = stripAnsi(stdout);
+
+				// Post-process: strip progress, dedup repeated lines + group similar errors (skip for small outputs)
 				if (stdout.length > 10_000) {
+					stdout = stripProgressLines(stdout);
 					stdout = deduplicateLines(stdout);
 					stdout = groupErrorLines(stdout);
 				}

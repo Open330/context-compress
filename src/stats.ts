@@ -1,4 +1,5 @@
-import type { SessionStats } from "./types.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import type { CumulativeStats, SessionStats } from "./types.js";
 import { formatBytes } from "./utils.js";
 
 const BAR_WIDTH = 20;
@@ -27,6 +28,12 @@ export class SessionTracker {
 		sessionStart: Date.now(),
 	};
 
+	private cumulativeFile: string | null;
+
+	constructor(cumulativeFile?: string) {
+		this.cumulativeFile = cumulativeFile ?? null;
+	}
+
 	trackCall(toolName: string, responseBytes: number): void {
 		this.stats.calls[toolName] = (this.stats.calls[toolName] ?? 0) + 1;
 		this.stats.bytesReturned[toolName] = (this.stats.bytesReturned[toolName] ?? 0) + responseBytes;
@@ -42,6 +49,55 @@ export class SessionTracker {
 
 	getSnapshot(): Readonly<SessionStats> {
 		return { ...this.stats };
+	}
+
+	/** Load cumulative stats from disk */
+	loadCumulative(): CumulativeStats | null {
+		if (!this.cumulativeFile) return null;
+		try {
+			const data = readFileSync(this.cumulativeFile, "utf-8");
+			return JSON.parse(data);
+		} catch {
+			return null;
+		}
+	}
+
+	/** Save current session stats to cumulative file */
+	saveCumulative(): void {
+		if (!this.cumulativeFile) return;
+		const snap = this.stats;
+		const keptOut = snap.bytesIndexed + snap.bytesSandboxed;
+		const totalReturned = Object.values(snap.bytesReturned).reduce((a, b) => a + b, 0);
+
+		const cumulative = this.loadCumulative() ?? {
+			totalBytesSaved: 0,
+			totalBytesProcessed: 0,
+			totalCalls: 0,
+			totalSessions: 0,
+			firstSeen: new Date().toISOString(),
+			lastSeen: new Date().toISOString(),
+			perCommand: {},
+		};
+
+		cumulative.totalBytesSaved += keptOut;
+		cumulative.totalBytesProcessed += keptOut + totalReturned;
+		cumulative.totalCalls += Object.values(snap.calls).reduce((a, b) => a + b, 0);
+		cumulative.totalSessions += 1;
+		cumulative.lastSeen = new Date().toISOString();
+
+		// Per-command breakdown
+		for (const [name, calls] of Object.entries(snap.calls)) {
+			if (!cumulative.perCommand[name]) {
+				cumulative.perCommand[name] = { calls: 0, bytesSaved: 0 };
+			}
+			cumulative.perCommand[name].calls += calls;
+		}
+
+		try {
+			writeFileSync(this.cumulativeFile, JSON.stringify(cumulative, null, 2));
+		} catch {
+			// Ignore write errors
+		}
 	}
 
 	formatReport(): string {
@@ -118,6 +174,20 @@ export class SessionTracker {
 		lines.push(
 			`\nContext-compress kept ${formatBytes(keptOut)} out of context (${reductionPct}% savings).`,
 		);
+
+		// Cumulative stats section
+		const cumulative = this.loadCumulative();
+		if (cumulative) {
+			lines.push("\n## Cumulative Savings (All Sessions)\n");
+			lines.push("| Metric | Value |");
+			lines.push("|--------|-------|");
+			lines.push(`| Sessions tracked | ${cumulative.totalSessions} |`);
+			lines.push(`| Total data processed | ${formatBytes(cumulative.totalBytesProcessed)} |`);
+			lines.push(`| Total kept out of context | ${formatBytes(cumulative.totalBytesSaved)} |`);
+			const cumTokensMid = Math.round(cumulative.totalBytesSaved / 4);
+			lines.push(`| Est. total tokens saved | ~${cumTokensMid.toLocaleString()} |`);
+			lines.push(`| Tracking since | ${cumulative.firstSeen.split("T")[0]} |`);
+		}
 
 		return lines.join("\n");
 	}

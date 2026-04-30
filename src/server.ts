@@ -81,7 +81,10 @@ export async function createServer(config: Config) {
 		store = new ContentStore(":memory:");
 		dbFallback = true;
 	}
-	const tracker = new SessionTracker();
+	const cumulativeFile = config.persistDb
+		? join(config.dbDir ?? join(projectDir, ".context-compress"), "stats.json")
+		: undefined;
+	const tracker = new SessionTracker(cumulativeFile);
 
 	let activeExecutions = 0;
 	const MAX_CONCURRENT_EXECUTIONS = 8;
@@ -122,6 +125,11 @@ export async function createServer(config: Config) {
 
 	// Graceful shutdown: kill subprocesses and close the database on exit
 	const shutdown = () => {
+		try {
+			tracker.saveCumulative();
+		} catch {
+			// Ignore errors during shutdown
+		}
 		try {
 			executor.shutdown();
 		} catch {
@@ -655,6 +663,7 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 		"Returns context consumption statistics for the current session. Shows total bytes returned to context, breakdown by tool, call counts, estimated token usage, context savings ratio, and visual charts.",
 		{},
 		async () => {
+			tracker.saveCumulative();
 			const report = tracker.formatReport();
 			tracker.trackCall("stats", Buffer.byteLength(report));
 			return { content: [{ type: "text" as const, text: report }] };

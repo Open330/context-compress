@@ -86,3 +86,13 @@ export interface SessionStats {
 	bytesSandboxed: number;
 	sessionStart: number;
 }
+
+export interface CumulativeStats {
+	totalBytesSaved: number;
+	totalBytesProcessed: number;
+	totalCalls: number;
+	totalSessions: number;
+	firstSeen: string; // ISO date
+	lastSeen: string;
+	perCommand: Record<string, { calls: number; bytesSaved: number }>;
+}
