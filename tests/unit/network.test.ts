@@ -75,6 +75,25 @@ describe("isPrivateHost", () => {
 		assert.strictEqual(isPrivateHost("::ffff:192.168.1.1"), true);
 	});
 
+	it("blocks IPv6-mapped IPv4 in hex form (::ffff:HHHH:HHHH)", () => {
+		// 7f00:0001 = 127.0.0.1
+		assert.strictEqual(isPrivateHost("::ffff:7f00:1"), true);
+		assert.strictEqual(isPrivateHost("::ffff:7f00:0001"), true);
+		// 0a00:0001 = 10.0.0.1
+		assert.strictEqual(isPrivateHost("::ffff:a00:1"), true);
+		// c0a8:0101 = 192.168.1.1
+		assert.strictEqual(isPrivateHost("::ffff:c0a8:101"), true);
+		// a9fe:0101 = 169.254.1.1 (link-local)
+		assert.strictEqual(isPrivateHost("::ffff:a9fe:101"), true);
+	});
+
+	it("allows public IPv4 in hex-mapped IPv6 form", () => {
+		// 0808:0808 = 8.8.8.8
+		assert.strictEqual(isPrivateHost("::ffff:808:808"), false);
+		// 0101:0101 = 1.1.1.1
+		assert.strictEqual(isPrivateHost("::ffff:101:101"), false);
+	});
+
 	it("blocks IPv6 link-local fe80::", () => {
 		assert.strictEqual(isPrivateHost("fe80::1"), true);
 	});

@@ -38,6 +38,18 @@ export function isPrivateHost(hostname: string): boolean {
 	const mappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
 	if (mappedMatch) return isPrivateHost(mappedMatch[1]);
 
+	// IPv6 mapped IPv4, hex form: ::ffff:7f00:1 (= 127.0.0.1), ::ffff:c0a8:101 (= 192.168.1.1)
+	const hexMappedMatch = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+	if (hexMappedMatch) {
+		const g1 = hexMappedMatch[1].padStart(4, "0");
+		const g2 = hexMappedMatch[2].padStart(4, "0");
+		const b1 = Number.parseInt(g1.slice(0, 2), 16);
+		const b2 = Number.parseInt(g1.slice(2, 4), 16);
+		const b3 = Number.parseInt(g2.slice(0, 2), 16);
+		const b4 = Number.parseInt(g2.slice(2, 4), 16);
+		return isPrivateHost(`${b1}.${b2}.${b3}.${b4}`);
+	}
+
 	// IPv6 link-local: fe80::/10
 	if (/^fe[89ab]/i.test(h)) return true;
 

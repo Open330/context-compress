@@ -146,6 +146,10 @@ export class ContentStore {
 	private vocabCountStmt!: Database.Statement;
 	private vocabInsertStmt!: Database.Statement;
 
+	// Cache for getDistinctiveTerms — keyed by sourceId, with "_all" for the global query.
+	// Invalidated whenever index() runs, since chunk counts/distributions change.
+	private distinctiveTermsCache = new Map<number | "_all", string[]>();
+
 	constructor(options?: string | { dbPath?: string; persistDb?: boolean; dbDir?: string | null }) {
 		let path: string;
 		if (typeof options === "string") {
@@ -266,6 +270,9 @@ export class ContentStore {
 		});
 
 		const sourceId = tx() as number;
+
+		// Invalidate distinctive-terms cache: new chunks change frequencies and totals.
+		this.distinctiveTermsCache.clear();
 
 		return {
 			sourceId,
@@ -438,6 +445,10 @@ export class ContentStore {
 	 * Get distinctive terms for search hint.
 	 */
 	getDistinctiveTerms(sourceId?: number): string[] {
+		const cacheKey: number | "_all" = sourceId ?? "_all";
+		const cached = this.distinctiveTermsCache.get(cacheKey);
+		if (cached) return cached;
+
 		const totalChunks = (
 			this.db
 				.prepare(
@@ -448,7 +459,10 @@ export class ContentStore {
 				.get(...(sourceId ? [sourceId] : [])) as { cnt: number }
 		).cnt;
 
-		if (totalChunks === 0) return [];
+		if (totalChunks === 0) {
+			this.distinctiveTermsCache.set(cacheKey, []);
+			return [];
+		}
 
 		const filter = sourceId ? " WHERE source_id = ?" : "";
 		const stmt = this.db.prepare(`SELECT content FROM chunks${filter} LIMIT 500`);
@@ -486,7 +500,9 @@ export class ContentStore {
 		}
 
 		scored.sort((a, b) => b.score - a.score);
-		return scored.slice(0, 40).map((s) => s.word);
+		const terms = scored.slice(0, 40).map((s) => s.word);
+		this.distinctiveTermsCache.set(cacheKey, terms);
+		return terms;
 	}
 
 	/**
