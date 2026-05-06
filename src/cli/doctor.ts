@@ -7,17 +7,9 @@ import Database from "better-sqlite3";
 import { loadConfig } from "../config.js";
 import { SubprocessExecutor } from "../executor.js";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
+import { getVersion } from "../util/version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-function getVersion(): string {
-	try {
-		const pkg = JSON.parse(readFileSync(resolve(__dirname, "..", "..", "package.json"), "utf-8"));
-		return pkg.version ?? "unknown";
-	} catch {
-		return "unknown";
-	}
-}
 
 function readSettings(): Record<string, unknown> | null {
 	try {
@@ -146,7 +138,7 @@ export async function doctor(): Promise<number> {
 	}
 
 	// 6. Version
-	const version = getVersion();
+	const version = getVersion("unknown");
 	console.log(`\n  Version: v${version}`);
 
 	// Summary
