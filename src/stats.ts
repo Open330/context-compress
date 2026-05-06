@@ -88,7 +88,7 @@ export class SessionTracker {
 		// Per-command breakdown
 		for (const [name, calls] of Object.entries(snap.calls)) {
 			if (!cumulative.perCommand[name]) {
-				cumulative.perCommand[name] = { calls: 0, bytesSaved: 0 };
+				cumulative.perCommand[name] = { calls: 0 };
 			}
 			cumulative.perCommand[name].calls += calls;
 		}

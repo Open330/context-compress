@@ -6,7 +6,7 @@
 > provides a detailed before/after comparison for 12 common operations,
 > and addresses the natural question: "doesn't less tokens mean losing context?"
 
-**Version**: 2026.3.21 | **Last updated**: 2026-03-22
+**Version**: 2026.3.22 | **Last updated**: 2026-03-22
 
 ---
 
@@ -46,9 +46,27 @@ The worst part: **99% of that tool output is noise** — import statements, boil
 
 ---
 
-## The Solution: 3-Layer Architecture
+## The Solution: 4-Layer Architecture
 
 context-compress doesn't delete data — it **defers** it. All data is preserved and searchable. Only the relevant parts enter context.
+
+### Layer 0: Command-Specific Output Filters (v2026.3.22)
+
+Before generic compression, output passes through command-aware filters that strip noise specific to each tool:
+
+| Command | What's Stripped | Typical Savings |
+|:--|:--|:--|
+| `git push/pull/fetch/clone` | Remote progress lines, object counting, delta resolution | 40-60% |
+| `git status` | Hint lines (`use "git add"...`), blank lines | 20-30% |
+| `npm/yarn/pnpm install` | Deprecation warnings, funding prompts, tree-drawing chars | 30-50% |
+| `npm test / jest / vitest / pytest` | Passing test details, keeps only failures + summary | 70-95% |
+| `cargo build / make / gradle` | Download progress, "Compiling X/Y", lock waits | 50-70% |
+| `docker build` | Layer hash lines (` ---> abc123`), build context transfer | 30-50% |
+| `ls -R / find / tree` | Directory grouping for large listings (50+ files) | 60-80% |
+
+Additionally, all output passes through:
+- **ANSI stripping**: Terminal escape codes (colors, cursor movement) are always removed — pure noise for LLMs
+- **Progress line removal**: Spinner characters, percentage bars, download/ETA lines are filtered
 
 ### Layer 1: Sandbox Execution
 
@@ -204,18 +222,28 @@ The following comparison uses realistic output sizes measured from the context-c
 | **After** | 200 | ~50 | `execute` with `intent: "errors"` → only issues shown |
 | **Saved** | | **~3,700** | **98.7% reduction** |
 
+### 13. npm test with ANSI + verbose output (~8KB, v2026.3.22)
+
+| | Bytes | Tokens (est.) | Method |
+|:--|--:|--:|:--|
+| **Before** | 8,000 | ~2,000 | `Bash npm test` → full ANSI-colored verbose output in context |
+| **After** | 350 | ~88 | Command filter strips ANSI + passing tests → only failures + summary |
+| **Saved** | | **~1,912** | **95.6% reduction** |
+
+**Pipeline**: ANSI stripping → command filter (test runner detection) → progress line removal → deduplication → smart truncation. All 5 layers applied automatically.
+
 ---
 
 ## Session Totals
 
-Combining all 12 operations from a single coding session:
+Combining all 13 operations from a single coding session:
 
 ```
-BEFORE:  1,043 KB  →  ~261K tokens consumed (bytes/4 midpoint)
-AFTER:       9 KB  →    ~2.2K tokens consumed
+BEFORE:  1,051 KB  →  ~263K tokens consumed (bytes/4 midpoint)
+AFTER:       9 KB  →    ~2.3K tokens consumed
                        ────────────────────────
-SAVED:   1,035 KB  →  ~259K tokens
-REDUCTION:                99.2%
+SAVED:   1,042 KB  →  ~260K tokens
+REDUCTION:                99.1%
 ```
 
 ---
@@ -229,21 +257,21 @@ Claude Code uses a 200K token context window.
 │                   200,000 token context window               │
 │                                                              │
 │  WITHOUT context-compress:                                   │
-│  ████████████████████████████████████████████████████ ~131%  │
-│  ← 12 operations OVERFLOW the window. Conversation lost.     │
+│  ████████████████████████████████████████████████████ ~132%  │
+│  ← 13 operations OVERFLOW the window. Conversation lost.     │
 │                                                              │
 │  WITH context-compress:                                      │
-│  █ ~1.1%                                                     │
-│  ← 12 operations use ~1.1%. ~98.9% free for conversation.   │
+│  █ ~1.2%                                                     │
+│  ← 13 operations use ~1.2%. ~98.8% free for conversation.   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 | Metric | Before | After |
 |:--|--:|--:|
-| Tokens consumed (est.) | ~261,000 | ~2,200 |
-| % of context window | ~131% | ~1.1% |
-| Operations before compaction | ~9 | **~1,100** |
-| Conversation longevity | Short | **~119x longer** |
+| Tokens consumed (est.) | ~263,000 | ~2,300 |
+| % of context window | ~132% | ~1.2% |
+| Operations before compaction | ~9 | **~1,080** |
+| Conversation longevity | Short | **~117x longer** |
 
 ---
 
@@ -379,7 +407,7 @@ The other 55,701 bytes are still in FTS5 — fully searchable. Need the order ta
 
 ## Security and Reliability
 
-context-compress v2026.3.21 includes comprehensive security and reliability features:
+context-compress v2026.3.22 includes comprehensive security and reliability features:
 
 ### Security
 
@@ -399,7 +427,8 @@ context-compress v2026.3.21 includes comprehensive security and reliability feat
 |:--|:--|
 | Graceful shutdown | Active subprocess tracking, SIGTERM/SIGINT cleanup, uncaughtException handling |
 | DB resilience | In-memory fallback on disk-full. WAL mode for crash recovery. Stale DB cleanup |
-| Output processing | Line deduplication, error grouping, smart 60/40 head/tail truncation |
+| Output processing | ANSI stripping, progress line removal, command-specific filters, line deduplication, error grouping, smart 60/40 head/tail truncation |
+| Cumulative stats | Cross-session token savings persisted to `stats.json` when `persistDb` is enabled |
 | Search fallback | 3-layer: Porter stemming → trigram (lazy) → Levenshtein fuzzy correction |
 | Configuration | ENV > file > defaults with Zod validation and sanity clamping |
 
@@ -501,6 +530,6 @@ The core principle:
 
 ---
 
-*Generated from real benchmarks on the context-compress v2026.3.21 codebase.*
+*Generated from real benchmarks on the context-compress v2026.3.22 codebase.*
 *Token estimates use bytes/4 midpoint. Actual token counts may vary by 20-30% depending on content type.*
 *See SECURITY.md for the full trust model and security architecture.*

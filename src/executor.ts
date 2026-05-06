@@ -15,8 +15,10 @@ const DEFAULT_TIMEOUT = 30_000;
 /** Strip ANSI escape codes from output */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires \x1b
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires \x1b
+const ANSI_RE_G = /\x1b\[[0-9;]*[a-zA-Z]/g;
 function stripAnsi(str: string): string {
-	return str.replace(new RegExp(ANSI_RE.source, "g"), "");
+	return str.replace(ANSI_RE_G, "");
 }
 
 /** Safe base environment variables */
@@ -98,8 +100,7 @@ function stripProgressLines(output: string): string {
 	const filtered = lines.filter((l) => {
 		const trimmed = l.trim();
 		// ANSI escape sequences (colors, cursor movement)
-		if (ANSI_RE.test(l) && trimmed.replace(new RegExp(ANSI_RE.source, "g"), "").trim() === "")
-			return false;
+		if (ANSI_RE.test(l) && trimmed.replace(ANSI_RE_G, "").trim() === "") return false;
 		// Pure progress bars: [=====>    ] 45%  or  ████░░░░ 45%
 		if (/^[\s\[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) && trimmed.length > 3) return false;
 		// Spinner lines: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ or - \ | /
@@ -469,6 +470,10 @@ export class SubprocessExecutor {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
 				}
 
+				// Strip ANSI codes first so command-specific filters can detect markers
+				// (PASS/FAIL, ✓/✗, etc.) that real-world output wraps in color escapes.
+				stdout = stripAnsi(stdout);
+
 				// Apply command-specific filter for shell commands (before generic pipeline)
 				if (shellCode && stdout) {
 					const filtered = applyCommandFilter(shellCode, stdout);
@@ -476,9 +481,6 @@ export class SubprocessExecutor {
 						stdout = filtered.output;
 					}
 				}
-
-				// Strip ANSI codes (always — they are pure noise in LLM context)
-				stdout = stripAnsi(stdout);
 
 				// Post-process: strip progress, dedup repeated lines + group similar errors (skip for small outputs)
 				if (stdout.length > 10_000) {

@@ -94,5 +94,5 @@ export interface CumulativeStats {
 	totalSessions: number;
 	firstSeen: string; // ISO date
 	lastSeen: string;
-	perCommand: Record<string, { calls: number; bytesSaved: number }>;
+	perCommand: Record<string, { calls: number }>;
 }
