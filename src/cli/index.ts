@@ -3,21 +3,23 @@
  * context-compress CLI
  *
  * Usage:
- *   context-compress              → Start MCP server (stdio)
- *   context-compress setup        → Interactive setup
- *   context-compress doctor       → Diagnose issues
- *   context-compress uninstall    → Clean removal
- *   context-compress filter [--cmd '<orig>']  → stdin → compressed → stdout
- *   context-compress wrap <cmd>   → run cmd, compress its stdout, exit with cmd's code
+ *   context-compress                    → Start MCP server (stdio)
+ *   context-compress setup              → Interactive setup (prints instructions)
+ *   context-compress setup --auto       → One-line setup: write ~/.claude/settings.json
+ *   context-compress init --auto        → Alias for setup --auto
+ *   context-compress doctor             → Diagnose issues
+ *   context-compress uninstall          → Clean removal
+ *   context-compress filter [--cmd '<orig>']   → stdin → compressed → stdout
+ *   context-compress wrap <cmd>         → run cmd, compress its stdout, exit with cmd's code
  */
 
 const args = process.argv.slice(2);
 const command = args[0];
 const rest = args.slice(1);
 
-if (command === "setup") {
+if (command === "setup" || command === "init") {
 	const { setup } = await import("./setup.js");
-	await setup();
+	await setup(rest);
 } else if (command === "doctor") {
 	const { doctor } = await import("./doctor.js");
 	const code = await doctor();

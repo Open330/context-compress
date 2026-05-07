@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
 import { applyCommandFilter } from "../filters.js";
+import { StreamCompressor } from "../util/stream-compress.js";
 
 const DEDUP_THRESHOLD = 10_000;
 
@@ -54,27 +55,43 @@ export async function runFilter(args: string[]): Promise<number> {
 }
 
 /**
- * `context-compress wrap -- <cmd ...>` or `context-compress wrap <single-string>`
+ * `context-compress wrap [--stream] -- <cmd ...>`
  *
- * Spawns the given command via the user shell, captures stdout/stderr,
- * applies the pipeline, prints filtered stdout (and unfiltered stderr) and
- * exits with the original command's exit code.
+ * Default (buffered): spawn cmd, capture all stdout, apply full pipeline,
+ * print filtered stdout, propagate child's exit code.
+ *
+ * `--stream`: emit filtered output line-by-line as the child produces it.
+ * Use for long-running commands (tail -f, cargo watch, builds with
+ * progressive output) where buffering would defer all output until exit.
+ * Stream mode applies ANSI strip + progress filter + adjacent dedup only —
+ * command-aware filters need the full output.
  *
  * Usage:
  *   context-compress wrap "npm test"
+ *   context-compress wrap --stream "tail -f /var/log/app.log"
  *   context-compress wrap -- npm test
  */
 export async function runWrap(args: string[]): Promise<number> {
 	if (args.length === 0) {
-		process.stderr.write("Usage: context-compress wrap <command...>\n");
+		process.stderr.write("Usage: context-compress wrap [--stream] <command...>\n");
 		return 2;
 	}
-	// `--` separator: treat the rest as argv tokens; otherwise join (single string).
-	const sepIdx = args.indexOf("--");
-	const cmdLine = sepIdx >= 0 ? args.slice(sepIdx + 1).join(" ") : args.join(" ");
+
+	let stream = false;
+	const remaining: string[] = [];
+	for (const a of args) {
+		if (a === "--stream") {
+			stream = true;
+		} else {
+			remaining.push(a);
+		}
+	}
+
+	const sepIdx = remaining.indexOf("--");
+	const cmdLine = sepIdx >= 0 ? remaining.slice(sepIdx + 1).join(" ") : remaining.join(" ");
 
 	if (!cmdLine.trim()) {
-		process.stderr.write("Usage: context-compress wrap <command...>\n");
+		process.stderr.write("Usage: context-compress wrap [--stream] <command...>\n");
 		return 2;
 	}
 
@@ -85,25 +102,61 @@ export async function runWrap(args: string[]): Promise<number> {
 			env: { ...process.env, NO_COLOR: "1" },
 		});
 
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
+		if (stream) {
+			runStreaming(proc, resolve);
+		} else {
+			runBuffered(proc, cmdLine, resolve);
+		}
+	});
+}
 
-		proc.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
-		proc.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+function runBuffered(
+	proc: ReturnType<typeof spawn>,
+	cmdLine: string,
+	resolve: (code: number) => void,
+): void {
+	const stdoutChunks: Buffer[] = [];
+	const stderrChunks: Buffer[] = [];
 
-		proc.on("error", (err) => {
-			process.stderr.write(`context-compress wrap: ${err.message}\n`);
-			resolve(127);
-		});
+	proc.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
+	proc.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
 
-		proc.on("close", (code) => {
-			const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
-			const stderr = Buffer.concat(stderrChunks).toString("utf-8");
-			const compressed = compressOutput(stdout, cmdLine);
-			process.stdout.write(compressed);
-			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
-			if (stderr) process.stderr.write(stderr);
-			resolve(code ?? 0);
-		});
+	proc.on("error", (err) => {
+		process.stderr.write(`context-compress wrap: ${err.message}\n`);
+		resolve(127);
+	});
+
+	proc.on("close", (code) => {
+		const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+		const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+		const compressed = compressOutput(stdout, cmdLine);
+		process.stdout.write(compressed);
+		if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
+		if (stderr) process.stderr.write(stderr);
+		resolve(code ?? 0);
+	});
+}
+
+function runStreaming(proc: ReturnType<typeof spawn>, resolve: (code: number) => void): void {
+	const compressor = new StreamCompressor();
+
+	proc.stdout?.setEncoding("utf-8");
+	proc.stdout?.on("data", (chunk: string) => {
+		const out = compressor.process(chunk);
+		if (out) process.stdout.write(out);
+	});
+
+	// stderr passes through unchanged — typically small, error-relevant.
+	proc.stderr?.on("data", (c: Buffer) => process.stderr.write(c));
+
+	proc.on("error", (err) => {
+		process.stderr.write(`context-compress wrap: ${err.message}\n`);
+		resolve(127);
+	});
+
+	proc.on("close", (code) => {
+		const tail = compressor.flush();
+		if (tail) process.stdout.write(tail);
+		resolve(code ?? 0);
 	});
 }
