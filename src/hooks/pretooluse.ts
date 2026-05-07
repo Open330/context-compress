@@ -19,6 +19,9 @@ const nudgeOnGrep = process.env.CONTEXT_COMPRESS_NUDGE_GREP !== "0";
 // benefit from compression. Default OFF to avoid surprising existing setups.
 const filterBash = process.env.CONTEXT_COMPRESS_FILTER_BASH === "1";
 const ccBin = process.env.CONTEXT_COMPRESS_BIN ?? "context-compress";
+// Compression mode plumbed through to `context-compress wrap`. Values:
+// "conservative" | "balanced" (default) | "aggressive".
+const ccMode = process.env.CONTEXT_COMPRESS_MODE;
 
 /**
  * Commands whose output is the primary value and which produce no shell-state
@@ -107,9 +110,10 @@ if (tool === "Bash") {
 	// Auto-wrap output-heavy commands so their stdout flows through the
 	// compression pipeline transparently. Opt-in via CONTEXT_COMPRESS_FILTER_BASH=1.
 	if (filterBash && shouldWrap(command)) {
+		const modeFlag = ccMode ? ` --mode ${ccMode}` : "";
 		respond({
 			updatedInput: {
-				command: `${ccBin} wrap ${shellQuote(command)}`,
+				command: `${ccBin} wrap${modeFlag} ${shellQuote(command)}`,
 			},
 		});
 	}

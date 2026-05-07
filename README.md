@@ -135,6 +135,55 @@ context-compress doctor
 
 ---
 
+## Compression Modes
+
+context-compress offers three compression modes that trade fidelity for compactness. Pass `--mode` to the CLI, set `CONTEXT_COMPRESS_MODE` in your environment, or let the default (`balanced`) just work.
+
+| Mode | Strategy | Use when |
+|:--|:--|:--|
+| `conservative` | ANSI strip only — preserves every byte of meaningful content | You need full fidelity, debugging output, archival logs |
+| `balanced` *(default)* | Strip noise (progress bars, deprecation warnings, hint lines) — keep metadata (commit bodies, file dates, full test failures) | Day-to-day agent work where context might be re-read |
+| `aggressive` | Drop metadata too — git log → oneline, ls -la → name+size, find lower threshold, grep grouped | Maximum token savings; agent will rarely need the dropped detail |
+
+```bash
+# CLI flag (per-call override)
+context-compress wrap --mode aggressive "git log -50"
+
+# Env var (set once for the session)
+export CONTEXT_COMPRESS_MODE=aggressive
+```
+
+The PreToolUse hook also forwards `CONTEXT_COMPRESS_MODE` automatically when wrapping Bash commands, so agents transparently get whatever mode you've configured.
+
+### Head-to-head with [RTK](https://github.com/rtk-ai/rtk)
+
+Reproduce locally:
+
+```bash
+git clone https://github.com/rtk-ai/rtk /tmp/rtk && (cd /tmp/rtk && cargo build --release)
+RTK_BIN=/tmp/rtk/target/release/rtk tsx scripts/benchmark-vs-rtk.ts
+```
+
+Result on this repository (RTK 0.39.0 vs context-compress 2026.3.22):
+
+| Command | Raw | RTK | CC `conservative` | CC `balanced` | CC `aggressive` |
+|:--|--:|--:|--:|--:|--:|
+| `git status` | 637 B | 279 B (56%) | 637 B (0%) | 435 B (32%) | **225 B (65%)** |
+| `git log -10` (full) | 15.1 KB | 2.8 KB (81%) | 15.1 KB (0%) | 11.5 KB (24%) | **891 B (94%)** |
+| `git log -50` (full) | 28.9 KB | 9.1 KB (69%) | 28.9 KB (0%) | 20.2 KB (30%) | **2.9 KB (90%)** |
+| `git diff --stat` | 682 B | 681 B (0%) | 682 B (0%) | 682 B (0%) | 682 B (0%) |
+| `ls src/` | 149 B | 229 B (-54%) | 149 B (0%) | 149 B (0%) | 149 B (0%) |
+| `ls -laR src/` | 3.7 KB | **229 B (94%)** | 3.7 KB (0%) | 3.7 KB (0%) | 919 B (76%) |
+| `find *.ts` | 1.0 KB | 576 B (44%) | 1.0 KB (0%) | 1.0 KB (0%) | **183 B (82%)** |
+| `npm test` | 18.8 KB | 114 B (99%) | 14.3 KB (24%) | **120 B (99%)** | **120 B (99%)** |
+| **Overall (byte-weighted)** | **69.0 KB** | **14.0 KB (79.7%)** | 64.5 KB (6.5%) | 37.8 KB (45.3%) | **6.0 KB (91.2%)** |
+
+**context-compress aggressive beats RTK by 11.5 percentage points overall** while still letting you fall back to `balanced` (preserves metadata) or `conservative` (just ANSI) for fidelity-sensitive workloads. Numbers are byte-weighted across the full set; per-command splits show the trade-offs.
+
+> RTK has a single fixed compression strategy — comparable to context-compress `aggressive`. context-compress lets the agent choose: reach for `aggressive` when the question is "what changed", `balanced` when the question is "explain why".
+
+---
+
 ## Token Reduction
 
 context-compress achieves **99.2% token reduction** across a typical 12-operation coding session.
@@ -200,6 +249,15 @@ CONTEXT_COMPRESS_BLOCK_WEBFETCH=0
 # Disable Read/Grep nudges
 CONTEXT_COMPRESS_NUDGE_READ=0
 CONTEXT_COMPRESS_NUDGE_GREP=0
+
+# Compression mode: conservative | balanced (default) | aggressive
+CONTEXT_COMPRESS_MODE=balanced
+
+# RTK-style transparent Bash wrapping (default: off)
+CONTEXT_COMPRESS_FILTER_BASH=1
+
+# Override path to the context-compress binary used by the hook
+CONTEXT_COMPRESS_BIN=/usr/local/bin/context-compress
 ```
 
 ### Config File
@@ -220,11 +278,23 @@ Create `.context-compress.json` in your project root or home directory:
 ## CLI
 
 ```bash
-context-compress            # Start MCP server (stdio)
-context-compress setup      # Detect runtimes, show install instructions
-context-compress doctor     # Diagnose: runtimes, hooks, FTS5, version
-context-compress uninstall  # Clean removal: hooks, MCP reg, stale DBs
+context-compress                            # Start MCP server (stdio)
+context-compress setup                      # Detect runtimes, show install instructions
+context-compress setup --auto               # One-line: write ~/.claude/settings.json
+context-compress init --auto                # Alias for setup --auto
+context-compress doctor                     # Diagnose: runtimes, hooks, FTS5, version
+context-compress uninstall                  # Clean removal: hooks, MCP reg, stale DBs
+
+# RTK-style transparent compression — use anywhere, agent doesn't need MCP
+context-compress wrap "npm test"                       # default = balanced
+context-compress wrap --mode aggressive "git log -50"  # max compression
+context-compress wrap --stream "tail -f /var/log/app.log"  # line-by-line for long-running cmds
+context-compress filter --cmd "git push" < captured.log    # pipe filter
 ```
+
+### Bash auto-wrap (transparent mode)
+
+Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-heavy `Bash` calls through `context-compress wrap` automatically — the agent doesn't need to call `execute()` to benefit. Combine with `CONTEXT_COMPRESS_MODE=aggressive` for maximum compression.
 
 ### Doctor Output Example
 

@@ -98,7 +98,7 @@ describe("pretooluse hook", () => {
 				tool_name: "Bash",
 				tool_input: { command: "git status --short" },
 			},
-			{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
+			{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: undefined },
 		);
 		const parsed = JSON.parse(output) as {
 			hookSpecificOutput: { updatedInput?: { command?: string } };
@@ -115,7 +115,11 @@ describe("pretooluse hook", () => {
 				tool_name: "Bash",
 				tool_input: { command: "npm install" },
 			},
-			{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_BIN: "/usr/local/bin/cc" },
+			{
+				CONTEXT_COMPRESS_FILTER_BASH: "1",
+				CONTEXT_COMPRESS_BIN: "/usr/local/bin/cc",
+				CONTEXT_COMPRESS_MODE: undefined,
+			},
 		);
 		const parsed = JSON.parse(output) as {
 			hookSpecificOutput: { updatedInput?: { command?: string } };
@@ -184,5 +188,35 @@ describe("pretooluse hook", () => {
 		};
 		const cmd = parsed.hookSpecificOutput.updatedInput?.command ?? "";
 		assert.ok(cmd.includes("'\\''"), `expected single-quote escape, got: ${cmd}`);
+	});
+
+	it("forwards CONTEXT_COMPRESS_MODE as --mode flag to wrap", () => {
+		const output = runHook(
+			{
+				tool_name: "Bash",
+				tool_input: { command: "git log -10" },
+			},
+			{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: "aggressive" },
+		);
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { updatedInput?: { command?: string } };
+		};
+		const cmd = parsed.hookSpecificOutput.updatedInput?.command ?? "";
+		assert.match(cmd, /context-compress wrap --mode aggressive '/);
+	});
+
+	it("omits --mode flag when CONTEXT_COMPRESS_MODE is unset", () => {
+		const output = runHook(
+			{
+				tool_name: "Bash",
+				tool_input: { command: "git log -10" },
+			},
+			{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: undefined },
+		);
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { updatedInput?: { command?: string } };
+		};
+		const cmd = parsed.hookSpecificOutput.updatedInput?.command ?? "";
+		assert.ok(!cmd.includes("--mode"), `should not include --mode, got: ${cmd}`);
 	});
 });

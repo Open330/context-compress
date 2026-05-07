@@ -19,6 +19,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { compressOutput } from "../src/cli/filter.js";
+import type { FilterMode } from "../src/filters.js";
+
+const MODES: FilterMode[] = ["conservative", "balanced", "aggressive"];
 
 interface Probe {
 	label: string;
@@ -118,10 +121,7 @@ interface Row {
 	rawBytes: number;
 	rtkBytes: number;
 	rtkRatioPct: number;
-	ccBytes: number;
-	ccRatioPct: number;
-	rtkOutput?: string;
-	ccOutput?: string;
+	ccByMode: Record<FilterMode, { bytes: number; ratioPct: number }>;
 	skipped?: string;
 }
 
@@ -146,6 +146,14 @@ function colorPct(pct: number): string {
 	return R(s);
 }
 
+function emptyCcByMode(): Record<FilterMode, { bytes: number; ratioPct: number }> {
+	return {
+		conservative: { bytes: 0, ratioPct: 0 },
+		balanced: { bytes: 0, ratioPct: 0 },
+		aggressive: { bytes: 0, ratioPct: 0 },
+	};
+}
+
 function bench(opts: { quick: boolean }): Row[] {
 	const rows: Row[] = [];
 	for (const p of PROBES) {
@@ -155,8 +163,7 @@ function bench(opts: { quick: boolean }): Row[] {
 				rawBytes: 0,
 				rtkBytes: 0,
 				rtkRatioPct: 0,
-				ccBytes: 0,
-				ccRatioPct: 0,
+				ccByMode: emptyCcByMode(),
 				skipped: "slow",
 			});
 			continue;
@@ -168,8 +175,7 @@ function bench(opts: { quick: boolean }): Row[] {
 				rawBytes: 0,
 				rtkBytes: 0,
 				rtkRatioPct: 0,
-				ccBytes: 0,
-				ccRatioPct: 0,
+				ccByMode: emptyCcByMode(),
 				skipped: "raw command failed",
 			});
 			continue;
@@ -181,8 +187,7 @@ function bench(opts: { quick: boolean }): Row[] {
 				rawBytes: Buffer.byteLength(rawOut, "utf-8"),
 				rtkBytes: 0,
 				rtkRatioPct: 0,
-				ccBytes: 0,
-				ccRatioPct: 0,
+				ccByMode: emptyCcByMode(),
 				skipped: "rtk failed",
 			});
 			continue;
@@ -190,90 +195,102 @@ function bench(opts: { quick: boolean }): Row[] {
 
 		const rawBytes = Buffer.byteLength(rawOut, "utf-8");
 		const rtkBytes = Buffer.byteLength(rtkOut, "utf-8");
-		const ccOut = compressOutput(rawOut, p.raw.cmd);
-		const ccBytes = Buffer.byteLength(ccOut, "utf-8");
+		const ccByMode = emptyCcByMode();
+		for (const m of MODES) {
+			const out = compressOutput(rawOut, p.raw.cmd, m);
+			const bytes = Buffer.byteLength(out, "utf-8");
+			ccByMode[m] = {
+				bytes,
+				ratioPct: rawBytes ? (1 - bytes / rawBytes) * 100 : 0,
+			};
+		}
 
 		rows.push({
 			label: p.label,
 			rawBytes,
 			rtkBytes,
 			rtkRatioPct: rawBytes ? (1 - rtkBytes / rawBytes) * 100 : 0,
-			ccBytes,
-			ccRatioPct: rawBytes ? (1 - ccBytes / rawBytes) * 100 : 0,
-			rtkOutput: rtkOut,
-			ccOutput: ccOut,
+			ccByMode,
 		});
 	}
 	return rows;
 }
 
 function reportHuman(rows: Row[]): void {
-	console.log("\n  Head-to-head: context-compress vs RTK on the same commands\n");
+	console.log("\n  Head-to-head: context-compress (3 modes) vs RTK\n");
 	console.log(
-		`  ${pad("Command", 28)}  ${pad("Raw", 9)}  ${pad("RTK", 9)} ${pad("(red.)", 8)}  ${pad("CC", 9)} ${pad("(red.)", 8)}  Winner`,
+		`  ${pad("Command", 26)}  ${pad("Raw", 8)}  ${pad("RTK", 8)} ${pad("", 6)}  ${pad("CC-cons", 8)} ${pad("", 6)}  ${pad("CC-bal", 8)} ${pad("", 6)}  ${pad("CC-aggr", 8)} ${pad("", 6)}`,
 	);
-	console.log("  " + "─".repeat(98));
+	console.log("  " + "─".repeat(112));
 
 	let rawTotal = 0;
 	let rtkTotal = 0;
-	let ccTotal = 0;
+	const modeTotals: Record<FilterMode, number> = {
+		conservative: 0,
+		balanced: 0,
+		aggressive: 0,
+	};
 	let counted = 0;
 
 	for (const r of rows) {
 		if (r.skipped) {
-			console.log(`  ${pad(r.label, 28)}  (skipped: ${r.skipped})`);
+			console.log(`  ${pad(r.label, 26)}  (skipped: ${r.skipped})`);
 			continue;
 		}
 		const rtkPct = r.rtkRatioPct;
-		const ccPct = r.ccRatioPct;
-		const winner =
-			Math.abs(rtkPct - ccPct) < 1
-				? "≈ tie"
-				: rtkPct > ccPct
-					? `RTK +${(rtkPct - ccPct).toFixed(1)}pp`
-					: `CC +${(ccPct - rtkPct).toFixed(1)}pp`;
+		const cons = r.ccByMode.conservative;
+		const bal = r.ccByMode.balanced;
+		const aggr = r.ccByMode.aggressive;
 		console.log(
-			`  ${pad(r.label, 28)}  ${pad(fmt(r.rawBytes), 9)}  ${pad(fmt(r.rtkBytes), 9)} ${pad(`(${rtkPct.toFixed(0)}%)`, 8)}  ${pad(fmt(r.ccBytes), 9)} ${pad(`(${ccPct.toFixed(0)}%)`, 8)}  ${
-				ccPct > rtkPct ? G(winner) : rtkPct > ccPct ? Y(winner) : winner
-			}`,
+			`  ${pad(r.label, 26)}  ${pad(fmt(r.rawBytes), 8)}  ${pad(fmt(r.rtkBytes), 8)} ${pad(`(${rtkPct.toFixed(0)}%)`, 6)}  ${pad(fmt(cons.bytes), 8)} ${pad(`(${cons.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(bal.bytes), 8)} ${pad(`(${bal.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(aggr.bytes), 8)} ${pad(colorPct(aggr.ratioPct), 16)}`,
 		);
 		rawTotal += r.rawBytes;
 		rtkTotal += r.rtkBytes;
-		ccTotal += r.ccBytes;
+		modeTotals.conservative += cons.bytes;
+		modeTotals.balanced += bal.bytes;
+		modeTotals.aggressive += aggr.bytes;
 		counted++;
 	}
-	console.log("  " + "─".repeat(98));
+	console.log("  " + "─".repeat(112));
 
 	if (counted === 0) {
 		console.log("\n  No valid measurements.\n");
 		return;
 	}
 	const rtkOverall = (1 - rtkTotal / rawTotal) * 100;
-	const ccOverall = (1 - ccTotal / rawTotal) * 100;
+	const consOverall = (1 - modeTotals.conservative / rawTotal) * 100;
+	const balOverall = (1 - modeTotals.balanced / rawTotal) * 100;
+	const aggrOverall = (1 - modeTotals.aggressive / rawTotal) * 100;
+
 	console.log(
-		`  ${pad("OVERALL (byte-weighted)", 28)}  ${pad(fmt(rawTotal), 9)}  ${pad(fmt(rtkTotal), 9)} ${pad(colorPct(rtkOverall), 17)}  ${pad(fmt(ccTotal), 9)} ${pad(colorPct(ccOverall), 17)}`,
+		`  ${pad("OVERALL (byte-weighted)", 26)}  ${pad(fmt(rawTotal), 8)}  ${pad(fmt(rtkTotal), 8)} ${pad(colorPct(rtkOverall), 16)}  ${pad(fmt(modeTotals.conservative), 8)} ${pad(colorPct(consOverall), 16)}  ${pad(fmt(modeTotals.balanced), 8)} ${pad(colorPct(balOverall), 16)}  ${pad(fmt(modeTotals.aggressive), 8)} ${pad(colorPct(aggrOverall), 16)}`,
 	);
 	console.log();
+	console.log(`  Raw total:      ${fmt(rawTotal)} (${tokens(rawTotal).toLocaleString()} tok)`);
 	console.log(
-		`  Raw total: ${fmt(rawTotal)} (${tokens(rawTotal).toLocaleString()} tokens)`,
+		`  RTK:            ${fmt(rtkTotal)} (${tokens(rtkTotal).toLocaleString()} tok) — ${colorPct(rtkOverall)} reduction`,
 	);
 	console.log(
-		`  RTK out:   ${fmt(rtkTotal)} (${tokens(rtkTotal).toLocaleString()} tok) — ${colorPct(rtkOverall)} reduction`,
+		`  CC conservative ${fmt(modeTotals.conservative)} (${tokens(modeTotals.conservative).toLocaleString()} tok) — ${colorPct(consOverall)} reduction`,
 	);
 	console.log(
-		`  CC  out:   ${fmt(ccTotal)} (${tokens(ccTotal).toLocaleString()} tok) — ${colorPct(ccOverall)} reduction`,
+		`  CC balanced     ${fmt(modeTotals.balanced)} (${tokens(modeTotals.balanced).toLocaleString()} tok) — ${colorPct(balOverall)} reduction`,
+	);
+	console.log(
+		`  CC aggressive   ${fmt(modeTotals.aggressive)} (${tokens(modeTotals.aggressive).toLocaleString()} tok) — ${colorPct(aggrOverall)} reduction`,
 	);
 	console.log();
-	if (ccOverall > rtkOverall) {
+	const best = Math.max(rtkOverall, balOverall, aggrOverall);
+	if (aggrOverall === best) {
 		console.log(
-			`  context-compress wins by ${(ccOverall - rtkOverall).toFixed(1)} percentage points overall.`,
+			`  context-compress aggressive leads (${(aggrOverall - rtkOverall).toFixed(1)}pp over RTK, ${(aggrOverall - balOverall).toFixed(1)}pp over balanced).`,
 		);
-	} else if (rtkOverall > ccOverall) {
+	} else if (rtkOverall === best) {
 		console.log(
-			`  RTK wins by ${(rtkOverall - ccOverall).toFixed(1)} percentage points overall.`,
+			`  RTK leads (${(rtkOverall - aggrOverall).toFixed(1)}pp over CC aggressive, ${(rtkOverall - balOverall).toFixed(1)}pp over CC balanced).`,
 		);
 	} else {
-		console.log("  Tie within rounding.");
+		console.log(`  CC balanced leads.`);
 	}
 	console.log();
 }

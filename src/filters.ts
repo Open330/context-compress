@@ -1,7 +1,26 @@
 /**
  * Command-specific output filters.
- * Applied before generic dedup/truncation for better token reduction.
+ *
+ * Three modes balance fidelity vs aggressiveness:
+ *   - "conservative": no command-specific compression (callers strip ANSI only)
+ *   - "balanced":     remove obvious noise (progress, hints, deprecations);
+ *                     preserve metadata (commit bodies, file dates, etc.)
+ *   - "aggressive":   match RTK's tactic of dropping metadata too — git log
+ *                     becomes one-line per commit, ls -la drops perms/dates,
+ *                     find lower threshold, grep groups by file.
+ *
+ * The mode is plumbed through the pipeline via compressOutput in cli/filter.ts.
+ * Default is "balanced".
  */
+
+export type FilterMode = "conservative" | "balanced" | "aggressive";
+
+export const DEFAULT_MODE: FilterMode = "balanced";
+
+export function parseMode(input: string | undefined): FilterMode {
+	if (input === "aggressive" || input === "conservative") return input;
+	return "balanced";
+}
 
 interface FilterResult {
 	output: string;
@@ -9,16 +28,22 @@ interface FilterResult {
 }
 
 /** Detect command type from code string and apply specialized filter */
-export function applyCommandFilter(code: string, stdout: string): FilterResult {
+export function applyCommandFilter(
+	code: string,
+	stdout: string,
+	mode: FilterMode = DEFAULT_MODE,
+): FilterResult {
+	if (mode === "conservative") return { output: stdout, filtered: false };
+
 	const cmd = code.trim().split(/\s+/)[0];
 	const fullCmd = code.trim();
 
 	// Git commands
-	if (cmd === "git") return filterGit(fullCmd, stdout);
+	if (cmd === "git") return filterGit(fullCmd, stdout, mode);
 
 	// Package managers
 	if (cmd === "npm" || cmd === "yarn" || cmd === "pnpm" || cmd === "bun")
-		return filterPackageManager(fullCmd, stdout);
+		return filterPackageManager(fullCmd, stdout, mode);
 
 	// Test runners
 	if (
@@ -39,12 +64,22 @@ export function applyCommandFilter(code: string, stdout: string): FilterResult {
 	if (cmd === "docker" || cmd === "kubectl") return filterContainerOutput(fullCmd, stdout);
 
 	// ls/find/tree
-	if (cmd === "ls" || cmd === "find" || cmd === "tree") return filterFileList(fullCmd, stdout);
+	if (cmd === "ls" || cmd === "find" || cmd === "tree")
+		return filterFileList(fullCmd, stdout, mode);
+
+	// grep — aggressive mode only (group by file, drop long lines)
+	if (cmd === "grep" || cmd === "rg" || cmd === "ripgrep") {
+		if (mode === "aggressive") return filterGrep(stdout);
+	}
 
 	return { output: stdout, filtered: false };
 }
 
-export function filterGit(cmd: string, stdout: string): FilterResult {
+export function filterGit(
+	cmd: string,
+	stdout: string,
+	mode: FilterMode = DEFAULT_MODE,
+): FilterResult {
 	// git push/pull/fetch/clone: strip progress lines
 	if (/git\s+(push|pull|fetch|clone)/.test(cmd)) {
 		const lines = stdout.split("\n");
@@ -63,16 +98,165 @@ export function filterGit(cmd: string, stdout: string): FilterResult {
 
 	// git status: remove hint lines, keep branch and file status
 	if (/git\s+status/.test(cmd)) {
-		const lines = stdout.split("\n");
-		const filtered = lines.filter((l) => !l.startsWith("  (use ") && l.trim() !== "");
-		return { output: filtered.join("\n"), filtered: true };
+		return { output: filterGitStatus(stdout, mode), filtered: true };
 	}
 
-	// git log and other commands: keep as-is
+	// git log — aggressive mode collapses each commit to one line
+	if (/git\s+log/.test(cmd) && !cmd.includes("--oneline") && mode === "aggressive") {
+		return { output: aggressiveGitLog(stdout), filtered: true };
+	}
+
+	// git diff — aggressive mode drops context lines for unified diffs.
+	// Already-compact forms (--stat, --name-only, --name-status, --shortstat)
+	// pass through since they ARE the summary.
+	if (/git\s+diff/.test(cmd) && mode === "aggressive") {
+		if (/--(stat|name-only|name-status|shortstat|numstat)\b/.test(cmd)) {
+			return { output: stdout, filtered: false };
+		}
+		return { output: aggressiveGitDiff(stdout), filtered: true };
+	}
+
 	return { output: stdout, filtered: false };
 }
 
-export function filterPackageManager(cmd: string, stdout: string): FilterResult {
+function filterGitStatus(stdout: string, mode: FilterMode): string {
+	const lines = stdout.split("\n");
+	const balanced = lines.filter((l) => !l.startsWith("  (use ") && l.trim() !== "");
+	if (mode !== "aggressive") return balanced.join("\n");
+
+	// Aggressive: collapse "Changes not staged"/"Untracked" sections to terse counts.
+	// Keep: branch line, file paths with status prefix.
+	const out: string[] = [];
+	for (const l of balanced) {
+		if (/^On branch/.test(l)) {
+			out.push(l.replace(/^On branch /, "* "));
+			continue;
+		}
+		if (/^Your branch is/.test(l)) continue;
+		if (/^Changes (to be committed|not staged for commit):/.test(l)) continue;
+		if (/^Untracked files:/.test(l)) {
+			out.push("? Untracked:");
+			continue;
+		}
+		if (/^no changes added to commit/.test(l)) continue;
+		if (/^nothing to commit/.test(l)) {
+			out.push("(clean)");
+			continue;
+		}
+		// File status lines: "\tmodified:   foo.ts" → "M foo.ts"
+		const m = l.match(/^\s*(modified|new file|deleted|renamed|typechange):\s*(.+)$/);
+		if (m) {
+			const code =
+				(
+					{ modified: "M", "new file": "A", deleted: "D", renamed: "R", typechange: "T" } as Record<
+						string,
+						string
+					>
+				)[m[1]] ?? "?";
+			out.push(`${code} ${m[2]}`);
+			continue;
+		}
+		out.push(l);
+	}
+	return out.join("\n");
+}
+
+/**
+ * Convert verbose `git log` output to one line per commit:
+ *   "<sha7> <subject> (<reltime>) <author>"
+ * Body and "Date:" lines are dropped. Merge commits keep their subject.
+ */
+function aggressiveGitLog(stdout: string): string {
+	const lines = stdout.split("\n");
+	const out: string[] = [];
+	let sha = "";
+	let author = "";
+	let date = "";
+	let subject = "";
+	let inCommit = false;
+	let blanksAfterDate = 0;
+
+	const flush = () => {
+		if (!sha) return;
+		const reltime = date ? ` (${humanReltime(date)})` : "";
+		const auth = author ? ` <${author.replace(/\s*<.*?>/, "").trim()}>` : "";
+		out.push(`${sha.slice(0, 7)} ${subject}${reltime}${auth}`);
+	};
+
+	for (const line of lines) {
+		const m = line.match(/^commit\s+([0-9a-f]{7,40})/);
+		if (m) {
+			flush();
+			sha = m[1];
+			author = "";
+			date = "";
+			subject = "";
+			inCommit = true;
+			blanksAfterDate = 0;
+			continue;
+		}
+		if (!inCommit) continue;
+		if (/^Author:\s/.test(line)) {
+			author = line.replace(/^Author:\s+/, "").trim();
+			continue;
+		}
+		if (/^Date:\s/.test(line)) {
+			date = line.replace(/^Date:\s+/, "").trim();
+			continue;
+		}
+		if (line.trim() === "") {
+			blanksAfterDate++;
+			continue;
+		}
+		// First non-blank line after Date: is the subject. Skip body afterward.
+		if (!subject && blanksAfterDate >= 1) {
+			subject = line.trim();
+		}
+	}
+	flush();
+	return out.join("\n");
+}
+
+/**
+ * Convert verbose unified diff to "+ added\n- removed" only — drop hunks/context.
+ */
+function aggressiveGitDiff(stdout: string): string {
+	const lines = stdout.split("\n");
+	const out: string[] = [];
+	let currentFile = "";
+	for (const line of lines) {
+		const fm = line.match(/^diff --git a\/(.+?) b\//);
+		if (fm) {
+			currentFile = fm[1];
+			out.push(`@@ ${currentFile}`);
+			continue;
+		}
+		if (/^---\s|^\+\+\+\s|^index\s|^@@\s/.test(line)) continue;
+		// Keep only +/- content lines (not "+++" / "---" headers, already filtered above)
+		if (line.startsWith("+") || line.startsWith("-")) out.push(line);
+	}
+	return out.join("\n");
+}
+
+function humanReltime(dateStr: string): string {
+	const d = new Date(dateStr);
+	if (Number.isNaN(d.getTime())) return dateStr;
+	const ms = Date.now() - d.getTime();
+	const hours = Math.round(ms / 3600_000);
+	if (hours < 1) return "just now";
+	if (hours < 24) return `${hours}h ago`;
+	const days = Math.round(hours / 24);
+	if (days < 30) return `${days}d ago`;
+	const months = Math.round(days / 30);
+	if (months < 12) return `${months}mo ago`;
+	return `${Math.round(months / 12)}y ago`;
+}
+
+export function filterPackageManager(
+	cmd: string,
+	stdout: string,
+	mode: FilterMode = DEFAULT_MODE,
+): FilterResult {
 	// npm/yarn install: strip noise, keep summary
 	if (/\b(install|add|i)\b/.test(cmd)) {
 		const lines = stdout.split("\n");
@@ -82,9 +266,19 @@ export function filterPackageManager(cmd: string, stdout: string): FilterResult 
 				!l.includes("packages are looking for funding") &&
 				!l.includes("run `npm fund`") &&
 				!l.startsWith("npm notice") &&
-				!/^[\s\u2502\u251C\u2514\u2500]+$/.test(l) && // tree-drawing characters
+				!/^[\s│├└─]+$/.test(l) && // tree-drawing characters
 				!/^\s*$/.test(l),
 		);
+		// Aggressive: keep only the final "added N packages" / vulnerability summary lines
+		if (mode === "aggressive") {
+			const summaryOnly = filtered.filter(
+				(l) =>
+					/^(added|removed|changed|audited)\s+\d+/.test(l) ||
+					/vulnerabilit(y|ies)/i.test(l) ||
+					/^npm\s+ERR/.test(l),
+			);
+			return { output: summaryOnly.join("\n"), filtered: true };
+		}
 		return { output: filtered.join("\n"), filtered: true };
 	}
 
@@ -96,12 +290,12 @@ export function filterPackageManager(cmd: string, stdout: string): FilterResult 
 	return { output: stdout, filtered: false };
 }
 
-const FAIL_MARKER_RE = /^\s*[\u2717\u2718\u00D7]\s/;
+const FAIL_MARKER_RE = /^\s*[✗✘×]\s/;
 const FAIL_WORD_RE = /\bFAIL\b/;
 const FAILED_RE = /\bfailed?\b/i;
 const ERROR_RE = /\bERROR\b/;
 const SUMMARY_RE =
-	/^\s*(Tests?|Suites?|Test Suites)\s*:|^\s*(pass|fail|skip|pending|todo)\s|\b\d+\s+(passing|failing|pending|skipped)\b|^(ok|not ok)\s|^\u2139\s|^(PASS|FAIL)\s/i;
+	/^\s*(Tests?|Suites?|Test Suites)\s*:|^\s*(pass|fail|skip|pending|todo)\s|\b\d+\s+(passing|failing|pending|skipped)\b|^(ok|not ok)\s|^ℹ\s|^(PASS|FAIL)\s/i;
 
 function isFailMarker(line: string): boolean {
 	return (
@@ -220,11 +414,25 @@ export function filterContainerOutput(cmd: string, stdout: string): FilterResult
 	return { output: stdout, filtered: false };
 }
 
-export function filterFileList(cmd: string, stdout: string): FilterResult {
-	const lines = stdout.split("\n").filter((l) => l.trim() !== "");
+export function filterFileList(
+	cmd: string,
+	stdout: string,
+	mode: FilterMode = DEFAULT_MODE,
+): FilterResult {
+	const isLs = /^ls\b/.test(cmd);
 
-	// If output is short, keep as-is
-	if (lines.length <= 30) return { output: stdout, filtered: false };
+	// Aggressive mode for `ls -l*` — strip permissions/owner/date, keep name + size
+	if (mode === "aggressive" && isLs && /-l/.test(cmd)) {
+		return { output: aggressiveLsLong(stdout), filtered: true };
+	}
+
+	// Aggressive mode lowers find/ls -R summary thresholds to be much more compact
+	const minLines = mode === "aggressive" ? 10 : 30;
+	const summarizeAt = mode === "aggressive" ? 15 : 50;
+	const minDirs = mode === "aggressive" ? 3 : 5;
+
+	const lines = stdout.split("\n").filter((l) => l.trim() !== "");
+	if (lines.length <= minLines) return { output: stdout, filtered: false };
 
 	// Group by directory for find/ls -R
 	if (cmd.includes("-R") || cmd.startsWith("find")) {
@@ -235,8 +443,7 @@ export function filterFileList(cmd: string, stdout: string): FilterResult {
 			dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
 		}
 
-		// If many files, summarize by directory
-		if (dirs.size > 5 && lines.length > 50) {
+		if (dirs.size > minDirs && lines.length > summarizeAt) {
 			const summary = Array.from(dirs.entries())
 				.sort((a, b) => b[1] - a[1])
 				.map(([dir, count]) => `  ${dir}/ (${count} files)`)
@@ -249,4 +456,77 @@ export function filterFileList(cmd: string, stdout: string): FilterResult {
 	}
 
 	return { output: stdout, filtered: false };
+}
+
+/** Strip `ls -l` metadata; emit "name [size]" rows + directory headers. */
+function aggressiveLsLong(stdout: string): string {
+	const lines = stdout.split("\n");
+	const out: string[] = [];
+	for (const line of lines) {
+		// Directory header from `ls -laR`: "src/dir:" — keep
+		if (/^[^\s]+:$/.test(line.trim())) {
+			out.push(line.trim());
+			continue;
+		}
+		// `total N` lines from ls -l — drop
+		if (/^total\s+\d+/.test(line)) continue;
+		// Empty lines — drop
+		if (line.trim() === "") continue;
+		// ls -l row: drwxr-xr-x  3 jiun  staff  96 May  6 14:20 name
+		const m = line.match(
+			/^([dlcb-])[rwxst@+\-]{9,}\s+\d+\s+\S+\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(.+)$/,
+		);
+		if (m) {
+			const sizeStr = m[2];
+			const name = m[3];
+			out.push(name + (m[1] === "d" ? "/" : ` ${formatSize(sizeStr)}`));
+			continue;
+		}
+		// Fallback: keep line (unknown format)
+		out.push(line);
+	}
+	return out.join("\n");
+}
+
+function formatSize(s: string): string {
+	const n = Number.parseInt(s, 10);
+	if (Number.isNaN(n)) return s;
+	if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+	if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+	return `${n}B`;
+}
+
+/**
+ * Group grep output by file, truncate long matched lines, drop redundant context.
+ * Aggressive only — balanced mode passes grep through.
+ */
+export function filterGrep(stdout: string): FilterResult {
+	const lines = stdout.split("\n").filter((l) => l.length > 0);
+	if (lines.length === 0) return { output: stdout, filtered: false };
+
+	const byFile = new Map<string, string[]>();
+	for (const line of lines) {
+		// grep -rn / rg: "path:lineNo:content"
+		const m = line.match(/^([^:]+):(\d+):(.*)$/);
+		if (!m) {
+			// Plain match — group under "(no path)"
+			const arr = byFile.get("(no path)") ?? [];
+			arr.push(line.length > 100 ? `${line.slice(0, 100)}…` : line);
+			byFile.set("(no path)", arr);
+			continue;
+		}
+		const [, file, lineNo, content] = m;
+		const truncated = content.length > 100 ? `${content.slice(0, 100)}…` : content;
+		const arr = byFile.get(file) ?? [];
+		arr.push(`  L${lineNo}: ${truncated.trim()}`);
+		byFile.set(file, arr);
+	}
+
+	const out: string[] = [];
+	for (const [file, hits] of byFile) {
+		out.push(`${file} (${hits.length})`);
+		for (const h of hits.slice(0, 8)) out.push(h);
+		if (hits.length > 8) out.push(`  ... +${hits.length - 8} more matches`);
+	}
+	return { output: out.join("\n"), filtered: true };
 }

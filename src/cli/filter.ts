@@ -1,30 +1,57 @@
 import { spawn } from "node:child_process";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
-import { applyCommandFilter } from "../filters.js";
+import { DEFAULT_MODE, type FilterMode, applyCommandFilter, parseMode } from "../filters.js";
 import { StreamCompressor } from "../util/stream-compress.js";
 
 const DEDUP_THRESHOLD = 10_000;
+// Aggressive mode lowers the dedup threshold so even mid-size outputs
+// get the full progress/dedup/group treatment.
+const AGGRESSIVE_DEDUP_THRESHOLD = 2_000;
 
 /**
- * Apply the full context-compress output pipeline to a buffer:
- *   stripAnsi → applyCommandFilter (if cmd known) → progress/dedup/group (if large)
+ * Apply the full context-compress output pipeline to a buffer.
+ *
+ *   conservative: ANSI strip only — preserve everything else.
+ *   balanced:     ANSI strip → command filter → dedup/group (if >10KB).
+ *                 Strips noise; preserves metadata (commit bodies, file dates).
+ *   aggressive:   balanced + aggressive command filters that drop metadata
+ *                 (git log → oneline, ls -la → name+size, etc.) and lower
+ *                 the dedup threshold to 2KB.
  *
  * Mirrors what SubprocessExecutor does internally so the same compression
  * is available to standalone shell commands or other agents that don't
  * route through the MCP execute() tool.
  */
-export function compressOutput(stdout: string, originalCmd?: string): string {
+export function compressOutput(
+	stdout: string,
+	originalCmd?: string,
+	mode: FilterMode = DEFAULT_MODE,
+): string {
 	let out = stripAnsi(stdout);
+	if (mode === "conservative") return out;
+
 	if (originalCmd) {
-		const filtered = applyCommandFilter(originalCmd, out);
+		const filtered = applyCommandFilter(originalCmd, out, mode);
 		if (filtered.filtered) out = filtered.output;
 	}
-	if (out.length > DEDUP_THRESHOLD) {
+
+	const threshold = mode === "aggressive" ? AGGRESSIVE_DEDUP_THRESHOLD : DEDUP_THRESHOLD;
+	if (out.length > threshold) {
 		out = stripProgressLines(out);
 		out = deduplicateLines(out);
 		out = groupErrorLines(out);
 	}
 	return out;
+}
+
+/** Resolve mode from CLI args, env, or default — in that priority order. */
+function resolveMode(args: string[]): FilterMode {
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === "--mode" && i + 1 < args.length) {
+			return parseMode(args[i + 1]);
+		}
+	}
+	return parseMode(process.env.CONTEXT_COMPRESS_MODE);
 }
 
 /** Read stdin to a string. */
@@ -36,7 +63,7 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * `context-compress filter [--cmd '<orig>']`
+ * `context-compress filter [--cmd '<orig>'] [--mode conservative|balanced|aggressive]`
  * Reads stdin, applies the pipeline, writes to stdout. Exits 0.
  */
 export async function runFilter(args: string[]): Promise<number> {
@@ -47,8 +74,9 @@ export async function runFilter(args: string[]): Promise<number> {
 			i++;
 		}
 	}
+	const mode = resolveMode(args);
 	const input = await readStdin();
-	const compressed = compressOutput(input, cmd);
+	const compressed = compressOutput(input, cmd, mode);
 	process.stdout.write(compressed);
 	if (!compressed.endsWith("\n")) process.stdout.write("\n");
 	return 0;
@@ -73,25 +101,30 @@ export async function runFilter(args: string[]): Promise<number> {
  */
 export async function runWrap(args: string[]): Promise<number> {
 	if (args.length === 0) {
-		process.stderr.write("Usage: context-compress wrap [--stream] <command...>\n");
+		process.stderr.write("Usage: context-compress wrap [--stream] [--mode <m>] <command...>\n");
 		return 2;
 	}
 
 	let stream = false;
 	const remaining: string[] = [];
-	for (const a of args) {
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
 		if (a === "--stream") {
 			stream = true;
+		} else if (a === "--mode" && i + 1 < args.length) {
+			// Consumed by resolveMode below; skip the value here.
+			i++;
 		} else {
 			remaining.push(a);
 		}
 	}
 
+	const mode = resolveMode(args);
 	const sepIdx = remaining.indexOf("--");
 	const cmdLine = sepIdx >= 0 ? remaining.slice(sepIdx + 1).join(" ") : remaining.join(" ");
 
 	if (!cmdLine.trim()) {
-		process.stderr.write("Usage: context-compress wrap [--stream] <command...>\n");
+		process.stderr.write("Usage: context-compress wrap [--stream] [--mode <m>] <command...>\n");
 		return 2;
 	}
 
@@ -105,7 +138,7 @@ export async function runWrap(args: string[]): Promise<number> {
 		if (stream) {
 			runStreaming(proc, resolve);
 		} else {
-			runBuffered(proc, cmdLine, resolve);
+			runBuffered(proc, cmdLine, mode, resolve);
 		}
 	});
 }
@@ -113,6 +146,7 @@ export async function runWrap(args: string[]): Promise<number> {
 function runBuffered(
 	proc: ReturnType<typeof spawn>,
 	cmdLine: string,
+	mode: FilterMode,
 	resolve: (code: number) => void,
 ): void {
 	const stdoutChunks: Buffer[] = [];
@@ -129,7 +163,7 @@ function runBuffered(
 	proc.on("close", (code) => {
 		const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
 		const stderr = Buffer.concat(stderrChunks).toString("utf-8");
-		const compressed = compressOutput(stdout, cmdLine);
+		const compressed = compressOutput(stdout, cmdLine, mode);
 		process.stdout.write(compressed);
 		if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
 		if (stderr) process.stderr.write(stderr);
