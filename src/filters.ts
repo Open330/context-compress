@@ -144,9 +144,12 @@ export function filterTestOutput(stdout: string): FilterResult {
 		return { output: summary.join("\n"), filtered: true };
 	}
 
-	// If failures exist, return failures + summary
+	// If failures exist, return failures + the rollup summary lines only.
+	// Drop per-file PASS lines from the summary (the FAIL lines + counts are
+	// what the agent needs; 200 PASS lines just inflate context).
 	if (failures.length > 0) {
-		const result = [...failures, "", ...summary].join("\n");
+		const rollup = summary.filter((l) => !/^PASS\s/i.test(l));
+		const result = [...failures, "", ...rollup].join("\n");
 		return { output: result, filtered: true };
 	}
 
@@ -155,13 +158,16 @@ export function filterTestOutput(stdout: string): FilterResult {
 
 export function filterBuildOutput(cmd: string, stdout: string): FilterResult {
 	const lines = stdout.split("\n");
-	// Strip: download progress, "Compiling X/Y", blocking messages, blank lines
-	// Keep: "Finished" lines and other meaningful output
+	// Strip: download progress, "Compiling X/Y" or "Compiling crate v1.2.3" lines,
+	// blocking-on-lock messages, blank lines.
+	// Keep: "Finished" lines, errors, and other meaningful output.
 	const filtered = lines.filter(
 		(l) =>
 			!l.includes("Downloading") &&
 			!l.includes("Downloaded") &&
 			!/Compiling\s+\d+\s+of\s+\d+/.test(l) &&
+			!/^\s*Compiling\s+[\w-]+\s+v\d/.test(l) &&
+			!/^\s*Checking\s+[\w-]+\s+v\d/.test(l) &&
 			!l.includes("Blocking waiting for file lock") &&
 			!/^\s*$/.test(l),
 	);
@@ -173,12 +179,44 @@ export function filterContainerOutput(cmd: string, stdout: string): FilterResult
 	if (/docker\s+build/.test(cmd)) {
 		const lines = stdout.split("\n");
 		const filtered = lines.filter(
-			(l) => !l.startsWith(" ---> ") && !l.startsWith("Sending build context"),
+			(l) => !l.startsWith(" ---> ") && !l.startsWith("Sending build context") && !/^\s*$/.test(l),
 		);
 		return { output: filtered.join("\n"), filtered: true };
 	}
 
-	// docker ps, kubectl: keep as-is (already compact)
+	// kubectl get / describe / logs with many rows: summarize per namespace/status
+	if (/^kubectl\s+(get|describe)\b/.test(cmd)) {
+		const lines = stdout.split("\n").filter((l) => l.length > 0);
+		// Keep header and short outputs as-is.
+		if (lines.length <= 30) return { output: stdout, filtered: false };
+
+		const header = lines[0];
+		const rows = lines.slice(1);
+
+		// `get` rows are columnar — first column is usually NAMESPACE or NAME.
+		// Group by first column + last interesting column (STATUS or AGE).
+		const headerCols = header.split(/\s{2,}/);
+		const hasNamespace = headerCols[0]?.toUpperCase() === "NAMESPACE";
+		const statusIdx = headerCols.findIndex((c) => /^STATUS$/i.test(c));
+
+		const counts = new Map<string, number>();
+		for (const row of rows) {
+			const cols = row.split(/\s{2,}/);
+			const ns = hasNamespace ? cols[0] : "(default)";
+			const status = statusIdx >= 0 ? cols[statusIdx] : "—";
+			const key = `${ns}\t${status}`;
+			counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+
+		const summaryLines = [`${header}`, `(${rows.length} rows summarized by namespace/status)`];
+		for (const [key, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+			const [ns, status] = key.split("\t");
+			summaryLines.push(`  ${ns} — ${status}: ${n}`);
+		}
+		return { output: summaryLines.join("\n"), filtered: true };
+	}
+
+	// docker ps and other compact tabular outputs: pass through.
 	return { output: stdout, filtered: false };
 }
 

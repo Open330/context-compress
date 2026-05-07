@@ -115,6 +115,28 @@ describe("filterTestOutput", () => {
 		assert.ok(r.output.includes("fail 1"));
 	});
 
+	it("drops PASS-per-file lines from summary when failures exist", () => {
+		const passLines: string[] = [];
+		for (let i = 0; i < 50; i++) passLines.push(`PASS src/foo${i}.test.ts`);
+		const stdout = [
+			...passLines,
+			"FAIL src/bug.test.ts",
+			"  ✗ regression",
+			"    AssertionError: nope",
+			"",
+			"ℹ tests 51",
+			"ℹ pass 50",
+			"ℹ fail 1",
+		].join("\n");
+		const r = filterTestOutput(stdout);
+		assert.strictEqual(r.filtered, true);
+		// The single FAIL is fine; the 50 PASS lines should be gone.
+		const passCount = (r.output.match(/^PASS\s/gm) ?? []).length;
+		assert.strictEqual(passCount, 0, "PASS-per-file lines should be dropped");
+		assert.ok(r.output.includes("regression"));
+		assert.ok(r.output.includes("fail 1"));
+	});
+
 	it("returns unfiltered when no summary detected", () => {
 		const stdout = "just some raw output\nwith no test markers";
 		const r = filterTestOutput(stdout);
@@ -129,6 +151,16 @@ describe("filterBuildOutput", () => {
 		assert.strictEqual(r.filtered, true);
 		assert.ok(!r.output.includes("Downloading"));
 		assert.ok(!r.output.includes("Compiling"));
+		assert.ok(r.output.includes("Finished"));
+	});
+
+	it("strips cargo 'Compiling crate v1.2.3' style lines", () => {
+		const stdout = "   Compiling serde v1.0.193\n   Compiling tokio v1.35.1\n   Checking my-app v0.1.0\n    Finished `release` profile [optimized] in 12.4s";
+		const r = filterBuildOutput("cargo build --release", stdout);
+		assert.strictEqual(r.filtered, true);
+		assert.ok(!r.output.includes("Compiling serde"));
+		assert.ok(!r.output.includes("Compiling tokio"));
+		assert.ok(!r.output.includes("Checking my-app"));
 		assert.ok(r.output.includes("Finished"));
 	});
 });
@@ -148,6 +180,31 @@ describe("filterContainerOutput", () => {
 		const stdout = "CONTAINER ID   IMAGE   STATUS";
 		const r = filterContainerOutput("docker ps", stdout);
 		assert.strictEqual(r.filtered, false);
+	});
+
+	it("passes small kubectl output through", () => {
+		const stdout =
+			"NAMESPACE     NAME      READY   STATUS    RESTARTS   AGE\ndefault       pod-a     1/1     Running   0          3d";
+		const r = filterContainerOutput("kubectl get pods", stdout);
+		assert.strictEqual(r.filtered, false);
+	});
+
+	it("summarizes large kubectl get by namespace+status", () => {
+		const header =
+			"NAMESPACE     NAME                                READY   STATUS    RESTARTS   AGE";
+		const rows: string[] = [];
+		for (let i = 0; i < 60; i++) {
+			const ns = ["default", "kube-system"][i % 2];
+			const status = i % 7 === 0 ? "Pending" : "Running";
+			rows.push(`${ns.padEnd(13)} pod-${i.toString().padEnd(34)}  1/1     ${status.padEnd(9)} 0          ${i}d`);
+		}
+		const stdout = [header, ...rows].join("\n");
+		const r = filterContainerOutput("kubectl get pods -A", stdout);
+		assert.strictEqual(r.filtered, true);
+		assert.ok(r.output.includes("rows summarized"));
+		assert.ok(r.output.includes("Running"));
+		assert.ok(r.output.includes("Pending"));
+		assert.ok(r.output.length < stdout.length / 2, "should be at least 2x smaller");
 	});
 });
 

@@ -14,6 +14,50 @@ const blockCurl = process.env.CONTEXT_COMPRESS_BLOCK_CURL !== "0";
 const blockWebFetch = process.env.CONTEXT_COMPRESS_BLOCK_WEBFETCH !== "0";
 const nudgeOnRead = process.env.CONTEXT_COMPRESS_NUDGE_READ !== "0";
 const nudgeOnGrep = process.env.CONTEXT_COMPRESS_NUDGE_GREP !== "0";
+// Opt-in: when enabled, transparently wrap output-heavy Bash commands with
+// `context-compress wrap` so the agent doesn't need to call execute() to
+// benefit from compression. Default OFF to avoid surprising existing setups.
+const filterBash = process.env.CONTEXT_COMPRESS_FILTER_BASH === "1";
+const ccBin = process.env.CONTEXT_COMPRESS_BIN ?? "context-compress";
+
+/**
+ * Commands whose output is the primary value and which produce no shell-state
+ * side effects (no cd/export/etc.). Safe to redirect through `wrap` because
+ * any subshell semantics would be identical.
+ */
+const WRAP_TARGETS: RegExp[] = [
+	/^git\s+(status|log|diff|show|blame|branch|stash\s+list|grep|ls-files)/,
+	/^(npm|yarn|pnpm|bun)\s+(install|i|add|test|run\s|update|outdated|audit|list|ls|view|info)/,
+	/^cargo\s+(build|test|check|run|clippy|tree|search|metadata)/,
+	/^(pytest|jest|mocha|vitest|tap|bats)\b/,
+	/^(find|grep|rg|fd|ag|ripgrep)\b/,
+	/^ls\s+(-R|-la|-al)/,
+	/^docker\s+(build|ps|logs|images|inspect|stats)/,
+	/^kubectl\s+(get|describe|logs|top|api-resources)/,
+	/^terraform\s+(plan|show|state\s+list|state\s+show|validate)/,
+	/^helm\s+(list|status|history|get)/,
+	/^(make|gradle|bazel|nx|turbo)\b/,
+	/^ps\s+(aux|-ef)/,
+	/^(top|htop)\b/,
+	/^(df|du)\b/,
+	/^(go|rustc)\s+(test|build|vet|run)/,
+];
+
+function shouldWrap(cmd: string): boolean {
+	const trimmed = cmd.trim();
+	// Don't wrap if user is redirecting output to a file/device — they want raw.
+	if (/(?:^|\s)(?:>|>>|\d?>&)\s*\S/.test(trimmed)) return false;
+	// Don't wrap if command pipes into another tool — already shaping output.
+	if (/\|/.test(trimmed)) return false;
+	// Don't wrap multi-statement scripts (semicolons, &&, ||) — too hard to
+	// reason about state side-effects across statements.
+	if (/&&|\|\||;/.test(trimmed)) return false;
+	return WRAP_TARGETS.some((re) => re.test(trimmed));
+}
+
+function shellQuote(s: string): string {
+	return `'${s.replace(/'/g, "'\\''")}'`;
+}
 
 let raw = "";
 process.stdin.setEncoding("utf-8");
@@ -56,6 +100,16 @@ if (tool === "Bash") {
 		respond({
 			updatedInput: {
 				command: `echo "${TOOL_PREFIX}: Inline HTTP blocked. Use mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox, or mcp__${TOOL_PREFIX}__fetch_and_index(url, source) for web pages."`,
+			},
+		});
+	}
+
+	// Auto-wrap output-heavy commands so their stdout flows through the
+	// compression pipeline transparently. Opt-in via CONTEXT_COMPRESS_FILTER_BASH=1.
+	if (filterBash && shouldWrap(command)) {
+		respond({
+			updatedInput: {
+				command: `${ccBin} wrap ${shellQuote(command)}`,
 			},
 		});
 	}
