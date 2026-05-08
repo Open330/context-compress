@@ -2,22 +2,75 @@
 
 # context-compress
 
-**Keep your context window lean. Let the sandbox do the heavy lifting.**
+**Stop drowning your AI agent in shell output.**
+Compress tool output before it hits the context window — through an MCP server, a drop-in CLI, or both.
 
-[![CI](https://github.com/Open330/context-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/Open330/context-compress/actions)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![CI](https://github.com/Open330/context-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/Open330/context-compress/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/context-compress?color=cb3837&logo=npm)](https://www.npmjs.com/package/context-compress)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen?logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
+[![Tests](https://img.shields.io/badge/tests-213%20passing-success)](#contributing)
 
-A context-aware **MCP server** for [Claude Code](https://claude.ai/claude-code) that compresses tool output by processing it in isolated subprocesses. Raw data stays in the sandbox — only concise summaries enter your context window.
-
-[Quickstart for Agents](#quickstart-for-agents) · [Getting Started](#getting-started) · [How It Works](#how-it-works) · [Token Reduction](#token-reduction) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
+[Quickstart](#quickstart) · [Compression Modes](#compression-modes) · [vs RTK](#head-to-head-with-rtk) · [How It Works](#how-it-works) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
 
 </div>
 
+<table align="center">
+<tr>
+<td align="center" width="25%">
+
+**93%**
+<br>token reduction
+<br><sub>aggressive mode</sub>
+
+</td>
+<td align="center" width="25%">
+
+**+10.5pp**
+<br>over RTK
+<br><sub>same commands</sub>
+
+</td>
+<td align="center" width="25%">
+
+**4 modes**
+<br>incl. LLM-judged
+<br><sub>auto • aggressive • balanced • conservative</sub>
+
+</td>
+<td align="center" width="25%">
+
+**8 MCP tools**
+<br>+ standalone CLI
+<br><sub>RTK-compatible wrap</sub>
+
+</td>
+</tr>
+</table>
+
 ---
 
-## Quickstart for Agents
+## Quickstart
+
+```bash
+# 1. Install
+npm install -g context-compress
+
+# 2. One-line setup — registers the MCP server, installs the hook,
+#    enables transparent Bash compression
+context-compress setup --auto
+
+# 3. (optional) Pick a mode for the session
+export CONTEXT_COMPRESS_MODE=balanced   # or: aggressive, conservative, auto
+```
+
+That's it. Restart Claude Code and shell output is now compressed before it enters context.
+
+> **Prefer no MCP at all?** `context-compress wrap "<cmd>"` compresses any shell command's output — drop-in for [RTK](https://github.com/rtk-ai/rtk). See [CLI](#cli).
+
+<details>
+<summary><b>Quickstart for AI agents</b> — paste this prompt and your agent will install it</summary>
 
 <div><img src="https://quickstart-for-agents.vercel.app/api/header.svg?theme=claude-code&title=context-compress&lang=Agents&mascot=thinking" width="100%" /></div>
 
@@ -27,13 +80,15 @@ Raw data stays in sandboxed subprocesses, only concise summaries enter your cont
 Saves ~99% of tokens on large outputs while keeping everything searchable via FTS5.
 
 npm install -g context-compress
-claude mcp add context-compress -- node $(which context-compress)
+context-compress setup --auto
 context-compress doctor
 
 More info: https://github.com/Open330/context-compress
 ```
 
 <div><img src="https://quickstart-for-agents.vercel.app/api/footer.svg?theme=claude-code&project=context-compress" width="100%" /></div>
+
+</details>
 
 ---
 
@@ -49,6 +104,11 @@ Before:  git log --oneline -100  →  8.2KB into context
 After:   execute("git log ...")  →  0.3KB summary + full data searchable in FTS5
 ```
 
+It works in two modes that compose freely:
+
+- **MCP server** — registers as a Claude Code MCP server with 8 tools (`execute`, `search`, `batch_execute`, `fetch_and_index`, `index`, `execute_file`, `stats`, `discover`). Agents call them directly when output would be large.
+- **Standalone CLI** — `context-compress wrap "<cmd>"` runs any shell command and pipes the output through the same compression pipeline. Drop-in for [RTK](https://github.com/rtk-ai/rtk) and friends. The PreToolUse hook can route `Bash` calls through it transparently when `CONTEXT_COMPRESS_FILTER_BASH=1`.
+
 > Based on [context-mode](https://github.com/mksglu/claude-context-mode) by Mert Koseoğlu — rewritten in TypeScript with security hardening, architectural improvements, and better DX.
 
 ---
@@ -61,7 +121,15 @@ After:   execute("git log ...")  →  0.3KB summary + full data searchable in FT
 npm install -g context-compress
 ```
 
-### Add to Claude Code
+### One-line setup
+
+```bash
+context-compress setup --auto
+```
+
+Writes `~/.claude/settings.json` for you: registers the MCP server, installs the PreToolUse hook, enables transparent Bash compression. Idempotent — re-running with the same paths makes zero changes. Preserves any unrelated user settings.
+
+### Manual setup
 
 ```bash
 claude mcp add context-compress -- node $(which context-compress)
@@ -115,7 +183,7 @@ context-compress doctor
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 7 MCP Tools
+### 8 MCP Tools
 
 | Tool | What it does |
 |:-----|:-------------|
@@ -125,7 +193,8 @@ context-compress doctor
 | **`search`** | BM25 search with Porter stemming → trigram → fuzzy fallback. |
 | **`fetch_and_index`** | Fetch URL → HTML-to-markdown → auto-index. Preview only in context. |
 | **`batch_execute`** | Run N commands + search in ONE call. Replaces 30+ tool calls. |
-| **`stats`** | Real-time session statistics: bytes saved, tokens avoided, savings ratio. |
+| **`stats`** | Session + cumulative statistics: bytes saved, tokens avoided, savings ratio. |
+| **`discover`** | Lists indexed sources, top searchable terms, and suggests next actions. |
 
 ### Supported Languages
 
@@ -321,9 +390,10 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
   [PASS] Language coverage: 7/11 (64%)
   [PASS] Server test: OK
   [PASS] PreToolUse hook configured
+  [PASS] Hook integrity: SHA-256 verified (a3f1c8d2e4...)
   [PASS] FTS5 / better-sqlite3 works
 
-  Version: v2026.3.3
+  Version: v2026.3.22
   All checks passed.
 ```
 
@@ -334,34 +404,63 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
 ```
 context-compress/
 ├── src/
-│   ├── index.ts              # Entry point
-│   ├── server.ts             # MCP server (7 tools)
-│   ├── executor.ts           # SubprocessExecutor
-│   ├── store.ts              # ContentStore (FTS5)
-│   ├── config.ts             # Config system
-│   ├── logger.ts             # Debug logger
+│   ├── index.ts              # MCP server entry
+│   ├── server.ts             # Wires deps, registers tools (132 lines, was 845)
+│   ├── executor.ts           # SubprocessExecutor + ANSI/dedup pipeline
+│   ├── filters.ts            # Command-aware filters (git, npm, ls, find, ps, ...)
+│   ├── store.ts              # ContentStore (FTS5 + BM25 + Porter + trigram + Levenshtein)
+│   ├── network.ts            # SSRF / DNS rebinding protection
+│   ├── stats.ts              # Session + cumulative session tracker
+│   ├── config.ts             # Config: ENV → file → defaults
 │   ├── snippet.ts            # FTS5 snippet extraction
-│   ├── stats.ts              # Session tracker
+│   ├── logger.ts             # Debug logger
 │   ├── types.ts              # Shared types
+│   ├── utils.ts              # detectInjectionPatterns, limitConcurrency, formatBytes
 │   ├── runtime/
+│   │   ├── index.ts          # Parallel runtime detection + registry
 │   │   ├── plugin.ts         # LanguagePlugin interface
-│   │   ├── index.ts          # Registry + parallel detection
-│   │   └── languages/        # 11 language plugins
+│   │   └── languages/        # 11 language plugins (js, ts, py, sh, rb, go, rs, php, pl, r, ex)
+│   ├── tools/                # MCP tool handlers (one file per tool)
+│   │   ├── context.ts        # Shared ToolContext interface
+│   │   ├── execute.ts
+│   │   ├── execute-file.ts
+│   │   ├── index-content.ts
+│   │   ├── search.ts
+│   │   ├── fetch-and-index.ts
+│   │   ├── batch-execute.ts
+│   │   ├── stats.ts
+│   │   └── discover.ts
+│   ├── util/                 # Pure utilities (extracted from server.ts for testability)
+│   │   ├── path.ts           # isWithinProject (path-traversal safe)
+│   │   ├── fetch-code.ts     # buildFetchCode (HTML→md sandbox script)
+│   │   ├── intent-filter.ts  # createIntentFilter factory
+│   │   ├── label.ts          # compactLabel (compression levels)
+│   │   ├── version.ts        # getVersion (deduped across CLI commands)
+│   │   ├── stream-compress.ts# Line-by-line StreamCompressor for `wrap --stream`
+│   │   └── auto-mode.ts      # LLM-driven mode selection (Anthropic API + claude CLI)
 │   ├── hooks/
-│   │   └── pretooluse.ts     # PreToolUse hook (no self-mod)
+│   │   └── pretooluse.ts     # PreToolUse hook (curl/Bash/Read/Grep/WebFetch/Task)
 │   └── cli/
-│       ├── index.ts          # CLI entry
-│       ├── setup.ts          # Interactive setup
-│       ├── doctor.ts         # Diagnostics
-│       └── uninstall.ts      # Clean removal
+│       ├── index.ts          # CLI dispatcher
+│       ├── lite.ts           # Single-binary entry (filter+wrap only, no MCP)
+│       ├── filter.ts         # `filter` (stdin) + `wrap` (spawn) commands
+│       ├── setup.ts          # `setup` / `init` — interactive + --auto
+│       ├── doctor.ts         # `doctor` — diagnostics
+│       └── uninstall.ts      # `uninstall` — clean removal
 ├── tests/
-│   ├── unit/                 # 7 unit test files
+│   ├── unit/                 # 18 unit test files (213 tests, all passing)
 │   └── integration/          # 3 integration test files
-├── hooks/
-│   └── hooks.json            # Hook matcher config
+├── scripts/
+│   ├── benchmark.ts          # Synthetic compression benchmark
+│   ├── benchmark-real.ts     # Real-command benchmark on this repo
+│   └── benchmark-vs-rtk.ts   # Head-to-head vs RTK with --auto support
+├── hooks/                    # Pre-built hook bundle (shipped in npm package)
 ├── skills/                   # Slash command definitions
-└── dist/                     # Compiled output
+├── docs/                     # Token reduction report + architecture docs
+└── dist/                     # Compiled output (build artifact)
 ```
+
+> `server.ts` is now thin (132 lines) — it constructs deps, builds a `ToolContext`, registers the 8 tool modules, and wires shutdown. All tool handlers live under `src/tools/`, all reusable helpers under `src/util/`.
 
 ---
 
@@ -369,11 +468,15 @@ context-compress/
 
 | Threat | Mitigation |
 |:-------|:-----------|
-| Credential leakage | `passthroughEnvVars` defaults to `[]` — zero env vars passed unless opted in |
-| Shell injection (Rust) | `execFileSync` with array arguments — no string interpolation |
-| Hook self-modification | No `fs.writeFileSync` in hooks — zero filesystem side effects |
-| Arbitrary code execution | No `upgrade` command — no `git clone` or `npm install` at runtime |
-| Silent failures | Debug mode surfaces all catch block errors to stderr |
+| Credential leakage | `passthroughEnvVars` defaults to `[]` — zero env vars passed to subprocesses unless opted in |
+| Shell injection | `execFileSync` with array arguments throughout — no string interpolation into shells |
+| SSRF / private-IP fetch | `fetch_and_index` blocks RFC1918, link-local, loopback, IPv4-mapped IPv6 (incl. hex form `::ffff:HHHH:HHHH`), CGNAT |
+| DNS rebinding (TOCTOU) | `resolveAndValidate` + URL pinning to the resolved IP with original `Host` header preserved |
+| Path traversal | `isWithinProject` uses `realpathSync` to defeat symlink escapes; falls back to string-prefix for not-yet-existing paths |
+| Hook self-modification | Hooks are read-only — no `fs.writeFileSync` in `src/hooks/`. Hook integrity SHA-256 verified by `doctor` |
+| Arbitrary code execution | No `upgrade` command — no `git clone` or `npm install` at runtime. Setup writes only to `~/.claude/settings.json` |
+| Silent failures | `CONTEXT_COMPRESS_DEBUG=1` surfaces all catch-block errors to stderr |
+| Subprocess sandboxing | OS-level sandboxing not enforced (by design for the MCP trust model). See [SECURITY.md](SECURITY.md) for the full trust model. |
 
 ---
 
@@ -383,11 +486,34 @@ context-compress/
 git clone https://github.com/Open330/context-compress
 cd context-compress
 npm install
-npm run typecheck     # Type checking
-npm run lint          # Biome linting
-npm run test:unit     # Unit tests
-npm run test          # All tests (unit + integration)
-npm run build         # Compile + bundle
+
+npm run typecheck        # Strict TS
+npm run lint             # Biome
+npm test                 # All tests (unit + integration)
+npm run test:unit        # Unit tests only
+
+npm run build            # Compile + bundle MCP server + CLI
+npm run build:hooks      # Bundle the PreToolUse hook (with SHA-256)
+npm run build:bin        # Cross-compile single binaries via Bun (4 targets)
+```
+
+### Reproducing the benchmarks
+
+```bash
+# Synthetic — fast, reproducible, includes RTK-style commands
+tsx scripts/benchmark.ts
+
+# Real-world — runs actual commands in your repo
+tsx scripts/benchmark-real.ts            # full
+tsx scripts/benchmark-real.ts --quick    # skip npm test
+
+# Head-to-head with RTK (build it first)
+git clone https://github.com/rtk-ai/rtk /tmp/rtk
+(cd /tmp/rtk && cargo build --release)
+
+RTK_BIN=/tmp/rtk/target/release/rtk tsx scripts/benchmark-vs-rtk.ts
+RTK_BIN=... tsx scripts/benchmark-vs-rtk.ts --auto    # also run LLM-judged auto mode
+RTK_BIN=... tsx scripts/benchmark-vs-rtk.ts --json    # machine-readable
 ```
 
 ---
@@ -395,3 +521,5 @@ npm run build         # Compile + bundle
 ## License
 
 [MIT](LICENSE) — Based on [context-mode](https://github.com/mksglu/claude-context-mode) by Mert Koseoğlu.
+
+> **Inspired by [RTK](https://github.com/rtk-ai/rtk)** for the command-aware filtering tactic. context-compress builds on the same idea with multi-mode trade-offs, an LLM-judged `auto` mode, MCP integration, sandbox execution, and a searchable knowledge base.
