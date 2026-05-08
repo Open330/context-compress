@@ -157,6 +157,137 @@ drwxr-xr-x   2 jiun  staff    64 May  7 13:24 sub`;
 	});
 });
 
+describe("aggressive mode — ls -laR drops dots and intra-section dirs", () => {
+	const sample = `src/:
+total 192
+drwxr-xr-x   3 jiun  staff   96 May  6 14:20 .
+drwxr-xr-x  10 jiun  staff  320 May  6 14:20 ..
+-rw-r--r--   1 jiun  staff  1234 May  7 13:24 config.ts
+drwxr-xr-x   2 jiun  staff    64 May  7 13:24 cli
+drwxr-xr-x   2 jiun  staff    64 May  7 13:24 util
+
+src/cli:
+total 64
+drwxr-xr-x   2 jiun  staff    64 May  7 13:24 .
+drwxr-xr-x   3 jiun  staff    96 May  6 14:20 ..
+-rw-r--r--   1 jiun  staff   500 May  7 13:24 doctor.ts
+-rw-r--r--   1 jiun  staff   400 May  7 13:24 setup.ts
+
+src/util:
+total 32
+drwxr-xr-x   2 jiun  staff    64 May  7 13:24 .
+drwxr-xr-x   3 jiun  staff    96 May  6 14:20 ..
+-rw-r--r--   1 jiun  staff   200 May  7 13:24 path.ts`;
+
+	it("removes . / .. entries entirely", () => {
+		const r = applyCommandFilter("ls -laR src/", sample, "aggressive");
+		assert.strictEqual(r.filtered, true);
+		// No bare "./" or "../" should appear in output
+		assert.ok(!/^\.\/$/m.test(r.output), "should not contain ./");
+		assert.ok(!/^\.\.\/$/m.test(r.output), "should not contain ../");
+	});
+
+	it("keeps section headers but drops redundant intra-section dir entries", () => {
+		const r = applyCommandFilter("ls -laR src/", sample, "aggressive");
+		// Section headers stay
+		assert.ok(r.output.includes("src/:"));
+		assert.ok(r.output.includes("src/cli:"));
+		assert.ok(r.output.includes("src/util:"));
+		// File entries stay
+		assert.ok(r.output.includes("config.ts"));
+		assert.ok(r.output.includes("doctor.ts"));
+		// "cli" and "util" subdirs (listed within src/'s section) are redundant
+		// because they get their own headers — should not appear as standalone "cli/" line.
+		// Find lines that are exactly "cli/" or "util/" (no path prefix)
+		const dropDirs = r.output.split("\n").filter((l) => l === "cli/" || l === "util/");
+		assert.strictEqual(dropDirs.length, 0, "intra-section dir entries should be dropped");
+	});
+
+	it("compresses meaningfully more than the previous version", () => {
+		const r = applyCommandFilter("ls -laR src/", sample, "aggressive");
+		// Sample is ~750 bytes; aggressive should land under 250.
+		assert.ok(r.output.length < 250, `expected <250B, got ${r.output.length}B`);
+	});
+});
+
+describe("aggressive mode — df strips pseudo-filesystems", () => {
+	const sample = `Filesystem        Size  Used Avail Use% Mounted on
+/dev/disk1s1     500G  300G  200G  60% /
+tmpfs            8.0G     0  8.0G   0% /tmp
+devfs            200K  200K     0 100% /dev
+overlay          50G   25G   25G  50% /var/lib/docker
+udev             4.0G     0  4.0G   0% /dev
+/dev/loop1       100M  50M   50M  50% /snap/test
+map auto_home      0     0     0    -  /System/Volumes/Data/home`;
+
+	it("removes tmpfs/devfs/overlay/udev/loop/map entries", () => {
+		const r = applyCommandFilter("df -h", sample, "aggressive");
+		assert.strictEqual(r.filtered, true);
+		assert.ok(r.output.includes("/dev/disk1s1"));
+		assert.ok(!r.output.includes("tmpfs"));
+		assert.ok(!r.output.includes("devfs"));
+		assert.ok(!r.output.includes("overlay"));
+		assert.ok(!r.output.includes("udev"));
+		assert.ok(!r.output.includes("/dev/loop"));
+	});
+
+	it("balanced mode passes df through", () => {
+		const r = applyCommandFilter("df -h", sample, "balanced");
+		assert.strictEqual(r.filtered, false);
+	});
+});
+
+describe("aggressive mode — ps aux keeps PID/%CPU/%MEM/CMD only", () => {
+	const sample = `USER       PID %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
+jiun       100  5.2  1.0   400000  50000   ??  S     1:00PM   0:01.23 node /path/to/app
+root         2  0.0  0.0        0      0   ??  S     8:00AM   0:00.01 [kthreadd]
+jiun       200 10.5  2.5   800000 100000   ??  R     1:05PM   1:23.45 npm run build
+root        50  0.0  0.0        0      0   ??  S     8:00AM   0:00.05 [migration]`;
+
+	it("strips USER/VSZ/RSS/STAT and drops kernel-thread entries", () => {
+		const r = applyCommandFilter("ps aux", sample, "aggressive");
+		assert.strictEqual(r.filtered, true);
+		assert.match(r.output, /^PID\s+%CPU\s+%MEM\s+CMD$/m);
+		assert.ok(r.output.includes("100"), "should keep user processes");
+		assert.ok(r.output.includes("npm run build"));
+		// Kernel threads in [brackets] are dropped
+		assert.ok(!r.output.includes("[kthreadd]"));
+		assert.ok(!r.output.includes("[migration]"));
+		// VSZ / RSS / STAT columns stripped
+		assert.ok(!r.output.includes("VSZ"));
+		assert.ok(!r.output.includes("RSS"));
+	});
+});
+
+describe("aggressive mode — npm ls strips tree drawing + dedupes", () => {
+	const sample = `my-app@1.0.0 /repo
+├── react@18.2.0
+├─┬ react-dom@18.2.0
+│ └── react@18.2.0 deduped
+├─┬ webpack@5.0.0
+│ ├── extraneous webpack-cli@4.0.0
+│ └── webpack@5.0.0 deduped
+└── typescript@5.0.0`;
+
+	it("strips tree-drawing characters", () => {
+		const r = applyCommandFilter("npm ls", sample, "aggressive");
+		assert.strictEqual(r.filtered, true);
+		assert.ok(!/[│├└─┬]/u.test(r.output), "tree-drawing chars should be gone");
+	});
+
+	it("removes 'deduped' and 'extraneous' markers", () => {
+		const r = applyCommandFilter("npm ls", sample, "aggressive");
+		assert.ok(!r.output.includes("deduped"));
+		assert.ok(!r.output.includes("extraneous"));
+	});
+
+	it("keeps each unique package line", () => {
+		const r = applyCommandFilter("npm ls", sample, "aggressive");
+		assert.ok(r.output.includes("react@18.2.0"));
+		assert.ok(r.output.includes("typescript@5.0.0"));
+	});
+});
+
 describe("aggressive mode — grep", () => {
 	const sample =
 		"src/foo.ts:10:const someValue = 1\nsrc/foo.ts:25:if (someValue > 0) {\nsrc/bar.ts:5:function bar() { return someValue; }\nsrc/foo.ts:42:return someValue * 2";

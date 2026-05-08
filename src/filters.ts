@@ -72,6 +72,13 @@ export function applyCommandFilter(
 		if (mode === "aggressive") return filterGrep(stdout);
 	}
 
+	// System tabular commands: df, du, ps — aggressive mode only.
+	if (mode === "aggressive") {
+		if (cmd === "df") return filterDf(stdout);
+		if (cmd === "du") return filterDu(stdout);
+		if (cmd === "ps") return filterPs(stdout);
+	}
+
 	return { output: stdout, filtered: false };
 }
 
@@ -287,7 +294,33 @@ export function filterPackageManager(
 		return filterTestOutput(stdout);
 	}
 
+	// npm ls / list / ll — aggressive mode strips tree-drawing chars and
+	// collapses identical version lines.
+	if (mode === "aggressive" && /\b(ls|list|ll)\b/.test(cmd)) {
+		return filterNpmLs(stdout);
+	}
+
 	return { output: stdout, filtered: false };
+}
+
+/** npm ls output — strip tree-drawing characters, drop "deduped" markers, dedupe identical lines. */
+function filterNpmLs(stdout: string): FilterResult {
+	const lines = stdout.split("\n");
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const l of lines) {
+		// Strip box-drawing prefix: ├── ┬ │ └── ─ etc.
+		const stripped = l.replace(/^[\s│├└─┬]+/u, "").trimEnd();
+		if (!stripped) continue;
+		// Drop "deduped" markers — they're noise once you know there's deduplication.
+		if (/\bdeduped\b/.test(stripped)) continue;
+		// Drop "extraneous" labels (can appear leading or inline).
+		const cleaned = stripped.replace(/^extraneous\s+/, "").replace(/\s+\bextraneous\b/g, "");
+		if (seen.has(cleaned)) continue;
+		seen.add(cleaned);
+		out.push(cleaned);
+	}
+	return { output: out.join("\n"), filtered: true };
 }
 
 const FAIL_MARKER_RE = /^\s*[✗✘×]\s/;
@@ -458,14 +491,23 @@ export function filterFileList(
 	return { output: stdout, filtered: false };
 }
 
-/** Strip `ls -l` metadata; emit "name [size]" rows + directory headers. */
+/**
+ * Strip `ls -l` metadata; emit "name [size]" rows + directory headers.
+ *
+ * For `ls -laR` (recursive), each subdir gets its own header section. The
+ * subdir entries inside the parent's listing are redundant (they reappear
+ * as section headers below), so we drop them. We also drop "." and ".."
+ * entries, "total N" lines, and blank lines.
+ */
 function aggressiveLsLong(stdout: string): string {
 	const lines = stdout.split("\n");
 	const out: string[] = [];
+	let inSection = false;
 	for (const line of lines) {
-		// Directory header from `ls -laR`: "src/dir:" — keep
+		// Directory header from `ls -laR`: "src/dir:" — emit as `dir/`.
 		if (/^[^\s]+:$/.test(line.trim())) {
 			out.push(line.trim());
+			inSection = true;
 			continue;
 		}
 		// `total N` lines from ls -l — drop
@@ -477,9 +519,18 @@ function aggressiveLsLong(stdout: string): string {
 			/^([dlcb-])[rwxst@+\-]{9,}\s+\d+\s+\S+\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(.+)$/,
 		);
 		if (m) {
+			const type = m[1];
 			const sizeStr = m[2];
 			const name = m[3];
-			out.push(name + (m[1] === "d" ? "/" : ` ${formatSize(sizeStr)}`));
+
+			// "." and ".." entries are noise in any listing
+			if (name === "." || name === "..") continue;
+
+			// In recursive sections, directory entries get their own section
+			// header below — emitting them here is redundant.
+			if (type === "d" && inSection) continue;
+
+			out.push(name + (type === "d" ? "/" : ` ${formatSize(sizeStr)}`));
 			continue;
 		}
 		// Fallback: keep line (unknown format)
@@ -527,6 +578,93 @@ export function filterGrep(stdout: string): FilterResult {
 		out.push(`${file} (${hits.length})`);
 		for (const h of hits.slice(0, 8)) out.push(h);
 		if (hits.length > 8) out.push(`  ... +${hits.length - 8} more matches`);
+	}
+	return { output: out.join("\n"), filtered: true };
+}
+
+/**
+ * df output — drop pseudo-filesystems (tmpfs, devfs, /dev/loop, etc.) that
+ * are usually noise, and shrink padding to single space.
+ */
+export function filterDf(stdout: string): FilterResult {
+	const lines = stdout.split("\n");
+	if (lines.length === 0) return { output: stdout, filtered: false };
+	const header = lines[0];
+	const out: string[] = [header.replace(/\s{2,}/g, " ")];
+	for (const line of lines.slice(1)) {
+		if (!line.trim()) continue;
+		// Drop noisy pseudo-filesystems
+		if (/^(tmpfs|devfs|devtmpfs|udev|overlay|map\s|none\s|\/dev\/loop)/.test(line)) continue;
+		out.push(line.replace(/\s{2,}/g, " "));
+	}
+	return { output: out.join("\n"), filtered: true };
+}
+
+/** du -a / du -h with many entries: keep just the largest 20 + total. */
+export function filterDu(stdout: string): FilterResult {
+	const lines = stdout.split("\n").filter((l) => l.trim() !== "");
+	if (lines.length <= 25) return { output: stdout, filtered: false };
+	// Each line is "<size>\t<path>" — sort by size descending.
+	const parsed = lines
+		.map((l) => {
+			const m = l.match(/^([\d.]+[KMGT]?B?)?\s*(.*)$/);
+			if (!m) return null;
+			const sizeRaw = m[1] ?? "0";
+			const path = m[2];
+			return { sizeRaw, sizeBytes: parseDuSize(sizeRaw), path, line: l };
+		})
+		.filter((x): x is NonNullable<typeof x> => x !== null);
+	parsed.sort((a, b) => b.sizeBytes - a.sizeBytes);
+	const top = parsed.slice(0, 20).map((p) => p.line);
+	return {
+		output: `(top 20 of ${parsed.length} entries by size)\n${top.join("\n")}`,
+		filtered: true,
+	};
+}
+
+function parseDuSize(s: string): number {
+	const m = s.match(/^([\d.]+)([KMGT])?B?$/i);
+	if (!m) return 0;
+	const n = Number.parseFloat(m[1]);
+	const unit = (m[2] ?? "").toUpperCase();
+	const factor =
+		unit === "T"
+			? 1024 ** 4
+			: unit === "G"
+				? 1024 ** 3
+				: unit === "M"
+					? 1024 ** 2
+					: unit === "K"
+						? 1024
+						: 1;
+	return n * factor;
+}
+
+/**
+ * ps aux output — keep PID, %CPU, %MEM, COMMAND only. Strip USER, VSZ, RSS,
+ * STAT, START, TIME and the heavy padding. Drop kernel/system noise.
+ */
+export function filterPs(stdout: string): FilterResult {
+	const lines = stdout.split("\n");
+	if (lines.length <= 2) return { output: stdout, filtered: false };
+	const header = lines[0];
+	// `\b%CPU\b` doesn't match because % is not a word char; use plain includes.
+	const isAux = header.includes("USER") && header.includes("%CPU") && header.includes("%MEM");
+	if (!isAux) return { output: stdout, filtered: false };
+
+	const out: string[] = ["PID  %CPU %MEM CMD"];
+	for (const line of lines.slice(1)) {
+		if (!line.trim()) continue;
+		// ps aux columns: USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
+		const parts = line.trim().split(/\s+/);
+		if (parts.length < 11) continue;
+		const pid = parts[1];
+		const cpu = parts[2];
+		const mem = parts[3];
+		const cmd = parts.slice(10).join(" ");
+		// Drop kernel threads (PID < 100, COMMAND in brackets) — usually noise
+		if (/^\[.*\]$/.test(cmd)) continue;
+		out.push(`${pid.padEnd(5)} ${cpu.padStart(4)} ${mem.padStart(4)} ${cmd}`);
 	}
 	return { output: out.join("\n"), filtered: true };
 }

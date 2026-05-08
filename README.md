@@ -168,17 +168,19 @@ Result on this repository (RTK 0.39.0 vs context-compress 2026.3.22):
 
 | Command | Raw | RTK | CC `conservative` | CC `balanced` | CC `aggressive` |
 |:--|--:|--:|--:|--:|--:|
-| `git status` | 637 B | 279 B (56%) | 637 B (0%) | 435 B (32%) | **225 B (65%)** |
-| `git log -10` (full) | 15.1 KB | 2.8 KB (81%) | 15.1 KB (0%) | 11.5 KB (24%) | **891 B (94%)** |
-| `git log -50` (full) | 28.9 KB | 9.1 KB (69%) | 28.9 KB (0%) | 20.2 KB (30%) | **2.9 KB (90%)** |
-| `git diff --stat` | 682 B | 681 B (0%) | 682 B (0%) | 682 B (0%) | 682 B (0%) |
+| `git status` | 497 B | 245 B (51%) | 497 B (0%) | 295 B (41%) | **118 B (76%)** |
+| `git log -10` (full) | 17.5 KB | 2.9 KB (84%) | 17.5 KB (0%) | 13.4 KB (24%) | **895 B (95%)** |
+| `git log -50` (full) | 32.0 KB | 9.4 KB (71%) | 32.0 KB (0%) | 22.3 KB (30%) | **3.0 KB (91%)** |
+| `git diff --stat` | 535 B | 534 B (0%) | 535 B (0%) | 535 B (0%) | 535 B (0%) |
 | `ls src/` | 149 B | 229 B (-54%) | 149 B (0%) | 149 B (0%) | 149 B (0%) |
-| `ls -laR src/` | 3.7 KB | **229 B (94%)** | 3.7 KB (0%) | 3.7 KB (0%) | 919 B (76%) |
+| `ls -laR src/` | 3.7 KB | **229 B (94%)** | 3.7 KB (0%) | 3.7 KB (0%) | 859 B (78%) |
 | `find *.ts` | 1.0 KB | 576 B (44%) | 1.0 KB (0%) | 1.0 KB (0%) | **183 B (82%)** |
-| `npm test` | 18.8 KB | 114 B (99%) | 14.3 KB (24%) | **120 B (99%)** | **120 B (99%)** |
-| **Overall (byte-weighted)** | **69.0 KB** | **14.0 KB (79.7%)** | 64.5 KB (6.5%) | 37.8 KB (45.3%) | **6.0 KB (91.2%)** |
+| `npm test` | 20.1 KB | 114 B (99%) | 15.3 KB (24%) | **120 B (99%)** | **120 B (99%)** |
+| **Overall (byte-weighted)** | **75.5 KB** | 14.2 KB (81.2%) | 70.8 KB (6.3%) | 41.5 KB (45.1%) | **5.8 KB (92.3%)** |
 
-**context-compress aggressive beats RTK by 11.5 percentage points overall** while still letting you fall back to `balanced` (preserves metadata) or `conservative` (just ANSI) for fidelity-sensitive workloads. Numbers are byte-weighted across the full set; per-command splits show the trade-offs.
+**context-compress aggressive beats RTK by 11.1 percentage points overall** while still letting you fall back to `balanced` (preserves metadata) or `conservative` (just ANSI) for fidelity-sensitive workloads. Numbers are byte-weighted across the full set; per-command splits show the trade-offs.
+
+Aggressive mode covers a wider command surface than the table above hints — it also handles `df` (drops pseudo-filesystems), `du` (top-N by size), `ps aux` (PID/%CPU/%MEM/CMD only, drops kernel threads), `npm ls` (strips tree-drawing chars + `deduped`/`extraneous` markers), and `grep`/`rg` (groups by file, truncates long lines).
 
 > RTK has a single fixed compression strategy — comparable to context-compress `aggressive`. context-compress lets the agent choose: reach for `aggressive` when the question is "what changed", `balanced` when the question is "explain why".
 
