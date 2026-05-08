@@ -108,9 +108,21 @@ export function filterGit(
 		return { output: filterGitStatus(stdout, mode), filtered: true };
 	}
 
-	// git log — aggressive mode collapses each commit to one line
-	if (/git\s+log/.test(cmd) && !cmd.includes("--oneline") && mode === "aggressive") {
-		return { output: aggressiveGitLog(stdout), filtered: true };
+	// git log — aggressive mode collapses each commit to one line.
+	// Balanced mode preserves the header + first 3 body lines and replaces
+	// the remainder with "[+N more lines]". Keeps the "why" intact while
+	// dropping verbose tail content.
+	if (/git\s+log/.test(cmd) && !cmd.includes("--oneline")) {
+		if (mode === "aggressive") {
+			return { output: aggressiveGitLog(stdout), filtered: true };
+		}
+		if (mode === "balanced") {
+			const truncated = balancedGitLog(stdout);
+			// Only mark filtered if we actually dropped something
+			if (truncated.length < stdout.length) {
+				return { output: truncated, filtered: true };
+			}
+		}
 	}
 
 	// git diff — aggressive mode drops context lines for unified diffs.
@@ -221,6 +233,83 @@ function aggressiveGitLog(stdout: string): string {
 		}
 	}
 	flush();
+	return out.join("\n");
+}
+
+/**
+ * Truncate `git log` commit bodies to the first 3 lines, replacing the
+ * tail with "[+N lines omitted]". Keeps full headers (sha, author, date,
+ * subject) and the first 3 body paragraphs verbatim — so the agent still
+ * gets the "why" of each commit but doesn't pay for verbose tails.
+ *
+ * Returns the original input unchanged if no truncation was needed.
+ */
+const BALANCED_GIT_LOG_BODY_LINES = 3;
+
+function balancedGitLog(stdout: string): string {
+	const lines = stdout.split("\n");
+	const out: string[] = [];
+	let bodyKept = 0;
+	let bodyDropped = 0;
+	let subjectSeen = false;
+	let inCommit = false;
+	let inBody = false;
+	let blanksAfterDate = 0;
+
+	const flushOmitted = () => {
+		if (bodyDropped > 0) {
+			out.push(`    [+${bodyDropped} lines omitted]`);
+			bodyDropped = 0;
+		}
+	};
+
+	for (const line of lines) {
+		// New commit boundary — flush any pending omission marker, reset state.
+		if (/^commit\s+[0-9a-f]{7,40}/.test(line)) {
+			flushOmitted();
+			out.push(line);
+			inCommit = true;
+			inBody = false;
+			subjectSeen = false;
+			bodyKept = 0;
+			blanksAfterDate = 0;
+			continue;
+		}
+		if (!inCommit) {
+			out.push(line);
+			continue;
+		}
+		// Headers (Author/Date/Merge) always kept.
+		if (/^(Author|Date|Merge):\s/.test(line)) {
+			out.push(line);
+			continue;
+		}
+		// Blank line — kept; counts as "body separator" transition.
+		if (line.trim() === "") {
+			out.push(line);
+			blanksAfterDate++;
+			continue;
+		}
+		// Once past the first blank after Date, we're in the body.
+		if (blanksAfterDate >= 1) inBody = true;
+
+		if (inBody) {
+			// Always keep the subject (first non-blank line in body).
+			if (!subjectSeen) {
+				subjectSeen = true;
+				out.push(line);
+				continue;
+			}
+			// Keep up to N body lines past the subject; drop the rest with a marker.
+			if (bodyKept >= BALANCED_GIT_LOG_BODY_LINES) {
+				bodyDropped++;
+				continue;
+			}
+			bodyKept++;
+		}
+		out.push(line);
+	}
+	flushOmitted();
 	return out.join("\n");
 }
 
@@ -453,19 +542,28 @@ export function filterFileList(
 	mode: FilterMode = DEFAULT_MODE,
 ): FilterResult {
 	const isLs = /^ls\b/.test(cmd);
+	const isLong = /-l/.test(cmd);
 
 	// Aggressive mode for `ls -l*` — strip permissions/owner/date, keep name + size
-	if (mode === "aggressive" && isLs && /-l/.test(cmd)) {
+	if (mode === "aggressive" && isLs && isLong) {
 		return { output: aggressiveLsLong(stdout), filtered: true };
 	}
 
-	// Aggressive mode lowers find/ls -R summary thresholds to be much more compact
-	const minLines = mode === "aggressive" ? 10 : 30;
-	const summarizeAt = mode === "aggressive" ? 15 : 50;
-	const minDirs = mode === "aggressive" ? 3 : 5;
+	// Balanced mode for `ls -l*` — drop universal noise (./.., total N, blank
+	// lines) but keep all metadata. Users who run `ls -l` want perms/dates;
+	// they don't want ./.. entries or the "total" summary.
+	if (mode === "balanced" && isLs && isLong) {
+		return { output: balancedLsLong(stdout), filtered: true };
+	}
+
+	// Threshold for find/ls -R summarization. Above this many lines, we
+	// summarize by directory if the entries span enough dirs. Below this,
+	// the output is short enough to keep verbatim.
+	const { summarizeAt, minDirs } =
+		mode === "aggressive" ? { summarizeAt: 10, minDirs: 3 } : { summarizeAt: 20, minDirs: 4 };
 
 	const lines = stdout.split("\n").filter((l) => l.trim() !== "");
-	if (lines.length <= minLines) return { output: stdout, filtered: false };
+	if (lines.length <= summarizeAt) return { output: stdout, filtered: false };
 
 	// Group by directory for find/ls -R
 	if (cmd.includes("-R") || cmd.startsWith("find")) {
@@ -476,7 +574,7 @@ export function filterFileList(
 			dirs.set(dir, (dirs.get(dir) ?? 0) + 1);
 		}
 
-		if (dirs.size > minDirs && lines.length > summarizeAt) {
+		if (dirs.size > minDirs) {
 			const summary = Array.from(dirs.entries())
 				.sort((a, b) => b[1] - a[1])
 				.map(([dir, count]) => `  ${dir}/ (${count} files)`)
@@ -489,6 +587,27 @@ export function filterFileList(
 	}
 
 	return { output: stdout, filtered: false };
+}
+
+/**
+ * Balanced ls -l: keep full metadata (perms/owner/date/size) for every
+ * file but drop the universally-useless lines: ./.., "total N", and blank
+ * separators between recursive sections.
+ */
+function balancedLsLong(stdout: string): string {
+	const lines = stdout.split("\n");
+	const out: string[] = [];
+	for (const line of lines) {
+		if (line.trim() === "") continue;
+		if (/^total\s+\d+/.test(line)) continue;
+		// Match the . and .. entries and skip them — they convey nothing.
+		const m = line.match(
+			/^([dlcb-])[rwxst@+\-]{9,}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\.\.?)$/,
+		);
+		if (m) continue;
+		out.push(line);
+	}
+	return out.join("\n");
 }
 
 /**

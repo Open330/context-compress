@@ -3,17 +3,20 @@ import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from
 import { DEFAULT_MODE, type FilterMode, applyCommandFilter, parseMode } from "../filters.js";
 import { StreamCompressor } from "../util/stream-compress.js";
 
-const DEDUP_THRESHOLD = 10_000;
-// Aggressive mode lowers the dedup threshold so even mid-size outputs
-// get the full progress/dedup/group treatment.
+// Generic dedup/progress/group pipeline kicks in once output crosses these
+// thresholds. Lower thresholds = pipeline runs on more outputs = better
+// compression on mid-size noisy outputs. Higher = preserve small outputs as-is.
+const BALANCED_DEDUP_THRESHOLD = 5_000;
 const AGGRESSIVE_DEDUP_THRESHOLD = 2_000;
 
 /**
  * Apply the full context-compress output pipeline to a buffer.
  *
  *   conservative: ANSI strip only — preserve everything else.
- *   balanced:     ANSI strip → command filter → dedup/group (if >10KB).
- *                 Strips noise; preserves metadata (commit bodies, file dates).
+ *   balanced:     ANSI strip → command filter (drops universal noise:
+ *                 progress bars, hint lines, ./.., 'total N', truncates
+ *                 git log bodies past 3 lines) → dedup/group (if >5KB).
+ *                 Preserves all metadata (perms, dates, commit headers).
  *   aggressive:   balanced + aggressive command filters that drop metadata
  *                 (git log → oneline, ls -la → name+size, etc.) and lower
  *                 the dedup threshold to 2KB.
@@ -35,7 +38,7 @@ export function compressOutput(
 		if (filtered.filtered) out = filtered.output;
 	}
 
-	const threshold = mode === "aggressive" ? AGGRESSIVE_DEDUP_THRESHOLD : DEDUP_THRESHOLD;
+	const threshold = mode === "aggressive" ? AGGRESSIVE_DEDUP_THRESHOLD : BALANCED_DEDUP_THRESHOLD;
 	if (out.length > threshold) {
 		out = stripProgressLines(out);
 		out = deduplicateLines(out);

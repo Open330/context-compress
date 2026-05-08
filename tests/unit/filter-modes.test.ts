@@ -24,6 +24,89 @@ describe("conservative mode", () => {
 	});
 });
 
+describe("balanced mode — git log keeps headers + first 3 body lines", () => {
+	const longBody = `commit abcdef1234567890123456789012345678901234
+Author: Foo <foo@example.com>
+Date:   Tue May 7 12:34:56 2026 +0900
+
+    Subject line of the commit
+
+    Body line 1: explanation
+    Body line 2: more detail
+    Body line 3: implementation note
+    Body line 4: should be omitted
+    Body line 5: should be omitted
+    Body line 6: should be omitted
+    Body line 7: should be omitted
+
+commit fedcba0987654321098765432109876543210987
+Author: Bar <bar@example.com>
+Date:   Mon May 6 09:00:00 2026 +0900
+
+    Short commit
+`;
+
+	it("preserves headers and first 3 body lines, omits the rest", () => {
+		const r = applyCommandFilter("git log -10", longBody, "balanced");
+		assert.strictEqual(r.filtered, true);
+		// Headers always kept
+		assert.ok(r.output.includes("commit abcdef"));
+		assert.ok(r.output.includes("Author: Foo"));
+		assert.ok(r.output.includes("Date:"));
+		assert.ok(r.output.includes("Subject line"));
+		// First 3 body lines kept
+		assert.ok(r.output.includes("Body line 1"));
+		assert.ok(r.output.includes("Body line 2"));
+		assert.ok(r.output.includes("Body line 3"));
+		// Lines 4+ omitted
+		assert.ok(!r.output.includes("Body line 4"));
+		assert.ok(!r.output.includes("Body line 7"));
+		// Omission marker present
+		assert.match(r.output, /\[\+\d+\s+lines\s+omitted\]/);
+	});
+
+	it("does not annotate commits with body shorter than 3 lines", () => {
+		const r = applyCommandFilter("git log -10", longBody, "balanced");
+		// Second commit only has subject line (no body), so no omission marker
+		// should be added between commits.
+		const lines = r.output.split("\n");
+		const shortCommitIdx = lines.findIndex((l) => l.includes("Short commit"));
+		assert.ok(shortCommitIdx > 0);
+		// The next non-empty line after "Short commit" should NOT be an omission marker.
+		const after = lines.slice(shortCommitIdx + 1).find((l) => l.trim() !== "");
+		if (after) {
+			assert.ok(!/\[\+\d+\s+lines\s+omitted\]/.test(after));
+		}
+	});
+
+	it("--oneline pass-through is unchanged in balanced", () => {
+		const oneline = "abcdef1 first\nfedcba0 second";
+		const r = applyCommandFilter("git log --oneline -10", oneline, "balanced");
+		assert.strictEqual(r.filtered, false);
+		assert.strictEqual(r.output, oneline);
+	});
+});
+
+describe("balanced mode — find/ls -R lower threshold", () => {
+	it("summarizes a 25-line find result (above the new 20-line balanced floor)", () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 25; i++) lines.push(`src/dir${i % 5}/file${i}.ts`);
+		const stdout = lines.join("\n");
+		const r = applyCommandFilter("find src -name '*.ts'", stdout, "balanced");
+		// Should now summarize (was previously below the 30-line threshold)
+		assert.strictEqual(r.filtered, true);
+		assert.ok(r.output.includes("files found"));
+	});
+
+	it("still leaves a 15-line find result alone", () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 15; i++) lines.push(`src/dir${i % 3}/file${i}.ts`);
+		const r = applyCommandFilter("find src -name '*.ts'", lines.join("\n"), "balanced");
+		// Below 20-line floor — passes through.
+		assert.strictEqual(r.filtered, false);
+	});
+});
+
 describe("aggressive mode — git log", () => {
 	const sample = `commit abcdef1234567890123456789012345678901234
 Author: Foo Bar <foo@example.com>
@@ -150,10 +233,16 @@ drwxr-xr-x   2 jiun  staff    64 May  7 13:24 sub`;
 		assert.ok(r.output.includes("sub/"));
 	});
 
-	it("balanced mode keeps full ls -la output", () => {
+	it("balanced mode keeps perms/dates but strips universal noise", () => {
 		const r = applyCommandFilter("ls -la", sample, "balanced");
-		assert.strictEqual(r.filtered, false);
+		// Permissions and metadata preserved
 		assert.ok(r.output.includes("drwxr-xr-x"));
+		assert.ok(r.output.includes("staff"));
+		// But the "total N" line and . / .. entries are dropped — they're
+		// universally useless regardless of fidelity needs.
+		assert.ok(!r.output.includes("total 192"));
+		assert.ok(!/\s\.\s*$/m.test(r.output), "should drop '.' entry");
+		assert.ok(!/\s\.\.\s*$/m.test(r.output), "should drop '..' entry");
 	});
 });
 
