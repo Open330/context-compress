@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { compressOutput } from "../src/cli/filter.js";
 import type { FilterMode } from "../src/filters.js";
+import { pickModeAuto } from "../src/util/auto-mode.js";
 
 const MODES: FilterMode[] = ["conservative", "balanced", "aggressive"];
 
@@ -122,6 +123,12 @@ interface Row {
 	rtkBytes: number;
 	rtkRatioPct: number;
 	ccByMode: Record<FilterMode, { bytes: number; ratioPct: number }>;
+	auto?: {
+		pickedMode: FilterMode;
+		bytes: number;
+		ratioPct: number;
+		source: string;
+	};
 	skipped?: string;
 }
 
@@ -154,7 +161,7 @@ function emptyCcByMode(): Record<FilterMode, { bytes: number; ratioPct: number }
 	};
 }
 
-function bench(opts: { quick: boolean }): Row[] {
+async function bench(opts: { quick: boolean; auto: boolean }): Promise<Row[]> {
 	const rows: Row[] = [];
 	for (const p of PROBES) {
 		if (p.slow && opts.quick) {
@@ -205,23 +212,41 @@ function bench(opts: { quick: boolean }): Row[] {
 			};
 		}
 
-		rows.push({
+		const row: Row = {
 			label: p.label,
 			rawBytes,
 			rtkBytes,
 			rtkRatioPct: rawBytes ? (1 - rtkBytes / rawBytes) * 100 : 0,
 			ccByMode,
-		});
+		};
+
+		if (opts.auto) {
+			// Each call hits the LLM (cached after first invocation per fingerprint).
+			// Use noCache so benchmarks are reproducible across runs.
+			const r = await pickModeAuto(p.raw.cmd, rawOut, { noCache: true });
+			const out = compressOutput(rawOut, p.raw.cmd, r.mode);
+			const bytes = Buffer.byteLength(out, "utf-8");
+			row.auto = {
+				pickedMode: r.mode,
+				bytes,
+				ratioPct: rawBytes ? (1 - bytes / rawBytes) * 100 : 0,
+				source: r.source,
+			};
+		}
+
+		rows.push(row);
 	}
 	return rows;
 }
 
 function reportHuman(rows: Row[]): void {
-	console.log("\n  Head-to-head: context-compress (3 modes) vs RTK\n");
+	const hasAuto = rows.some((r) => r.auto);
+	console.log("\n  Head-to-head: context-compress modes vs RTK\n");
+	const autoHead = hasAuto ? `  ${pad("CC-auto", 14)}` : "";
 	console.log(
-		`  ${pad("Command", 26)}  ${pad("Raw", 8)}  ${pad("RTK", 8)} ${pad("", 6)}  ${pad("CC-cons", 8)} ${pad("", 6)}  ${pad("CC-bal", 8)} ${pad("", 6)}  ${pad("CC-aggr", 8)} ${pad("", 6)}`,
+		`  ${pad("Command", 26)}  ${pad("Raw", 8)}  ${pad("RTK", 8)} ${pad("", 6)}  ${pad("CC-cons", 8)} ${pad("", 6)}  ${pad("CC-bal", 8)} ${pad("", 6)}  ${pad("CC-aggr", 8)} ${pad("", 6)}${autoHead}`,
 	);
-	console.log("  " + "─".repeat(112));
+	console.log("  " + "─".repeat(hasAuto ? 130 : 112));
 
 	let rawTotal = 0;
 	let rtkTotal = 0;
@@ -230,6 +255,7 @@ function reportHuman(rows: Row[]): void {
 		balanced: 0,
 		aggressive: 0,
 	};
+	let autoTotal = 0;
 	let counted = 0;
 
 	for (const r of rows) {
@@ -241,17 +267,23 @@ function reportHuman(rows: Row[]): void {
 		const cons = r.ccByMode.conservative;
 		const bal = r.ccByMode.balanced;
 		const aggr = r.ccByMode.aggressive;
+		const autoCol = r.auto
+			? `  ${pad(`${r.auto.pickedMode.slice(0, 4)} ${r.auto.ratioPct.toFixed(0)}%`, 14)}`
+			: hasAuto
+				? `  ${pad("—", 14)}`
+				: "";
 		console.log(
-			`  ${pad(r.label, 26)}  ${pad(fmt(r.rawBytes), 8)}  ${pad(fmt(r.rtkBytes), 8)} ${pad(`(${rtkPct.toFixed(0)}%)`, 6)}  ${pad(fmt(cons.bytes), 8)} ${pad(`(${cons.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(bal.bytes), 8)} ${pad(`(${bal.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(aggr.bytes), 8)} ${pad(colorPct(aggr.ratioPct), 16)}`,
+			`  ${pad(r.label, 26)}  ${pad(fmt(r.rawBytes), 8)}  ${pad(fmt(r.rtkBytes), 8)} ${pad(`(${rtkPct.toFixed(0)}%)`, 6)}  ${pad(fmt(cons.bytes), 8)} ${pad(`(${cons.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(bal.bytes), 8)} ${pad(`(${bal.ratioPct.toFixed(0)}%)`, 6)}  ${pad(fmt(aggr.bytes), 8)} ${pad(colorPct(aggr.ratioPct), 16)}${autoCol}`,
 		);
 		rawTotal += r.rawBytes;
 		rtkTotal += r.rtkBytes;
 		modeTotals.conservative += cons.bytes;
 		modeTotals.balanced += bal.bytes;
 		modeTotals.aggressive += aggr.bytes;
+		if (r.auto) autoTotal += r.auto.bytes;
 		counted++;
 	}
-	console.log("  " + "─".repeat(112));
+	console.log("  " + "─".repeat(hasAuto ? 130 : 112));
 
 	if (counted === 0) {
 		console.log("\n  No valid measurements.\n");
@@ -261,10 +293,8 @@ function reportHuman(rows: Row[]): void {
 	const consOverall = (1 - modeTotals.conservative / rawTotal) * 100;
 	const balOverall = (1 - modeTotals.balanced / rawTotal) * 100;
 	const aggrOverall = (1 - modeTotals.aggressive / rawTotal) * 100;
+	const autoOverall = hasAuto ? (1 - autoTotal / rawTotal) * 100 : 0;
 
-	console.log(
-		`  ${pad("OVERALL (byte-weighted)", 26)}  ${pad(fmt(rawTotal), 8)}  ${pad(fmt(rtkTotal), 8)} ${pad(colorPct(rtkOverall), 16)}  ${pad(fmt(modeTotals.conservative), 8)} ${pad(colorPct(consOverall), 16)}  ${pad(fmt(modeTotals.balanced), 8)} ${pad(colorPct(balOverall), 16)}  ${pad(fmt(modeTotals.aggressive), 8)} ${pad(colorPct(aggrOverall), 16)}`,
-	);
 	console.log();
 	console.log(`  Raw total:      ${fmt(rawTotal)} (${tokens(rawTotal).toLocaleString()} tok)`);
 	console.log(
@@ -279,25 +309,31 @@ function reportHuman(rows: Row[]): void {
 	console.log(
 		`  CC aggressive   ${fmt(modeTotals.aggressive)} (${tokens(modeTotals.aggressive).toLocaleString()} tok) — ${colorPct(aggrOverall)} reduction`,
 	);
-	console.log();
-	const best = Math.max(rtkOverall, balOverall, aggrOverall);
-	if (aggrOverall === best) {
+	if (hasAuto) {
 		console.log(
-			`  context-compress aggressive leads (${(aggrOverall - rtkOverall).toFixed(1)}pp over RTK, ${(aggrOverall - balOverall).toFixed(1)}pp over balanced).`,
+			`  CC auto (LLM)   ${fmt(autoTotal)} (${tokens(autoTotal).toLocaleString()} tok) — ${colorPct(autoOverall)} reduction`,
 		);
-	} else if (rtkOverall === best) {
-		console.log(
-			`  RTK leads (${(rtkOverall - aggrOverall).toFixed(1)}pp over CC aggressive, ${(rtkOverall - balOverall).toFixed(1)}pp over CC balanced).`,
-		);
-	} else {
-		console.log(`  CC balanced leads.`);
+		// Per-command breakdown of which mode the LLM picked
+		console.log();
+		console.log("  Auto picks per command:");
+		for (const r of rows) {
+			if (r.auto) {
+				console.log(
+					`    ${pad(r.label, 26)}  → ${r.auto.pickedMode.padEnd(13)} (${r.auto.source}, ${r.auto.ratioPct.toFixed(1)}%)`,
+				);
+			}
+		}
 	}
 	console.log();
 }
 
-function main(): void {
+async function main(): Promise<void> {
 	const args = process.argv.slice(2);
-	const opts = { quick: args.includes("--quick"), json: args.includes("--json") };
+	const opts = {
+		quick: args.includes("--quick"),
+		json: args.includes("--json"),
+		auto: args.includes("--auto"),
+	};
 
 	if (!existsSync(".git")) {
 		console.error("Run from the repo root.");
@@ -313,8 +349,11 @@ function main(): void {
 		process.exit(2);
 	}
 	console.log(`Using RTK: ${probe.stdout.trim()}`);
+	if (opts.auto) {
+		console.log("Auto mode enabled — each command will hit the LLM (Anthropic API or claude CLI).");
+	}
 
-	const rows = bench(opts);
+	const rows = await bench(opts);
 	if (opts.json) {
 		console.log(JSON.stringify(rows, null, 2));
 	} else {
@@ -322,4 +361,7 @@ function main(): void {
 	}
 }
 
-main();
+main().catch((err) => {
+	console.error(err);
+	process.exit(1);
+});

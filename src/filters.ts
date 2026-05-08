@@ -15,11 +15,20 @@
 
 export type FilterMode = "conservative" | "balanced" | "aggressive";
 
+/** Mode the user can request — includes the "auto" meta-mode that resolves to one of FilterMode. */
+export type RequestedMode = FilterMode | "auto";
+
 export const DEFAULT_MODE: FilterMode = "balanced";
 
 export function parseMode(input: string | undefined): FilterMode {
 	if (input === "aggressive" || input === "conservative") return input;
 	return "balanced";
+}
+
+/** Parse mode allowing "auto" as a value. */
+export function parseRequestedMode(input: string | undefined): RequestedMode {
+	if (input === "auto") return "auto";
+	return parseMode(input);
 }
 
 interface FilterResult {

@@ -137,13 +137,14 @@ context-compress doctor
 
 ## Compression Modes
 
-context-compress offers three compression modes that trade fidelity for compactness. Pass `--mode` to the CLI, set `CONTEXT_COMPRESS_MODE` in your environment, or let the default (`balanced`) just work.
+context-compress offers four compression modes that trade fidelity for compactness. Pass `--mode` to the CLI, set `CONTEXT_COMPRESS_MODE` in your environment, or let the default (`balanced`) just work.
 
 | Mode | Strategy | Use when |
 |:--|:--|:--|
 | `conservative` | ANSI strip only — preserves every byte of meaningful content | You need full fidelity, debugging output, archival logs |
 | `balanced` *(default)* | Strip noise (progress bars, deprecation warnings, hint lines) — keep metadata (commit bodies, file dates, full test failures) | Day-to-day agent work where context might be re-read |
 | `aggressive` | Drop metadata too — git log → oneline, ls -la → name+size, find lower threshold, grep grouped | Maximum token savings; agent will rarely need the dropped detail |
+| `auto` | An LLM (Anthropic API or `claude -p`) picks one of the above per command, based on a 500-byte sample of the output. Decisions cached for 24h | You don't want to think about it — let the model judge per output |
 
 ```bash
 # CLI flag (per-call override)
@@ -166,22 +167,23 @@ RTK_BIN=/tmp/rtk/target/release/rtk tsx scripts/benchmark-vs-rtk.ts
 
 Result on this repository (RTK 0.39.0 vs context-compress 2026.3.22):
 
-| Command | Raw | RTK | CC `conservative` | CC `balanced` | CC `aggressive` |
-|:--|--:|--:|--:|--:|--:|
-| `git status` | 528 B | 188 B (64%) | 528 B (0%) | 326 B (38%) | **138 B (74%)** |
-| `git log -10` (full) | 18.9 KB | 2.9 KB (85%) | 18.9 KB (0%) | 4.2 KB (78%) | **925 B (95%)** |
-| `git log -50` (full) | 34.2 KB | 9.7 KB (72%) | 34.2 KB (0%) | 11.8 KB (65%) | **3.1 KB (91%)** |
-| `git diff --stat` | 448 B | 447 B (0%) | 448 B (0%) | 448 B (0%) | 448 B (0%) |
-| `ls src/` | 149 B | 229 B (-54%) | 149 B (0%) | 149 B (0%) | 149 B (0%) |
-| `ls -laR src/` | 3.7 KB | **229 B (94%)** | 3.7 KB (0%) | 3.0 KB (20%) | 859 B (78%) |
-| `find *.ts` | 1.0 KB | 576 B (44%) | 1.0 KB (0%) | **183 B (82%)** | **183 B (82%)** |
-| `npm test` | 20.9 KB | 114 B (99%) | 16.0 KB (23%) | **120 B (99%)** | **120 B (99%)** |
-| **Overall (byte-weighted)** | **79.9 KB** | 14.4 KB (82.0%) | 75.0 KB (6.1%) | 20.3 KB (74.6%) | **5.9 KB (92.6%)** |
+| Command | Raw | RTK | CC `conservative` | CC `balanced` | CC `aggressive` | CC `auto` (LLM) |
+|:--|--:|--:|--:|--:|--:|--:|
+| `git status` | 577 B | 241 B (58%) | 577 B (0%) | 375 B (35%) | **187 B (68%)** | balanced (35%) |
+| `git log -10` (full) | 21.3 KB | 3.2 KB (85%) | 21.3 KB (0%) | 4.6 KB (79%) | **947 B (96%)** | balanced (79%) |
+| `git log -50` (full) | 36.9 KB | 10.1 KB (73%) | 36.9 KB (0%) | 12.3 KB (67%) | **3.2 KB (91%)** | balanced (67%) |
+| `git diff --stat` | 425 B | 424 B (0%) | 425 B (0%) | 425 B (0%) | 425 B (0%) | balanced (0%) |
+| `ls src/` | 149 B | 229 B (-54%) | 149 B (0%) | 149 B (0%) | 149 B (0%) | conservative (0%) |
+| `ls -laR src/` | 3.8 KB | **229 B (94%)** | 3.8 KB (0%) | 3.1 KB (19%) | 877 B (78%) | aggressive (78%) |
+| `find *.ts` | 1.0 KB | 589 B (44%) | 1.0 KB (0%) | **183 B (83%)** | **183 B (83%)** | aggressive (83%) |
+| `npm test` | 21.8 KB | 114 B (99%) | 16.7 KB (24%) | **120 B (99%)** | **120 B (99%)** | balanced (99%) |
+| **Overall** (byte-weighted) | **85.9 KB** | 15.0 KB (82.5%) | 80.8 KB (6.0%) | 21.2 KB (75.4%) | **6.0 KB (93.0%)** | 19.0 KB (77.9%) |
 
-Two things to take from this table:
+Three things to take from this table:
 
-1. **`balanced` is competitive on its own.** The default mode now hits ~75% reduction without dropping any metadata — agents get full commit headers, file perms/dates, and complete test failure detail. Only 7.4pp behind RTK while making a different fidelity trade-off.
-2. **`aggressive` decisively wins on raw compression** — 92.6%, beating RTK by 10.6pp. Pick this when you want maximum token savings and the agent will rarely re-read the dropped detail.
+1. **`balanced` is competitive on its own.** The default mode hits ~75% reduction without dropping any metadata — agents get full commit headers, file perms/dates, and complete test failure detail. Only 7pp behind RTK while making a different fidelity trade-off.
+2. **`aggressive` decisively wins on raw compression** — 93.0%, beating RTK by 10.5pp. Pick this when you want maximum token savings and the agent will rarely re-read the dropped detail.
+3. **`auto` lets the model pick.** Per-command LLM judgment landed at 77.9% overall — between balanced and aggressive. The interesting result is *what* it picked: `balanced` for git/test outputs (where commit bodies and failure detail matter), `aggressive` for `ls -laR` and `find` (where the question is "what's there?", not "show me everything"), `conservative` for tiny outputs where compression is pointless.
 
 Aggressive mode covers a wider command surface than the table above hints — it also handles `df` (drops pseudo-filesystems), `du` (top-N by size), `ps aux` (PID/%CPU/%MEM/CMD only, drops kernel threads), `npm ls` (strips tree-drawing chars + `deduped`/`extraneous` markers), and `grep`/`rg` (groups by file, truncates long lines).
 
@@ -261,8 +263,11 @@ CONTEXT_COMPRESS_BLOCK_WEBFETCH=0
 CONTEXT_COMPRESS_NUDGE_READ=0
 CONTEXT_COMPRESS_NUDGE_GREP=0
 
-# Compression mode: conservative | balanced (default) | aggressive
+# Compression mode: conservative | balanced (default) | aggressive | auto
 CONTEXT_COMPRESS_MODE=balanced
+
+# Auto mode prefers the Anthropic API when this is set (faster than `claude -p` fallback)
+ANTHROPIC_API_KEY=sk-ant-...
 
 # RTK-style transparent Bash wrapping (default: off)
 CONTEXT_COMPRESS_FILTER_BASH=1

@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
-import { DEFAULT_MODE, type FilterMode, applyCommandFilter, parseMode } from "../filters.js";
+import {
+	DEFAULT_MODE,
+	type FilterMode,
+	type RequestedMode,
+	applyCommandFilter,
+	parseRequestedMode,
+} from "../filters.js";
+import { pickModeAuto } from "../util/auto-mode.js";
 import { StreamCompressor } from "../util/stream-compress.js";
 
 // Generic dedup/progress/group pipeline kicks in once output crosses these
@@ -47,14 +54,35 @@ export function compressOutput(
 	return out;
 }
 
+/**
+ * Async variant that handles the "auto" meta-mode by asking an LLM to
+ * pick conservative/balanced/aggressive for the given command + output.
+ * Concrete modes route to the synchronous compressOutput.
+ */
+export async function compressOutputAsync(
+	stdout: string,
+	originalCmd: string | undefined,
+	mode: RequestedMode = DEFAULT_MODE,
+): Promise<{ output: string; resolvedMode: FilterMode; autoSource?: string }> {
+	if (mode !== "auto") {
+		return { output: compressOutput(stdout, originalCmd, mode), resolvedMode: mode };
+	}
+	const result = await pickModeAuto(originalCmd ?? "", stdout);
+	return {
+		output: compressOutput(stdout, originalCmd, result.mode),
+		resolvedMode: result.mode,
+		autoSource: result.source,
+	};
+}
+
 /** Resolve mode from CLI args, env, or default — in that priority order. */
-function resolveMode(args: string[]): FilterMode {
+function resolveMode(args: string[]): RequestedMode {
 	for (let i = 0; i < args.length; i++) {
 		if (args[i] === "--mode" && i + 1 < args.length) {
-			return parseMode(args[i + 1]);
+			return parseRequestedMode(args[i + 1]);
 		}
 	}
-	return parseMode(process.env.CONTEXT_COMPRESS_MODE);
+	return parseRequestedMode(process.env.CONTEXT_COMPRESS_MODE);
 }
 
 /** Read stdin to a string. */
@@ -66,7 +94,7 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * `context-compress filter [--cmd '<orig>'] [--mode conservative|balanced|aggressive]`
+ * `context-compress filter [--cmd '<orig>'] [--mode conservative|balanced|aggressive|auto]`
  * Reads stdin, applies the pipeline, writes to stdout. Exits 0.
  */
 export async function runFilter(args: string[]): Promise<number> {
@@ -79,7 +107,7 @@ export async function runFilter(args: string[]): Promise<number> {
 	}
 	const mode = resolveMode(args);
 	const input = await readStdin();
-	const compressed = compressOutput(input, cmd, mode);
+	const { output: compressed } = await compressOutputAsync(input, cmd, mode);
 	process.stdout.write(compressed);
 	if (!compressed.endsWith("\n")) process.stdout.write("\n");
 	return 0;
@@ -149,7 +177,7 @@ export async function runWrap(args: string[]): Promise<number> {
 function runBuffered(
 	proc: ReturnType<typeof spawn>,
 	cmdLine: string,
-	mode: FilterMode,
+	mode: RequestedMode,
 	resolve: (code: number) => void,
 ): void {
 	const stdoutChunks: Buffer[] = [];
@@ -166,11 +194,14 @@ function runBuffered(
 	proc.on("close", (code) => {
 		const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
 		const stderr = Buffer.concat(stderrChunks).toString("utf-8");
-		const compressed = compressOutput(stdout, cmdLine, mode);
-		process.stdout.write(compressed);
-		if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
-		if (stderr) process.stderr.write(stderr);
-		resolve(code ?? 0);
+		// auto mode triggers an LLM call; concrete modes are sync. Both flow
+		// through compressOutputAsync.
+		compressOutputAsync(stdout, cmdLine, mode).then(({ output: compressed }) => {
+			process.stdout.write(compressed);
+			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
+			if (stderr) process.stderr.write(stderr);
+			resolve(code ?? 0);
+		});
 	});
 }
 
