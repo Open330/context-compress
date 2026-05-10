@@ -234,7 +234,7 @@ git clone https://github.com/rtk-ai/rtk /tmp/rtk && (cd /tmp/rtk && cargo build 
 RTK_BIN=/tmp/rtk/target/release/rtk tsx scripts/benchmark-vs-rtk.ts
 ```
 
-Result on this repository (RTK 0.39.0 vs context-compress 2026.3.22):
+Result on this repository (RTK 0.39.0 vs context-compress 2026.5.0):
 
 | Command | Raw | RTK | CC `conservative` | CC `balanced` | CC `aggressive` | CC `auto` (LLM) |
 |:--|--:|--:|--:|--:|--:|--:|
@@ -393,7 +393,7 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
   [PASS] Hook integrity: SHA-256 verified (a3f1c8d2e4...)
   [PASS] FTS5 / better-sqlite3 works
 
-  Version: v2026.3.22
+  Version: v2026.5.0
   All checks passed.
 ```
 

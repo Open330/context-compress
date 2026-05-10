@@ -6,7 +6,7 @@
 > provides a detailed before/after comparison for 12 common operations,
 > and addresses the natural question: "doesn't less tokens mean losing context?"
 
-**Version**: 2026.3.22 | **Last updated**: 2026-03-22
+**Version**: 2026.5.0 | **Last updated**: 2026-05-10
 
 ---
 
@@ -407,7 +407,7 @@ The other 55,701 bytes are still in FTS5 — fully searchable. Need the order ta
 
 ## Security and Reliability
 
-context-compress v2026.3.22 includes comprehensive security and reliability features:
+context-compress v2026.5.0 includes comprehensive security and reliability features:
 
 ### Security
 
@@ -530,6 +530,6 @@ The core principle:
 
 ---
 
-*Generated from real benchmarks on the context-compress v2026.3.22 codebase.*
+*Generated from real benchmarks on the context-compress v2026.5.0 codebase.*
 *Token estimates use bytes/4 midpoint. Actual token counts may vary by 20-30% depending on content type.*
 *See SECURITY.md for the full trust model and security architecture.*
