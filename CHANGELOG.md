@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026.6.0 (2026-06-24)
+
+Plugin distribution and proof-of-effect release.
+
+### Plugin support
+
+- **Codex plugin manifest** — adds `.codex-plugin/plugin.json` plus `.mcp.json` so plugin-aware Codex installs can discover the MCP server and bundled skills.
+- **Claude-compatible plugin metadata** — adds `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, and `hooks/claude-codex-hooks.json` for plugin-based PreToolUse routing.
+- **Packaged plugin assets** — npm package now includes `.codex-plugin/`, `.claude-plugin/`, `.mcp.json`, `hooks/`, `skills/`, and `docs/`.
+
+### Skills and docs
+
+- **New `context-compress:audit` skill** — audits repos or sessions for raw Bash/Read/WebFetch paths that should route through `batch_execute`, `execute`, `execute_file`, or `fetch_and_index`.
+- **Agentic benchmark plan** — adds `docs/agentic-benchmark.md` with baseline isolation, MCP-only vs hook arms, success scoring, context-byte metrics, and reporting limits.
+- **README positioning update** — first-screen message now emphasizes the core product claim: large tool output stays searchable instead of entering the conversation.
+
+### Validation
+
+- **Plugin manifest tests** — verifies Codex/Claude manifests, MCP companion config, package file coverage, discoverable docs/skills, and actual PreToolUse rewrite behavior.
+- **Proof-of-effect hook test** — confirms `git log -10` is rewritten to `context-compress wrap --mode balanced`, proving plugin routing changes real Bash behavior.
+
 ## 2026.5.0 (2026-05-10)
 
 Major feature release: 4 compression modes (incl. LLM-judged auto), RTK-style standalone CLI, RTK-beating compression numbers, and a thoroughly modularized codebase.

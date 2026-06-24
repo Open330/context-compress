@@ -1,0 +1,13 @@
+interface:
+  display_name: "Context Compress Audit"
+  short_description: "Find raw-output context waste."
+  default_prompt: "Use $context-compress-audit to audit this project for raw tool output waste and missing routing."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "context-compress"
+      description: "Context-compress MCP server for stats and indexed search."
+
+policy:
+  allow_implicit_invocation: true

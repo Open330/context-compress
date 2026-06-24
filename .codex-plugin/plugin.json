@@ -1,0 +1,40 @@
+{
+  "name": "context-compress",
+  "version": "2026.6.0",
+  "description": "Keep large tool output searchable without flooding the agent context window.",
+  "author": {
+    "name": "Open330",
+    "url": "https://github.com/Open330"
+  },
+  "homepage": "https://github.com/Open330/context-compress",
+  "repository": "https://github.com/Open330/context-compress",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "context-window",
+    "token-optimization",
+    "developer-tools"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Context Compress",
+    "shortDescription": "Compress tool output before it enters context.",
+    "longDescription": "Run commands, fetch pages, index large outputs, and search the retained data through an MCP server so agents see concise answers instead of raw logs.",
+    "developerName": "Open330",
+    "category": "Productivity",
+    "capabilities": [
+      "MCP",
+      "Skills",
+      "Token optimization"
+    ],
+    "websiteURL": "https://github.com/Open330/context-compress",
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Run tests through context-compress and summarize failures.",
+      "Index this large output and search it for root causes.",
+      "Audit this session for raw tool output waste."
+    ]
+  }
+}

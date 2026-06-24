@@ -1,0 +1,137 @@
+import assert from "node:assert";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+
+const root = process.cwd();
+
+function readJson<T>(path: string): T {
+	return JSON.parse(readFileSync(join(root, path), "utf-8")) as T;
+}
+
+describe("plugin manifests", () => {
+	it("keeps Codex plugin metadata valid and aligned with package version", () => {
+		const pkg = readJson<{ version: string }>("package.json");
+		const manifest = readJson<{
+			name: string;
+			version: string;
+			skills: string;
+			mcpServers: string;
+			hooks?: unknown;
+			interface: { defaultPrompt: string[]; capabilities: string[] };
+		}>(".codex-plugin/plugin.json");
+
+		assert.strictEqual(manifest.name, "context-compress");
+		assert.strictEqual(manifest.version, pkg.version);
+		assert.strictEqual(manifest.skills, "./skills/");
+		assert.strictEqual(manifest.mcpServers, "./.mcp.json");
+		assert.strictEqual(manifest.hooks, undefined, "Codex manifest must not declare hooks");
+		assert.ok(manifest.interface.defaultPrompt.length > 0);
+		assert.ok(manifest.interface.capabilities.includes("MCP"));
+	});
+
+	it("declares a local MCP server companion file", () => {
+		const mcp = readJson<{
+			mcpServers: Record<string, { command: string; args: string[]; cwd?: string }>;
+		}>(".mcp.json");
+
+		assert.strictEqual(mcp.mcpServers["context-compress"].command, "node");
+		assert.deepStrictEqual(mcp.mcpServers["context-compress"].args, ["./dist/index.js"]);
+		assert.strictEqual(mcp.mcpServers["context-compress"].cwd, ".");
+	});
+
+	it("keeps Claude plugin hooks separate from the Codex manifest", () => {
+		const manifest = readJson<{
+			name: string;
+			hooks: string;
+			mcpServers: string;
+			skills: string;
+		}>(".claude-plugin/plugin.json");
+
+		assert.strictEqual(manifest.name, "context-compress");
+		assert.strictEqual(manifest.hooks, "./hooks/claude-codex-hooks.json");
+		assert.strictEqual(manifest.mcpServers, "./.mcp.json");
+		assert.strictEqual(manifest.skills, "./skills/");
+		assert.ok(existsSync(join(root, "hooks/claude-codex-hooks.json")));
+	});
+
+	it("Claude hook config enables transparent Bash compression", () => {
+		const hooks = readJson<{
+			hooks: {
+				PreToolUse: Array<{
+					matcher: string;
+					hooks: Array<{ command: string; timeout: number }>;
+				}>;
+			};
+		}>("hooks/claude-codex-hooks.json");
+
+		const entry = hooks.hooks.PreToolUse[0];
+		const command = entry.hooks[0].command;
+
+		assert.match(entry.matcher, /Bash/);
+		assert.match(command, /CONTEXT_COMPRESS_FILTER_BASH=1/);
+		assert.match(command, /CONTEXT_COMPRESS_BIN=.*dist\/cli\/index\.js/);
+		assert.match(command, /hooks\/pretooluse\.mjs/);
+		assert.strictEqual(entry.hooks[0].timeout, 5);
+	});
+
+	it("PreToolUse routing used by the plugin actually rewrites large Bash output commands", () => {
+		const hookPath = join(root, "src/hooks/pretooluse.ts");
+		const output = execFileSync("node", ["--import", "tsx", hookPath], {
+			input: JSON.stringify({
+				tool_name: "Bash",
+				tool_input: { command: "git log -10" },
+			}),
+			env: {
+				...process.env,
+				CONTEXT_COMPRESS_FILTER_BASH: "1",
+				CONTEXT_COMPRESS_BIN: `node ${join(root, "dist/cli/index.js")}`,
+				CONTEXT_COMPRESS_MODE: "balanced",
+			},
+			encoding: "utf-8",
+		});
+
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { updatedInput?: { command?: string } };
+		};
+		const rewritten = parsed.hookSpecificOutput.updatedInput?.command ?? "";
+
+		assert.match(rewritten, /^node .*dist\/cli\/index\.js wrap --mode balanced 'git log -10'$/);
+	});
+
+	it("package distribution includes plugin, hook, skill, and benchmark assets", () => {
+		const pkg = readJson<{ files: string[] }>("package.json");
+
+		for (const required of [
+			".codex-plugin/",
+			".claude-plugin/",
+			".mcp.json",
+			"hooks/",
+			"skills/",
+			"docs/",
+		]) {
+			assert.ok(pkg.files.includes(required), `package.json files must include ${required}`);
+		}
+	});
+
+	it("audit skill and agentic benchmark are discoverable by plugin hosts", () => {
+		const audit = readFileSync(join(root, "skills/context-compress-audit/SKILL.md"), "utf-8");
+		const auditUi = readFileSync(
+			join(root, "skills/context-compress-audit/agents/openai.yaml"),
+			"utf-8",
+		);
+		const benchmark = readFileSync(join(root, "docs/agentic-benchmark.md"), "utf-8");
+		const readme = readFileSync(join(root, "README.md"), "utf-8");
+
+		assert.match(audit, /^---\nname: context-compress-audit/m);
+		assert.match(audit, /raw tool output/i);
+		assert.match(auditUi, /Use \$context-compress-audit/);
+		assert.match(benchmark, /`baseline`\s*\|\s*No context-compress MCP/);
+		assert.match(benchmark, /hook-balanced/);
+		assert.match(benchmark, /Disable user\/global plugin sources/);
+		assert.match(readme, /Large tool output stays searchable/);
+		assert.match(readme, /Plugin Support/);
+		assert.match(readme, /Agentic Benchmark Plan/);
+	});
+});

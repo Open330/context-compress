@@ -1,0 +1,19 @@
+{
+  "description": "context-compress PreToolUse hooks for Claude-compatible plugin hosts",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|WebFetch|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && CONTEXT_COMPRESS_FILTER_BASH=1 CONTEXT_COMPRESS_BIN=\"node ${CLAUDE_PLUGIN_ROOT}/dist/cli/index.js\" node \"${CLAUDE_PLUGIN_ROOT}/hooks/pretooluse.mjs\" || exit 0",
+            "commandWindows": "if (Get-Command node -ErrorAction SilentlyContinue) { $env:CONTEXT_COMPRESS_FILTER_BASH='1'; $env:CONTEXT_COMPRESS_BIN='context-compress'; node \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\pretooluse.mjs\" }",
+            "timeout": 5,
+            "statusMessage": "Protecting context window..."
+          }
+        ]
+      }
+    ]
+  }
+}

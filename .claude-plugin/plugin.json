@@ -1,0 +1,12 @@
+{
+  "name": "context-compress",
+  "version": "2026.6.0",
+  "description": "Keep large tool output searchable without flooding the agent context window.",
+  "author": {
+    "name": "Open330",
+    "url": "https://github.com/Open330"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/claude-codex-hooks.json",
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "context-compress": {
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "./dist/index.js"
+      ]
+    }
+  }
+}

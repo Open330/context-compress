@@ -1,6 +1,6 @@
 {
   "name": "context-compress",
-  "version": "2026.5.0",
+  "version": "2026.6.0",
   "description": "Context-aware MCP server that compresses tool output for Claude Code",
   "type": "module",
   "main": "dist/server.js",
@@ -38,6 +38,9 @@
     "typescript": "^5.7.0"
   },
   "files": [
+    ".codex-plugin/",
+    ".claude-plugin/",
+    ".mcp.json",
     "dist/",
     "docs/",
     "hooks/",
@@ -46,10 +49,10 @@
     "README.md"
   ],
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Open330/context-compress"
-  },
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Open330/context-compress.git"
+	},
   "keywords": [
     "mcp",
     "claude",

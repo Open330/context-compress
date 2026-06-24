@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "context-compress",
+  "description": "MCP server and hook toolkit that keeps large tool output searchable instead of dumping it into context.",
+  "owner": {
+    "name": "Open330",
+    "url": "https://github.com/Open330"
+  },
+  "plugins": [
+    {
+      "name": "context-compress",
+      "description": "Compress Bash, Read, WebFetch, logs, tests, and API output before it reaches the context window.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

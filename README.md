@@ -3,16 +3,17 @@
 # context-compress
 
 **Stop drowning your AI agent in shell output.**
-Compress tool output before it hits the context window — through an MCP server, a drop-in CLI, or both.
+Large tool output stays searchable — not stuffed into the context window.
+Use it through an MCP server, a drop-in CLI, agent plugins, or all three.
 
 [![CI](https://github.com/Open330/context-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/Open330/context-compress/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/context-compress?color=cb3837&logo=npm)](https://www.npmjs.com/package/context-compress)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen?logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
-[![Tests](https://img.shields.io/badge/tests-213%20passing-success)](#contributing)
+[![Tests](https://img.shields.io/badge/tests-unit%20%2B%20integration-success)](#contributing)
 
-[Quickstart](#quickstart) · [Compression Modes](#compression-modes) · [vs RTK](#head-to-head-with-rtk) · [How It Works](#how-it-works) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
+[Quickstart](#quickstart) · [Plugin Support](#plugin-support) · [Compression Modes](#compression-modes) · [vs RTK](#head-to-head-with-rtk) · [How It Works](#how-it-works) · [Configuration](#configuration) · [CLI](#cli) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -27,9 +28,9 @@ Compress tool output before it hits the context window — through an MCP server
 </td>
 <td align="center" width="25%">
 
-**+10.5pp**
-<br>over RTK
-<br><sub>same commands</sub>
+**Searchable**
+<br>raw data retained
+<br><sub>FTS5 + BM25</sub>
 
 </td>
 <td align="center" width="25%">
@@ -41,9 +42,9 @@ Compress tool output before it hits the context window — through an MCP server
 </td>
 <td align="center" width="25%">
 
-**8 MCP tools**
-<br>+ standalone CLI
-<br><sub>RTK-compatible wrap</sub>
+**Plugins**
+<br>Codex + Claude
+<br><sub>MCP • hooks • skills</sub>
 
 </td>
 </tr>
@@ -120,6 +121,18 @@ It works in two modes that compose freely:
 ```bash
 npm install -g context-compress
 ```
+
+### Plugin Support
+
+context-compress now ships plugin metadata for agent hosts:
+
+| Host | Files | What they enable |
+|:--|:--|:--|
+| **Codex** | `.codex-plugin/plugin.json`, `.mcp.json`, `skills/` | MCP server registration plus skills in plugin-aware Codex flows. |
+| **Claude Code** | `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `hooks/claude-codex-hooks.json` | PreToolUse routing, skills, and MCP config from a plugin install. |
+| **Manual / fallback** | `context-compress setup --auto` | Writes `~/.claude/settings.json` directly when plugin installation is not available. |
+
+The plugin manifests are designed for built package/archive installs where `dist/`, `hooks/`, and `skills/` are present together. For a raw source checkout, run `npm install && npm run build` before testing the plugin locally, or use the global npm setup above.
 
 ### One-line setup
 
@@ -290,6 +303,8 @@ Without context-compress, 12 operations consume **133% of the 200K context windo
 
 **[Read the full Token Reduction Report](docs/token-reduction-report.md)** — includes cost analysis, architecture deep-dive, and FAQ on context loss trade-offs.
 
+**[Read the Agentic Benchmark Plan](docs/agentic-benchmark.md)** — defines the fair on/off benchmark for real Claude Code sessions, including baseline isolation, task success checks, and reporting limits.
+
 ---
 
 ## What Changed from context-mode
@@ -335,8 +350,8 @@ CONTEXT_COMPRESS_NUDGE_GREP=0
 # Compression mode: conservative | balanced (default) | aggressive | auto
 CONTEXT_COMPRESS_MODE=balanced
 
-# Auto mode prefers the Anthropic API when this is set (faster than `claude -p` fallback)
-ANTHROPIC_API_KEY=sk-ant-...
+# Auto mode prefers the Anthropic API when ANTHROPIC_API_KEY is set
+# in your shell or secret manager (faster than `claude -p` fallback)
 
 # RTK-style transparent Bash wrapping (default: off)
 CONTEXT_COMPRESS_FILTER_BASH=1
@@ -448,7 +463,7 @@ context-compress/
 │       ├── doctor.ts         # `doctor` — diagnostics
 │       └── uninstall.ts      # `uninstall` — clean removal
 ├── tests/
-│   ├── unit/                 # 18 unit test files (213 tests, all passing)
+│   ├── unit/                 # 18 unit test files
 │   └── integration/          # 3 integration test files
 ├── scripts/
 │   ├── benchmark.ts          # Synthetic compression benchmark
@@ -515,6 +530,8 @@ RTK_BIN=/tmp/rtk/target/release/rtk tsx scripts/benchmark-vs-rtk.ts
 RTK_BIN=... tsx scripts/benchmark-vs-rtk.ts --auto    # also run LLM-judged auto mode
 RTK_BIN=... tsx scripts/benchmark-vs-rtk.ts --json    # machine-readable
 ```
+
+For real agent sessions, use [docs/agentic-benchmark.md](docs/agentic-benchmark.md) to compare baseline, MCP-only, hook-balanced, and hook-aggressive arms with isolated settings.
 
 ---
 
