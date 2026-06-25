@@ -4,6 +4,7 @@ import { loadConfig, resetConfig } from "../../src/config.js";
 import { SubprocessExecutor } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime/index.js";
 import { ContentStore } from "../../src/store.js";
+import { htmlToMarkdownSnippet } from "../../src/util/html-to-markdown.js";
 
 const ORIGINAL_HOME = process.env.HOME;
 
@@ -11,39 +12,10 @@ function isolateConfigHome(): void {
 	process.env.HOME = `/tmp/context-compress-home-${process.pid}-${Date.now()}`;
 }
 
+// Use the SAME conversion snippet the production fetch tool uses, so this test
+// exercises the real pipeline and the two can never drift.
 function buildHtmlToMarkdownCode(html: string): string {
-	const escapedHtml = JSON.stringify(html);
-	return `
-const html = ${escapedHtml};
-
-let md = html
-  .replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, "")
-  .replace(/<style[^>]*>[\\s\\S]*?<\\/style>/gi, "")
-  .replace(/<nav[^>]*>[\\s\\S]*?<\\/nav>/gi, "")
-  .replace(/<header[^>]*>[\\s\\S]*?<\\/header>/gi, "")
-  .replace(/<footer[^>]*>[\\s\\S]*?<\\/footer>/gi, "");
-
-md = md.replace(/<h1[^>]*>(.*?)<\\/h1>/gi, "# $1\\n");
-md = md.replace(/<h2[^>]*>(.*?)<\\/h2>/gi, "## $1\\n");
-md = md.replace(/<h3[^>]*>(.*?)<\\/h3>/gi, "### $1\\n");
-md = md.replace(/<h4[^>]*>(.*?)<\\/h4>/gi, "#### $1\\n");
-md = md.replace(/<pre[^>]*><code[^>]*>(.*?)<\\/code><\\/pre>/gis, "\`\`\`\\n$1\\n\`\`\`\\n");
-md = md.replace(/<code[^>]*>(.*?)<\\/code>/gi, "\`$1\`");
-md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\\/a>/gi, "[$2]($1)");
-md = md.replace(/<li[^>]*>(.*?)<\\/li>/gi, "- $1\\n");
-md = md.replace(/<p[^>]*>(.*?)<\\/p>/gis, "$1\\n\\n");
-md = md.replace(/<br\\s*\\/?>/gi, "\\n");
-md = md.replace(/<[^>]+>/g, "");
-md = md.replace(/&amp;/g, "&")
-  .replace(/&lt;/g, "<")
-  .replace(/&gt;/g, ">")
-  .replace(/&quot;/g, '"')
-  .replace(/&#39;/g, "'")
-  .replace(/&nbsp;/g, " ");
-md = md.replace(/\\n{3,}/g, "\\n\\n").trim();
-
-console.log(md);
-`;
+	return `const html = ${JSON.stringify(html)};\n${htmlToMarkdownSnippet()}`;
 }
 
 describe("integration: fetch conversion workflow", () => {

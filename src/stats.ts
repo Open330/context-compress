@@ -48,7 +48,13 @@ export class SessionTracker {
 	}
 
 	getSnapshot(): Readonly<SessionStats> {
-		return { ...this.stats };
+		// Deep-copy the nested maps so callers can't observe later mutations
+		// (or mutate our internal state) through the snapshot.
+		return {
+			...this.stats,
+			calls: { ...this.stats.calls },
+			bytesReturned: { ...this.stats.bytesReturned },
+		};
 	}
 
 	/** Load cumulative stats from disk */

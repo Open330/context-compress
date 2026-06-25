@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Config } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
-import { debug } from "./logger.js";
+import { configureLogger, debug } from "./logger.js";
 import { detectRuntimes, hasBun } from "./runtime/index.js";
 import { SessionTracker } from "./stats.js";
 import { ContentStore, cleanupStaleDbs } from "./store.js";
@@ -25,12 +25,16 @@ const MAX_CONCURRENT_EXECUTIONS = 8;
 const EXECUTION_LIMIT_ERROR = "Error: too many concurrent executions. Try again shortly.";
 
 export async function createServer(config: Config) {
+	// Inject the resolved debug flag so the logger doesn't depend on the config
+	// singleton at call time.
+	configureLogger(config.debug);
+
 	const version = getVersion();
 	debug("Version:", version);
 
 	cleanupStaleDbs();
 
-	const runtimes = await detectRuntimes();
+	const runtimes = detectRuntimes();
 	const bunDetected = hasBun(runtimes);
 	debug("Runtimes detected:", runtimes.size);
 

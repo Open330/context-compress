@@ -1,5 +1,5 @@
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { constants, accessSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { debug } from "../logger.js";
 import type { Language } from "../types.js";
 import type { LanguagePlugin } from "./plugin.js";
@@ -17,8 +17,6 @@ import { rustPlugin } from "./languages/rust.js";
 import { shellPlugin } from "./languages/shell.js";
 import { typescriptPlugin } from "./languages/typescript.js";
 
-const execAsync = promisify(exec);
-
 const ALL_PLUGINS: LanguagePlugin[] = [
 	javascriptPlugin,
 	typescriptPlugin,
@@ -35,11 +33,36 @@ const ALL_PLUGINS: LanguagePlugin[] = [
 
 export type RuntimeMap = Map<Language, { plugin: LanguagePlugin; runtime: string }>;
 
-async function commandExists(cmd: string): Promise<boolean> {
-	const checkCmd =
-		process.platform === "win32" ? `where ${cmd} 2>nul` : `command -v ${cmd} 2>/dev/null`;
+const PATH_DIRS = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+const WIN_EXTS = (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean);
+
+/**
+ * Check whether an executable is on PATH by scanning the filesystem directly.
+ *
+ * This replaces the previous shell-based `command -v ${cmd}` / `where ${cmd}`,
+ * which both interpolated `cmd` into a shell string and spawned one shell per
+ * candidate (~19 processes across all plugins). Scanning PATH with `accessSync`
+ * spawns nothing and never touches a shell, eliminating both the injection
+ * surface and the process-spawn overhead.
+ */
+function commandExists(cmd: string): boolean {
+	// Names with a path separator are resolved relative to cwd, not PATH.
+	if (cmd.includes("/") || cmd.includes("\\")) {
+		return isExecutable(cmd);
+	}
+	const exts = process.platform === "win32" ? WIN_EXTS : [""];
+	for (const dir of PATH_DIRS) {
+		for (const ext of exts) {
+			if (isExecutable(join(dir, cmd + ext))) return true;
+		}
+	}
+	return false;
+}
+
+function isExecutable(filePath: string): boolean {
 	try {
-		await execAsync(checkCmd, { timeout: 3000 });
+		// On Windows the executable bit is not meaningful; existence is enough.
+		accessSync(filePath, process.platform === "win32" ? constants.F_OK : constants.X_OK);
 		return true;
 	} catch {
 		return false;
@@ -47,27 +70,18 @@ async function commandExists(cmd: string): Promise<boolean> {
 }
 
 /**
- * Detect all available runtimes in parallel (~40ms vs ~250ms sequential).
+ * Detect all available runtimes by scanning PATH (no subprocesses spawned).
  */
-export async function detectRuntimes(): Promise<RuntimeMap> {
+export function detectRuntimes(): RuntimeMap {
 	const map: RuntimeMap = new Map();
 
-	// Build detection tasks for all plugins in parallel
-	const tasks = ALL_PLUGINS.map(async (plugin) => {
+	for (const plugin of ALL_PLUGINS) {
 		for (const candidate of plugin.runtimeCandidates) {
-			if (await commandExists(candidate)) {
-				return { plugin, runtime: candidate };
+			if (commandExists(candidate)) {
+				map.set(plugin.language, { plugin, runtime: candidate });
+				debug(`Detected ${plugin.language}: ${candidate}`);
+				break;
 			}
-		}
-		return null;
-	});
-
-	const results = await Promise.all(tasks);
-
-	for (const result of results) {
-		if (result) {
-			map.set(result.plugin.language, result);
-			debug(`Detected ${result.plugin.language}: ${result.runtime}`);
 		}
 	}
 

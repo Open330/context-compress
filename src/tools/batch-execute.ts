@@ -40,8 +40,15 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 				4,
 			);
 
+			// Cap the combined buffer so a few high-output commands can't exhaust
+			// memory before indexing. Per-command output is also capped so one
+			// command can't consume the whole budget.
+			const COMBINED_CAP = config.batchMaxBytes;
+			const PER_COMMAND_CAP = Math.max(64_000, Math.floor(COMBINED_CAP / 4));
+
 			let combined = "";
 			const inventory: string[] = [];
+			let truncatedCommands = 0;
 
 			for (let i = 0; i < commandResults.length; i++) {
 				const settled = commandResults[i];
@@ -49,13 +56,23 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 
 				if (settled.status === "fulfilled") {
 					const { result } = settled.value;
-					const output = result.stdout || "(no output)";
-					combined += `## ${label}\n\n${output}\n\n`;
+					let output = result.stdout || "(no output)";
 					const lineCount = output.split("\n").length;
+					if (Buffer.byteLength(output) > PER_COMMAND_CAP) {
+						output = `${output.slice(0, PER_COMMAND_CAP)}\n…(output truncated)`;
+						truncatedCommands++;
+					}
+					combined += `## ${label}\n\n${output}\n\n`;
 					inventory.push(`- **${label}**: ${lineCount} lines`);
 				} else {
 					combined += `## ${label}\n\n(error: ${settled.reason})\n\n`;
 					inventory.push(`- **${label}**: error`);
+				}
+
+				if (Buffer.byteLength(combined) >= COMBINED_CAP) {
+					combined += "\n…(remaining command output omitted: combined size limit reached)\n";
+					truncatedCommands += commandResults.length - i - 1;
+					break;
 				}
 			}
 
@@ -89,6 +106,9 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 			const terms = store.getDistinctiveTerms(indexed.sourceId);
 
 			let output = `**Inventory** (${commands.length} commands):\n${inventory.join("\n")}\n\n`;
+			if (truncatedCommands > 0) {
+				output += `_Note: ${truncatedCommands} command output(s) truncated to stay within size limits; use search() to retrieve indexed content._\n\n`;
+			}
 			output += searchResults.join("\n---\n\n");
 			if (terms.length > 0) {
 				output += `\n\nSearchable terms: ${terms.join(", ")}`;

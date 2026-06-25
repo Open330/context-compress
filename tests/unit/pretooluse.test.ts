@@ -11,9 +11,15 @@ function runHook(
 	payload: Record<string, unknown>,
 	envOverrides: Record<string, string | undefined> = {},
 ): string {
+	// Strip any CONTEXT_COMPRESS_* vars inherited from the developer's shell
+	// (e.g. an installed hook exporting CONTEXT_COMPRESS_BIN) so each test
+	// controls the hook's environment explicitly and results are deterministic.
+	const baseEnv = Object.fromEntries(
+		Object.entries(process.env).filter(([k]) => !k.startsWith("CONTEXT_COMPRESS_")),
+	);
 	return execFileSync("node", ["--import", "tsx", hookPath], {
 		input: JSON.stringify(payload),
-		env: { ...process.env, ...envOverrides },
+		env: { ...baseEnv, ...envOverrides },
 		encoding: "utf-8",
 	});
 }

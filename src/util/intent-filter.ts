@@ -18,10 +18,11 @@ export function createIntentFilter(deps: IntentFilterDeps) {
 	const { config, store, tracker } = deps;
 
 	return function applyIntentFilter(output: string, intent: string, sourceLabel: string): string {
-		if (Buffer.byteLength(output) <= config.intentSearchThreshold) return output;
+		const outputBytes = Buffer.byteLength(output);
+		if (outputBytes <= config.intentSearchThreshold) return output;
 
 		const indexed = store.index(output, sourceLabel);
-		tracker.trackIndexed(Buffer.byteLength(output));
+		tracker.trackIndexed(outputBytes);
 
 		const searchResults = store.search(intent, { limit: 3 });
 		const terms = store.getDistinctiveTerms(indexed.sourceId);

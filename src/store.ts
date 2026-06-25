@@ -139,6 +139,7 @@ function levenshtein(a: string, b: string, maxDist?: number): number {
 export class ContentStore {
 	private db: Database.Database;
 	private hasTrigramTable = false;
+	private closed = false;
 
 	// Cached prepared statements (initialized in initSchema, always available after constructor)
 	private insertSourceStmt!: Database.Statement;
@@ -221,10 +222,25 @@ export class ContentStore {
 			);
 		`);
 
-		// Backfill from existing chunks using SQL-level INSERT
-		this.db.exec(
-			"INSERT INTO chunks_trigram (title, content, source_id, content_type) SELECT title, content, source_id, content_type FROM chunks",
+		// Backfill from existing chunks in bounded batches so a large store
+		// doesn't build one giant transaction / temp B-tree in a single statement.
+		// Page by rowid (robust to non-contiguous rowids).
+		const BATCH = 5_000;
+		const backfill = this.db.prepare(
+			"INSERT INTO chunks_trigram (title, content, source_id, content_type) " +
+				"SELECT title, content, source_id, content_type FROM chunks " +
+				"WHERE rowid > ? ORDER BY rowid LIMIT ?",
 		);
+		const windowMaxStmt = this.db.prepare(
+			"SELECT MAX(rowid) AS maxRowid FROM (SELECT rowid FROM chunks WHERE rowid > ? ORDER BY rowid LIMIT ?)",
+		);
+		let lastRowid = 0;
+		for (;;) {
+			const window = windowMaxStmt.get(lastRowid, BATCH) as { maxRowid: number | null };
+			if (window.maxRowid == null) break;
+			backfill.run(lastRowid, BATCH);
+			lastRowid = window.maxRowid;
+		}
 
 		this.hasTrigramTable = true;
 	}
@@ -557,6 +573,8 @@ export class ContentStore {
 	}
 
 	close(): void {
+		if (this.closed) return;
+		this.closed = true;
 		this.db.close();
 	}
 }

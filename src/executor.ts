@@ -52,8 +52,9 @@ function buildEnv(config: Config): Record<string, string> {
 
 	// Copy safe base variables
 	for (const key of SAFE_ENV_KEYS) {
-		if (process.env[key]) {
-			env[key] = process.env[key] as string;
+		const value = process.env[key];
+		if (value) {
+			env[key] = value;
 		}
 	}
 
@@ -65,8 +66,9 @@ function buildEnv(config: Config): Record<string, string> {
 
 	// Opt-in passthrough (security fix: default is empty)
 	for (const key of config.passthroughEnvVars) {
-		if (process.env[key]) {
-			env[key] = process.env[key] as string;
+		const value = process.env[key];
+		if (value) {
+			env[key] = value;
 		}
 	}
 
@@ -358,8 +360,10 @@ export class SubprocessExecutor {
 				opts.language === "shell" ? opts.code : undefined,
 			);
 		} finally {
-			// Defer cleanup slightly so runtime (especially Bun) fully exits
-			setTimeout(() => this.cleanupTempDir(tmpDir), 100).unref();
+			// Remove user code from disk immediately to minimize the window in
+			// which it is readable. cleanupTempDir falls back to a deferred retry
+			// if a runtime (e.g. Bun) still holds a handle.
+			this.cleanupTempDir(tmpDir);
 		}
 	}
 
@@ -515,8 +519,16 @@ export class SubprocessExecutor {
 	private cleanupTempDir(dir: string): void {
 		try {
 			rmSync(dir, { recursive: true, force: true });
-		} catch (e) {
-			debug("Failed to cleanup temp dir:", dir, e);
+		} catch {
+			// A runtime may still hold a handle to the dir (seen with Bun and on
+			// Windows). Retry once after a short delay before giving up.
+			setTimeout(() => {
+				try {
+					rmSync(dir, { recursive: true, force: true });
+				} catch (e) {
+					debug("Failed to cleanup temp dir:", dir, e);
+				}
+			}, 100).unref();
 		}
 	}
 }
