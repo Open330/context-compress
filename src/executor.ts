@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
 import { applyCommandFilter } from "./filters.js";
+import { applyFormatFilter } from "./format-filter.js";
 import { debug } from "./logger.js";
 import type { RuntimeMap } from "./runtime/index.js";
 import type { LanguagePlugin } from "./runtime/plugin.js";
@@ -479,11 +480,21 @@ export class SubprocessExecutor {
 				stdout = stripAnsi(stdout);
 
 				// Apply command-specific filter for shell commands (before generic pipeline)
+				let commandFiltered = false;
 				if (shellCode && stdout) {
 					const filtered = applyCommandFilter(shellCode, stdout);
 					if (filtered.filtered) {
 						stdout = filtered.output;
+						commandFiltered = true;
 					}
+				}
+
+				// Format-aware fallback: compress by output shape (JSON/NDJSON/logs)
+				// when no command-specific filter matched. Balanced mode: lossless JSON
+				// minify, log template folding — errors preserved.
+				if (!commandFiltered && stdout) {
+					const fmt = applyFormatFilter(stdout, "balanced");
+					if (fmt.filtered) stdout = fmt.output;
 				}
 
 				// Post-process: strip progress, dedup repeated lines + group similar errors (skip for small outputs)

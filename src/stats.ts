@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { CumulativeStats, SessionStats } from "./types.js";
+import { regretSummary } from "./util/regret.js";
 import { formatBytes } from "./utils.js";
 
 const BAR_WIDTH = 20;
@@ -193,6 +194,20 @@ export class SessionTracker {
 			const cumTokensMid = Math.round(cumulative.totalBytesSaved / 4);
 			lines.push(`| Est. total tokens saved | ~${cumTokensMid.toLocaleString()} |`);
 			lines.push(`| Tracking since | ${cumulative.firstSeen.split("T")[0]} |`);
+		}
+
+		// ACON self-improvement: commands whose aggressive compression kept
+		// triggering fast re-runs and were auto-downgraded to preserve fidelity.
+		const regrets = regretSummary();
+		if (regrets.length > 0) {
+			lines.push("\n## Auto-Mode Self-Tuning (regret-adjusted)\n");
+			lines.push("| Command | Re-runs / Obs | Regret |");
+			lines.push("|---------|---------------|--------|");
+			for (const r of regrets.slice(0, 10)) {
+				lines.push(
+					`| \`${r.fingerprint}\` | ${r.regrets}/${r.observations} | ${(r.regretRate * 100).toFixed(0)}% |`,
+				);
+			}
 		}
 
 		return lines.join("\n");

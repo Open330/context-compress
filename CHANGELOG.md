@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026.7.0 (2026-07-06)
+
+Smarter compression release — grounded in the 2026 agent-compression literature, whose core finding is that token-level extractive compression breaks agents by destroying action grammar. Every addition here operates on **whole structural units**, never partial tokens.
+
+### Format-aware compression
+
+- **New `src/format-filter.ts`** — when no command-specific filter matches, output is compressed by its *shape*: JSON is minified losslessly (balanced) or collapsed to a schema + sample (aggressive), NDJSON folds into per-shape summaries, and repetitive logs fold into `template ×count` via variable masking (Drain-style). Error/warning lines are always preserved verbatim and balanced-mode JSON stays parseable. Wired into both the Bash-hook path (`compressOutput`) and the `execute` shell path (`executor`). Typical wins: JSON −41% (still valid) to −96%, logs −98%.
+
+### Intent-conditioned summaries
+
+- **Query-ranked inlining** — `applyIntentFilter` now inlines the top query-ranked sections up to a byte budget (`CONTEXT_COMPRESS_INTENT_BUDGET_BYTES`, default 1800) instead of only listing section titles, cutting follow-up `search()` round-trips. Error lines are surfaced as a safety net. New config field `intentBudgetBytes` (per-level defaults).
+
+### Self-tuning auto mode (ACON-style)
+
+- **Compression-regret loop** (`src/util/regret.ts`) — when a command is compressed aggressively and then re-run fast (≤30s) repeatedly, `auto` records the regret and downgrades that command one step to preserve fidelity, with hysteresis so it doesn't oscillate. Downgrades only ever reduce compression, so a false positive costs tokens, never correctness. Surfaced in the `stats` self-tuning table.
+
+### Quality-regression benchmark
+
+- **New `src/bench/`** + `npm run bench:quality` — measures *survival of task-critical information*, not just token ratio, and a unit test fails if survival regresses below the per-case floor. Report at `docs/quality-regression-report.md`.
+
 ## 2026.6.0 (2026-06-24)
 
 Plugin distribution and proof-of-effect release.

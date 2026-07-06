@@ -1,6 +1,6 @@
 {
   "name": "context-compress",
-  "version": "2026.6.0",
+  "version": "2026.7.0",
   "description": "Context-aware MCP server that compresses tool output for Claude Code",
   "type": "module",
   "main": "dist/server.js",
@@ -17,6 +17,7 @@
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
     "test:integration": "node --import tsx --test tests/integration/*.test.ts",
+    "bench:quality": "tsx src/bench/run.ts",
     "clean": "rm -rf dist dist-bin",
     "build:bin": "bun build --compile --target=bun-darwin-arm64 ./src/cli/lite.ts --outfile=./dist-bin/cc-lite-darwin-arm64 && bun build --compile --target=bun-darwin-x64 ./src/cli/lite.ts --outfile=./dist-bin/cc-lite-darwin-x64 && bun build --compile --target=bun-linux-x64 ./src/cli/lite.ts --outfile=./dist-bin/cc-lite-linux-x64 && bun build --compile --target=bun-linux-arm64 ./src/cli/lite.ts --outfile=./dist-bin/cc-lite-linux-arm64",
     "prepublishOnly": "npm run lint && npm run test && npm run build"

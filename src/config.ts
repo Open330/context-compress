@@ -20,6 +20,8 @@ export interface Config {
 	nudgeOnGrep: boolean;
 	/** Threshold in bytes to trigger intent-based search filtering */
 	intentSearchThreshold: number;
+	/** Byte budget for query-ranked content inlined into an intent-filtered summary */
+	intentBudgetBytes: number;
 	/** Default max output bytes for executor */
 	maxOutputBytes: number;
 	/** Hard cap in bytes for stream-level output (kills process if exceeded) */
@@ -52,6 +54,7 @@ const DEFAULTS: Config = {
 	nudgeOnRead: true,
 	nudgeOnGrep: true,
 	intentSearchThreshold: 5_000,
+	intentBudgetBytes: 1_800,
 	maxOutputBytes: 102_400,
 	hardCapBytes: 100 * 1024 * 1024,
 	searchMaxBytes: 40_960,
@@ -74,6 +77,7 @@ const LEVEL_OVERRIDES: Record<CompressionLevel, Partial<Config>> = {
 		batchMaxBytes: 40_960,
 		searchLimit: 2,
 		intentSearchThreshold: 3_000,
+		intentBudgetBytes: 1_000,
 	},
 	ultra: {
 		maxOutputBytes: 25_600,
@@ -81,6 +85,7 @@ const LEVEL_OVERRIDES: Record<CompressionLevel, Partial<Config>> = {
 		batchMaxBytes: 20_480,
 		searchLimit: 1,
 		intentSearchThreshold: 2_000,
+		intentBudgetBytes: 500,
 	},
 };
 
@@ -92,6 +97,7 @@ const ConfigSchema = z.object({
 	nudgeOnRead: z.boolean().optional(),
 	nudgeOnGrep: z.boolean().optional(),
 	intentSearchThreshold: z.number().int().positive().optional(),
+	intentBudgetBytes: z.number().int().positive().optional(),
 	maxOutputBytes: z.number().int().positive().optional(),
 	hardCapBytes: z.number().int().positive().optional(),
 	searchMaxBytes: z.number().int().positive().optional(),
@@ -187,6 +193,9 @@ function loadEnvConfig(): Partial<Config> {
 	const intentThreshold = parseIntEnv("CONTEXT_COMPRESS_INTENT_SEARCH_THRESHOLD");
 	if (intentThreshold !== undefined) partial.intentSearchThreshold = intentThreshold;
 
+	const intentBudget = parseIntEnv("CONTEXT_COMPRESS_INTENT_BUDGET_BYTES");
+	if (intentBudget !== undefined) partial.intentBudgetBytes = intentBudget;
+
 	const level = process.env.CONTEXT_COMPRESS_LEVEL;
 	if (level === "normal" || level === "compact" || level === "ultra") {
 		partial.compressionLevel = level;
@@ -239,6 +248,12 @@ export function loadConfig(projectDir?: string): Config {
 			`[context-compress] Config: intentSearchThreshold clamped from ${merged.intentSearchThreshold} to 0`,
 		);
 		merged.intentSearchThreshold = 0;
+	}
+	if (merged.intentBudgetBytes < 0) {
+		console.error(
+			`[context-compress] Config: intentBudgetBytes clamped from ${merged.intentBudgetBytes} to 0`,
+		);
+		merged.intentBudgetBytes = 0;
 	}
 	if (merged.searchLimit < 1) {
 		console.error(`[context-compress] Config: searchLimit clamped from ${merged.searchLimit} to 1`);

@@ -238,6 +238,20 @@ export CONTEXT_COMPRESS_MODE=aggressive
 
 The PreToolUse hook also forwards `CONTEXT_COMPRESS_MODE` automatically when wrapping Bash commands, so agents transparently get whatever mode you've configured.
 
+### Beyond mode selection
+
+Three capabilities layer on top of the modes above. All are grounded in the 2026 agent-compression literature, whose central finding is that *token-level* extractive compression (LLMLingua-2, Selective Context) breaks agents by destroying action grammar — so context-compress only ever operates on **whole structural units**, never partial tokens.
+
+- **Format-aware compression** — when no command-specific filter matches, output is compressed by its *shape*. Pretty-printed JSON is minified losslessly (balanced) or collapsed to a schema + sample (aggressive); NDJSON folds into per-shape summaries; repetitive logs fold into `template ×count` via variable masking (Drain-style). Error/warning lines are always kept verbatim, and balanced-mode JSON stays parseable. Typical wins: JSON −41% (still valid) to −96%, logs −98%.
+- **Intent-conditioned summaries** — pass `intent` to `execute` and large output is indexed, then the top query-ranked sections are inlined up to a byte budget (`CONTEXT_COMPRESS_INTENT_BUDGET_BYTES`, default 1800) instead of only listing section titles — fewer follow-up `search()` round-trips. Error lines are surfaced as a safety net.
+- **Self-tuning `auto` mode (ACON-style)** — when a command is compressed aggressively and then re-run fast (≤30s) repeatedly, `auto` records the "regret" and downgrades that command one step to preserve fidelity. Downgrades only ever *reduce* compression, so a false positive costs tokens, never correctness. See the self-tuning table in `stats`.
+
+Verify fidelity yourself with the quality-regression benchmark, which measures **survival of task-critical information**, not just token ratio:
+
+```bash
+npm run bench:quality   # report at docs/quality-regression-report.md
+```
+
 ### Head-to-head with [RTK](https://github.com/rtk-ai/rtk)
 
 Reproduce locally:

@@ -7,6 +7,7 @@ import {
 	applyCommandFilter,
 	parseRequestedMode,
 } from "../filters.js";
+import { applyFormatFilter } from "../format-filter.js";
 import { pickModeAuto } from "../util/auto-mode.js";
 import { StreamCompressor } from "../util/stream-compress.js";
 
@@ -40,9 +41,21 @@ export function compressOutput(
 	let out = stripAnsi(stdout);
 	if (mode === "conservative") return out;
 
+	let commandFiltered = false;
 	if (originalCmd) {
 		const filtered = applyCommandFilter(originalCmd, out, mode);
-		if (filtered.filtered) out = filtered.output;
+		if (filtered.filtered) {
+			out = filtered.output;
+			commandFiltered = true;
+		}
+	}
+
+	// Format-aware fallback: when no command-specific filter matched, compress by
+	// the *shape* of the output (JSON minify/collapse, log template folding).
+	// This catches the long tail of unrecognized commands emitting structured data.
+	if (!commandFiltered) {
+		const fmt = applyFormatFilter(out, mode);
+		if (fmt.filtered) out = fmt.output;
 	}
 
 	const threshold = mode === "aggressive" ? AGGRESSIVE_DEDUP_THRESHOLD : BALANCED_DEDUP_THRESHOLD;

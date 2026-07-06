@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { FilterMode } from "../filters.js";
+import { observeAndAdjust } from "./regret.js";
 
 interface CacheEntry {
 	mode: FilterMode;
@@ -37,6 +38,12 @@ export interface AutoOptions {
 	noCache?: boolean;
 	/** When true, skip API + CLI and use the heuristic. Useful for tests. */
 	noLlm?: boolean;
+	/** When true, skip the ACON regret loop (no read/write of regret state). */
+	noRegret?: boolean;
+	/** Path override for the regret store (tests). */
+	regretPath?: string;
+	/** Injectable clock (epoch ms) for deterministic tests. */
+	now?: number;
 }
 
 function loadCache(): CacheMap {
@@ -159,6 +166,28 @@ export function heuristicMode(cmd: string, output: string): FilterMode {
 export interface AutoResult {
 	mode: FilterMode;
 	source: "cache" | "api" | "cli" | "heuristic";
+	/** True when the ACON regret loop downgraded the picked mode. */
+	regretAdjusted?: boolean;
+}
+
+/** Pick a fresh mode (LLM API → CLI → heuristic) when there's no cache hit. */
+async function decideBaseMode(
+	cmd: string,
+	output: string,
+	opts: AutoOptions,
+): Promise<[FilterMode, AutoResult["source"]]> {
+	if (opts.noLlm) return [heuristicMode(cmd, output), "heuristic"];
+
+	const prompt = buildPrompt(cmd, output.slice(0, SAMPLE_BYTES));
+	try {
+		return [await callAnthropic(prompt, opts), "api"];
+	} catch {
+		try {
+			return [callClaudeCli(prompt, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS), "cli"];
+		} catch {
+			return [heuristicMode(cmd, output), "heuristic"];
+		}
+	}
 }
 
 /**
@@ -171,38 +200,36 @@ export async function pickModeAuto(
 	opts: AutoOptions = {},
 ): Promise<AutoResult> {
 	const fp = fingerprint(cmd);
+	const now = opts.now ?? Date.now();
 	const cache = opts.noCache ? {} : loadCache();
 	const cached = cache[fp];
-	if (cached && cached.expires > Date.now()) {
-		return { mode: cached.mode, source: "cache" };
-	}
 
-	let mode: FilterMode;
+	// Base decision: the raw mode from cache, LLM, or heuristic — before ACON.
+	let baseMode: FilterMode;
 	let source: AutoResult["source"];
-
-	if (opts.noLlm) {
-		mode = heuristicMode(cmd, output);
-		source = "heuristic";
+	if (cached && cached.expires > now) {
+		baseMode = cached.mode;
+		source = "cache";
 	} else {
-		const sample = output.slice(0, SAMPLE_BYTES);
-		const prompt = buildPrompt(cmd, sample);
-		try {
-			mode = await callAnthropic(prompt, opts);
-			source = "api";
-		} catch {
-			try {
-				mode = callClaudeCli(prompt, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-				source = "cli";
-			} catch {
-				mode = heuristicMode(cmd, output);
-				source = "heuristic";
-			}
-		}
+		[baseMode, source] = await decideBaseMode(cmd, output, opts);
 	}
 
-	if (!opts.noCache) {
-		cache[fp] = { mode, expires: Date.now() + TTL_MS };
+	// ACON regret loop: downgrade an over-aggressive mode for fingerprints that
+	// keep getting re-run quickly. Persistent state, so it's skipped when the
+	// caller opts out of persistence (noCache) or regret explicitly.
+	let mode = baseMode;
+	let regretAdjusted = false;
+	if (!opts.noRegret && !opts.noCache) {
+		const decision = observeAndAdjust(fp, baseMode, { path: opts.regretPath, now });
+		mode = decision.mode;
+		regretAdjusted = decision.adjusted;
+	}
+
+	// Cache the BASE decision (not the regret-adjusted one); regret is re-applied
+	// from its own evolving state on every call so it can recover if re-runs stop.
+	if (!opts.noCache && source !== "cache") {
+		cache[fp] = { mode: baseMode, expires: now + TTL_MS };
 		saveCache(cache);
 	}
-	return { mode, source };
+	return { mode, source, regretAdjusted };
 }
