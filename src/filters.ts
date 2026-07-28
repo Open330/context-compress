@@ -481,7 +481,7 @@ export function filterTestOutput(stdout: string): FilterResult {
 	return { output: stdout, filtered: false };
 }
 
-export function filterBuildOutput(cmd: string, stdout: string): FilterResult {
+export function filterBuildOutput(_cmd: string, stdout: string): FilterResult {
 	const lines = stdout.split("\n");
 	// Strip: download progress, "Compiling X/Y" or "Compiling crate v1.2.3" lines,
 	// blocking-on-lock messages, blank lines.
@@ -611,7 +611,7 @@ function balancedLsLong(stdout: string): string {
 		if (/^total\s+\d+/.test(line)) continue;
 		// Match the . and .. entries and skip them — they convey nothing.
 		const m = line.match(
-			/^([dlcb-])[rwxst@+\-]{9,}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\.\.?)$/,
+			/^([dlcb-])[rwxst@+-]{9,}\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\.\.?)$/,
 		);
 		if (m) continue;
 		out.push(line);
@@ -644,7 +644,7 @@ function aggressiveLsLong(stdout: string): string {
 		if (line.trim() === "") continue;
 		// ls -l row: drwxr-xr-x  3 jiun  staff  96 May  6 14:20 name
 		const m = line.match(
-			/^([dlcb-])[rwxst@+\-]{9,}\s+\d+\s+\S+\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(.+)$/,
+			/^([dlcb-])[rwxst@+-]{9,}\s+\d+\s+\S+\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+(.+)$/,
 		);
 		if (m) {
 			const type = m[1];

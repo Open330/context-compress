@@ -4,10 +4,22 @@ import type { ToolContext } from "./context.js";
 export function registerStatsTool(server: McpServer, ctx: ToolContext): void {
 	const { tracker } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"stats",
-		"Returns context consumption statistics for the current session. Shows total bytes returned to context, breakdown by tool, call counts, estimated token usage, context savings ratio, and visual charts.",
-		{},
+		{
+			title: "Session compression statistics",
+			description:
+				"Returns context consumption statistics for the current session. Shows total bytes returned to context, breakdown by tool, call counts, estimated token usage, context savings ratio, and visual charts.",
+			inputSchema: {},
+			// Reports on its own bookkeeping; the cumulative-stats flush it performs
+			// touches nothing the caller can observe elsewhere.
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
 		async () => {
 			tracker.saveCumulative();
 			const report = tracker.formatReport();

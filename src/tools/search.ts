@@ -7,18 +7,29 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 	// Per-server-instance throttling state
 	const searchCalls: number[] = [];
 
-	server.tool(
+	server.registerTool(
 		"search",
-		"Search indexed content. Pass ALL search questions as queries array in ONE call.\n\nTIPS: 2-4 specific terms per query. Use 'source' to scope results.",
 		{
-			queries: z
-				.array(z.string())
-				.describe("Array of search queries. Batch ALL questions in one call."),
-			source: z
-				.string()
-				.optional()
-				.describe("Filter to a specific indexed source (partial match)."),
-			limit: z.number().default(3).describe("Results per query (default: 3)"),
+			title: "Search the knowledge base",
+			description:
+				"Search indexed content. Pass ALL search questions as queries array in ONE call.\n\nTIPS: 2-4 specific terms per query. Use 'source' to scope results.",
+			inputSchema: {
+				queries: z
+					.array(z.string())
+					.describe("Array of search queries. Batch ALL questions in one call."),
+				source: z
+					.string()
+					.optional()
+					.describe("Filter to a specific indexed source (partial match)."),
+				limit: z.number().default(3).describe("Results per query (default: 3)"),
+			},
+			// Pure read over the local FTS5 index — no writes, no network.
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
 		},
 		async ({ queries, source, limit }) => {
 			const now = Date.now();

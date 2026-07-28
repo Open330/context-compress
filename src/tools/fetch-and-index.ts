@@ -9,12 +9,24 @@ import type { ToolContext } from "./context.js";
 export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, store, tracker, withExecutionLimit } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"fetch_and_index",
-		"Fetches URL content, converts HTML to markdown, indexes into searchable knowledge base, and returns a ~3KB preview. Full content stays in sandbox — use search() for deeper lookups.\n\nBetter than WebFetch: preview is immediate, full content is searchable, raw HTML never enters context.",
 		{
-			url: z.string().describe("The URL to fetch and index"),
-			source: z.string().optional().describe("Label for the indexed content"),
+			title: "Fetch a URL and index it",
+			description:
+				"Fetches URL content, converts HTML to markdown, indexes into searchable knowledge base, and returns a ~3KB preview. Full content stays in sandbox — use search() for deeper lookups.\n\nBetter than WebFetch: preview is immediate, full content is searchable, raw HTML never enters context.",
+			inputSchema: {
+				url: z.string().describe("The URL to fetch and index"),
+				source: z.string().optional().describe("Label for the indexed content"),
+			},
+			// Reaches arbitrary external hosts (SSRF-filtered), then writes to the
+			// knowledge base. Additive, so not destructive.
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: true,
+			},
 		},
 		async ({ url, source }) => {
 			try {

@@ -8,19 +8,30 @@ import type { ToolContext } from "./context.js";
 export function registerIndexTool(server: McpServer, ctx: ToolContext): void {
 	const { store, tracker, projectDir } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"index",
-		"Index documentation or knowledge content into a searchable BM25 knowledge base. Chunks markdown by headings (keeping code blocks intact) and stores in ephemeral FTS5 database. The full content does NOT stay in context — only a brief summary is returned.\n\nWHEN TO USE:\n- Documentation (API docs, framework guides, code examples)\n- README files, migration guides, changelog entries\n- Any content with code examples you may need to reference precisely\n\nAfter indexing, use 'search' to retrieve specific sections on-demand.",
 		{
-			content: z
-				.string()
-				.optional()
-				.describe("Raw text/markdown to index. Provide this OR path, not both."),
-			path: z
-				.string()
-				.optional()
-				.describe("File path to read and index (content never enters context)."),
-			source: z.string().optional().describe("Label for the indexed content"),
+			title: "Index content for search",
+			description:
+				"Index documentation or knowledge content into a searchable BM25 knowledge base. Chunks markdown by headings (keeping code blocks intact) and stores in ephemeral FTS5 database. The full content does NOT stay in context — only a brief summary is returned.\n\nWHEN TO USE:\n- Documentation (API docs, framework guides, code examples)\n- README files, migration guides, changelog entries\n- Any content with code examples you may need to reference precisely\n\nAfter indexing, use 'search' to retrieve specific sections on-demand.",
+			inputSchema: {
+				content: z
+					.string()
+					.optional()
+					.describe("Raw text/markdown to index. Provide this OR path, not both."),
+				path: z
+					.string()
+					.optional()
+					.describe("File path to read and index (content never enters context)."),
+				source: z.string().optional().describe("Label for the indexed content"),
+			},
+			// Writes to the knowledge base only — additive, never destroys user data.
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
 		},
 		async ({ content, path: filePath, source }) => {
 			let text: string;

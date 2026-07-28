@@ -10,8 +10,8 @@ import { ContentStore, cleanupStaleDbs } from "./store.js";
 import { registerBatchExecuteTool } from "./tools/batch-execute.js";
 import type { ToolContext } from "./tools/context.js";
 import { registerDiscoverTool } from "./tools/discover.js";
-import { registerExecuteFileTool } from "./tools/execute-file.js";
 import { registerExecuteTool } from "./tools/execute.js";
+import { registerExecuteFileTool } from "./tools/execute-file.js";
 import { registerFetchAndIndexTool } from "./tools/fetch-and-index.js";
 import { registerIndexTool } from "./tools/index-content.js";
 import { registerSearchTool } from "./tools/search.js";
@@ -127,6 +127,9 @@ export async function createServer(config: Config) {
 	registerDiscoverTool(server, ctx);
 
 	return {
+		/** Exposed so tests can attach an in-memory transport instead of stdio. */
+		server,
+		shutdown,
 		async start() {
 			const transport = new StdioServerTransport();
 			await server.connect(transport);

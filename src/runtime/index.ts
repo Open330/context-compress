@@ -1,9 +1,7 @@
-import { constants, accessSync } from "node:fs";
+import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { debug } from "../logger.js";
 import type { Language } from "../types.js";
-import type { LanguagePlugin } from "./plugin.js";
-
 // Import all language plugins
 import { elixirPlugin } from "./languages/elixir.js";
 import { goPlugin } from "./languages/go.js";
@@ -16,6 +14,7 @@ import { rubyPlugin } from "./languages/ruby.js";
 import { rustPlugin } from "./languages/rust.js";
 import { shellPlugin } from "./languages/shell.js";
 import { typescriptPlugin } from "./languages/typescript.js";
+import type { LanguagePlugin } from "./plugin.js";
 
 const ALL_PLUGINS: LanguagePlugin[] = [
 	javascriptPlugin,
@@ -107,5 +106,5 @@ export function hasBun(runtimes: RuntimeMap): boolean {
 	return js?.runtime === "bun";
 }
 
-export { ALL_PLUGINS };
 export type { LanguagePlugin } from "./plugin.js";
+export { ALL_PLUGINS };

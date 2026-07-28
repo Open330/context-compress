@@ -4,10 +4,21 @@ import type { ToolContext } from "./context.js";
 export function registerDiscoverTool(server: McpServer, ctx: ToolContext): void {
 	const { store, tracker, dbFallback } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"discover",
-		"Shows what's in the knowledge base and suggests optimization opportunities. Lists all indexed sources, chunk counts, searchable terms, and recommends next actions. Use this to understand what data is available for search.",
-		{},
+		{
+			title: "Inspect the knowledge base",
+			description:
+				"Shows what's in the knowledge base and suggests optimization opportunities. Lists all indexed sources, chunk counts, searchable terms, and recommends next actions. Use this to understand what data is available for search.",
+			inputSchema: {},
+			// Pure read over the local index and session counters.
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
 		async () => {
 			const storeStats = store.getStats();
 			const snap = tracker.getSnapshot();

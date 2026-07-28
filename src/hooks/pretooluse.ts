@@ -75,6 +75,15 @@ try {
 const tool = input.tool_name ?? "";
 const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
 
+/**
+ * Emit a PreToolUse hook result and exit.
+ *
+ * Field names follow the Claude Code PreToolUse contract:
+ * `permissionDecision` ("allow" | "deny" | "ask") paired with
+ * `permissionDecisionReason`, plus `updatedInput` to rewrite tool arguments
+ * and `additionalContext` to append guidance. The legacy top-level
+ * `decision` / `reason` fields are deprecated and are not emitted.
+ */
 function respond(output: Record<string, unknown>): void {
 	console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", ...output } }));
 	process.exit(0);
@@ -84,16 +93,15 @@ function respond(output: Record<string, unknown>): void {
 if (tool === "Bash") {
 	const command = String(toolInput.command ?? "");
 
-	// curl/wget → block and redirect
-	if (blockCurl && /(^|\s|&&|\||\;)(curl|wget)\s/i.test(command)) {
+	// curl/wget → deny and redirect
+	if (blockCurl && /(^|\s|&&|\||;)(curl|wget)\s/i.test(command)) {
 		respond({
-			updatedInput: {
-				command: `echo "${TOOL_PREFIX}: curl/wget blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url, source) to fetch URLs, or mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox. Set CONTEXT_COMPRESS_BLOCK_CURL=0 to disable this."`,
-			},
+			permissionDecision: "deny",
+			permissionDecisionReason: `${TOOL_PREFIX}: curl/wget blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url, source) to fetch URLs, or mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox. Set CONTEXT_COMPRESS_BLOCK_CURL=0 to disable this.`,
 		});
 	}
 
-	// inline fetch → block and redirect
+	// inline fetch → deny and redirect
 	if (
 		blockCurl &&
 		(/fetch\s*\(\s*['"](https?:\/\/|http)/i.test(command) ||
@@ -101,9 +109,8 @@ if (tool === "Bash") {
 			/http\.(get|request)\s*\(/i.test(command))
 	) {
 		respond({
-			updatedInput: {
-				command: `echo "${TOOL_PREFIX}: Inline HTTP blocked. Use mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox, or mcp__${TOOL_PREFIX}__fetch_and_index(url, source) for web pages."`,
-			},
+			permissionDecision: "deny",
+			permissionDecisionReason: `${TOOL_PREFIX}: Inline HTTP blocked. Use mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox, or mcp__${TOOL_PREFIX}__fetch_and_index(url, source) for web pages.`,
 		});
 	}
 
@@ -141,7 +148,7 @@ if (tool === "WebFetch" && blockWebFetch) {
 	const url = String(toolInput.url ?? "");
 	respond({
 		permissionDecision: "deny",
-		reason: `${TOOL_PREFIX}: WebFetch blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url: "${url}", source: "...") to fetch this URL in sandbox. Then use mcp__${TOOL_PREFIX}__search(queries: [...]) to query results.`,
+		permissionDecisionReason: `${TOOL_PREFIX}: WebFetch blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url: "${url}", source: "...") to fetch this URL in sandbox. Then use mcp__${TOOL_PREFIX}__search(queries: [...]) to query results.`,
 	});
 }
 

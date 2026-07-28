@@ -1,6 +1,5 @@
-import { readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { homedir } from "node:os";
+import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 export async function uninstall(): Promise<void> {
@@ -22,7 +21,6 @@ export async function uninstall(): Promise<void> {
 				);
 			});
 			if (hooks.PreToolUse.length === 0) {
-				// biome-ignore lint/performance/noDelete: removing key from JSON object
 				delete hooks.PreToolUse;
 			}
 			if (hooks.PreToolUse === undefined || hooks.PreToolUse.length < before) {
@@ -42,7 +40,6 @@ export async function uninstall(): Promise<void> {
 		const settings = JSON.parse(readFileSync(mcpPath, "utf-8"));
 		const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
 		if (mcpServers && "context-compress" in mcpServers) {
-			// biome-ignore lint/performance/noDelete: must remove the key, not set it to null
 			delete mcpServers["context-compress"];
 			writeFileSync(mcpPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 			changes.push("Removed context-compress MCP server from settings");
@@ -58,7 +55,6 @@ export async function uninstall(): Promise<void> {
 		const mcp = JSON.parse(readFileSync(mcpJson, "utf-8"));
 		const servers = mcp.mcpServers as Record<string, unknown> | undefined;
 		if (servers && "context-compress" in servers) {
-			// biome-ignore lint/performance/noDelete: must remove the key, not set it to null
 			delete servers["context-compress"];
 			writeFileSync(mcpJson, `${JSON.stringify(mcp, null, 2)}\n`, "utf-8");
 			changes.push("Removed context-compress from .mcp.json");

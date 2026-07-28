@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, accessSync, readFileSync } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

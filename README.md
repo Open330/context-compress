@@ -8,7 +8,7 @@ Use it through an MCP server, a drop-in CLI, agent plugins, or all three.
 
 [![CI](https://github.com/Open330/context-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/Open330/context-compress/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/context-compress?color=cb3837&logo=npm)](https://www.npmjs.com/package/context-compress)
-[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-brightgreen?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A520-brightgreen?logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
 [![Tests](https://img.shields.io/badge/tests-unit%20%2B%20integration-success)](#contributing)
@@ -214,6 +214,23 @@ context-compress doctor
 `javascript` · `typescript` · `python` · `shell` · `ruby` · `go` · `rust` · `php` · `perl` · `r` · `elixir`
 
 > Bun auto-detected for 3-5x faster JS/TS execution.
+
+### MCP protocol surface
+
+Every tool is registered through `registerTool()` and advertises a human-readable `title` plus behavior annotations, so clients can gate them without guessing from the name:
+
+| Tool | `readOnlyHint` | `destructiveHint` | `openWorldHint` |
+|:--|:--|:--|:--|
+| `execute`, `execute_file`, `batch_execute` | false | true | true |
+| `fetch_and_index` | false | false | true |
+| `index` | false | false | false |
+| `search`, `stats`, `discover` | true | false | false |
+
+**No tool declares an `outputSchema`** — that is deliberate. A tool with an output schema must return `structuredContent` *and* a serialized text copy for backwards compatibility, so the same payload is billed to the context window twice. For a server whose entire purpose is to shrink that window, text-only responses are the correct trade. `tests/integration/tool-manifest.test.ts` enforces both halves of this contract.
+
+### PreToolUse hook contract
+
+The hook speaks the current `hookSpecificOutput` shape — `permissionDecision` paired with `permissionDecisionReason`, `updatedInput` to rewrite arguments, `additionalContext` to append guidance. The deprecated top-level `decision` / `reason` fields are never emitted. Blocked `curl`/`wget`/inline-HTTP calls are **denied with the redirect in the reason** rather than rewritten into an `echo`, which saves a shell round-trip and puts the alternative directly in front of the agent.
 
 ---
 
@@ -422,7 +439,7 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
   [PASS] Hook integrity: SHA-256 verified (a3f1c8d2e4...)
   [PASS] FTS5 / better-sqlite3 works
 
-  Version: v2026.5.0
+  Version: v2026.7.1
   All checks passed.
 ```
 

@@ -6,24 +6,35 @@ import type { ToolContext } from "./context.js";
 export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, store, tracker, config, withExecutionLimit } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"batch_execute",
-		"Execute multiple commands in ONE call, auto-index all output, and search with multiple queries. Returns search results directly — no follow-up calls needed.\n\nTHIS IS THE PRIMARY TOOL. Use this instead of multiple execute() calls.\n\nOne batch_execute call replaces 30+ execute calls + 10+ search calls.\nProvide all commands to run and all queries to search — everything happens in one round trip.",
 		{
-			commands: z
-				.array(
-					z.object({
-						label: z.string().describe("Section header for this command's output"),
-						command: z.string().describe("Shell command to execute"),
-					}),
-				)
-				.describe("Commands to execute as a batch."),
-			queries: z
-				.array(z.string())
-				.describe(
-					"Search queries to extract information from indexed output. Use 5-8 comprehensive queries.",
-				),
-			timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
+			title: "Run commands and search in one call",
+			description:
+				"Execute multiple commands in ONE call, auto-index all output, and search with multiple queries. Returns search results directly — no follow-up calls needed.\n\nTHIS IS THE PRIMARY TOOL. Use this instead of multiple execute() calls.\n\nOne batch_execute call replaces 30+ execute calls + 10+ search calls.\nProvide all commands to run and all queries to search — everything happens in one round trip.",
+			inputSchema: {
+				commands: z
+					.array(
+						z.object({
+							label: z.string().describe("Section header for this command's output"),
+							command: z.string().describe("Shell command to execute"),
+						}),
+					)
+					.describe("Commands to execute as a batch."),
+				queries: z
+					.array(z.string())
+					.describe(
+						"Search queries to extract information from indexed output. Use 5-8 comprehensive queries.",
+					),
+				timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
+			},
+			// Runs arbitrary shell commands — same pessimistic hints as `execute`.
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: true,
+			},
 		},
 		async ({ commands, queries, timeout }) => {
 			const commandResults = await limitConcurrency(

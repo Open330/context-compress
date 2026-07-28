@@ -10,19 +10,31 @@ const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, tracker, projectDir, withExecutionLimit, applyIntentFilter } = ctx;
 
-	server.tool(
+	server.registerTool(
 		"execute_file",
-		"Read a file and process it without loading contents into context. The file is read into a FILE_CONTENT variable inside the sandbox. Only your printed summary enters context.\n\nPREFER THIS OVER Read/cat for: log files, data files (CSV, JSON, XML), large source files for analysis, and any file where you need to extract specific information rather than read the entire content.",
 		{
-			path: z.string().describe("Absolute file path or relative to project root"),
-			language: z.enum(LANGUAGE_ENUM).describe("Runtime language"),
-			code: z
-				.string()
-				.describe(
-					"Code to process FILE_CONTENT. Print summary via console.log/print/echo/IO.puts.",
-				),
-			intent: z.string().optional().describe("What you're looking for in the output."),
-			timeout: z.number().default(30000).describe("Max execution time in ms"),
+			title: "Process a file in a sandbox",
+			description:
+				"Read a file and process it without loading contents into context. The file is read into a FILE_CONTENT variable inside the sandbox. Only your printed summary enters context.\n\nPREFER THIS OVER Read/cat for: log files, data files (CSV, JSON, XML), large source files for analysis, and any file where you need to extract specific information rather than read the entire content.",
+			inputSchema: {
+				path: z.string().describe("Absolute file path or relative to project root"),
+				language: z.enum(LANGUAGE_ENUM).describe("Runtime language"),
+				code: z
+					.string()
+					.describe(
+						"Code to process FILE_CONTENT. Print summary via console.log/print/echo/IO.puts.",
+					),
+				intent: z.string().optional().describe("What you're looking for in the output."),
+				timeout: z.number().default(30000).describe("Max execution time in ms"),
+			},
+			// Same trust profile as `execute` — the supplied code is arbitrary, the
+			// only added constraint is that the input path stays inside the project.
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: true,
+			},
 		},
 		async ({ path: filePath, language, code, intent, timeout }) => {
 			const codeBytes = Buffer.byteLength(code);

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
 import {
+	applyCommandFilter,
 	DEFAULT_MODE,
 	type FilterMode,
-	type RequestedMode,
-	applyCommandFilter,
 	parseRequestedMode,
+	type RequestedMode,
 } from "../filters.js";
 import { applyFormatFilter } from "../format-filter.js";
 import { pickModeAuto } from "../util/auto-mode.js";

@@ -7,8 +7,7 @@ import { applyCommandFilter } from "./filters.js";
 import { applyFormatFilter } from "./format-filter.js";
 import { debug } from "./logger.js";
 import type { RuntimeMap } from "./runtime/index.js";
-import type { LanguagePlugin } from "./runtime/plugin.js";
-import type { ExecFileOptions, ExecOptions, ExecResult, Language } from "./types.js";
+import type { ExecFileOptions, ExecOptions, ExecResult } from "./types.js";
 import { formatBytes } from "./utils.js";
 
 const DEFAULT_TIMEOUT = 30_000;
@@ -105,7 +104,7 @@ function stripProgressLines(output: string): string {
 		// ANSI escape sequences (colors, cursor movement)
 		if (ANSI_RE.test(l) && trimmed.replace(ANSI_RE_G, "").trim() === "") return false;
 		// Pure progress bars: [=====>    ] 45%  or  ████░░░░ 45%
-		if (/^[\s\[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) && trimmed.length > 3) return false;
+		if (/^[\s[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) && trimmed.length > 3) return false;
 		// Spinner lines: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ or - \ | /
 		if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\-\\|/]\s/.test(trimmed)) return false;
 		// Download progress: "Downloading 45.2 MB / 100.3 MB"

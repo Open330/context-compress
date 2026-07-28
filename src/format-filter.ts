@@ -132,7 +132,7 @@ export function maskVariables(line: string): string {
 			// IPv4 (+ optional port)
 			.replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "<IP>")
 			// Absolute-ish paths
-			.replace(/(?:\/[\w.\-]+){2,}/g, "<PATH>")
+			.replace(/(?:\/[\w.-]+){2,}/g, "<PATH>")
 			// Quoted strings
 			.replace(/"[^"]*"/g, '"<STR>"')
 			.replace(/'[^']*'/g, "'<STR>'")

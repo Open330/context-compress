@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-bin/
 hooks/pretooluse.mjs
+hooks/pretooluse.sha256
 *.db
 *.db-wal
 *.db-shm

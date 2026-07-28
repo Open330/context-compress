@@ -32,11 +32,28 @@ describe("pretooluse hook", () => {
 		});
 
 		const parsed = JSON.parse(output) as {
-			hookSpecificOutput: { updatedInput?: { command?: string } };
+			hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string };
 		};
 
-		const command = parsed.hookSpecificOutput.updatedInput?.command ?? "";
-		assert.match(command, /blocked/i);
+		// Denying is cheaper than rewriting the command to `echo ...`: the agent
+		// gets the redirect immediately instead of paying for a shell round-trip.
+		assert.strictEqual(parsed.hookSpecificOutput.permissionDecision, "deny");
+		assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /blocked/i);
+		assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /fetch_and_index/);
+	});
+
+	it("blocks inline HTTP calls in Bash tool", () => {
+		const output = runHook({
+			tool_name: "Bash",
+			tool_input: { command: 'python -c "import requests; requests.get(\'https://x.com\')"' },
+		});
+
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string };
+		};
+
+		assert.strictEqual(parsed.hookSpecificOutput.permissionDecision, "deny");
+		assert.match(parsed.hookSpecificOutput.permissionDecisionReason ?? "", /Inline HTTP blocked/);
 	});
 
 	it("passes through normal Bash command without output", () => {
@@ -58,6 +75,35 @@ describe("pretooluse hook", () => {
 		};
 
 		assert.strictEqual(parsed.hookSpecificOutput.permissionDecision, "deny");
+	});
+
+	it("carries the deny reason in permissionDecisionReason, not legacy fields", () => {
+		// Claude Code reads `hookSpecificOutput.permissionDecisionReason`. A payload
+		// using the legacy top-level `decision`/`reason` pair — or a bare `reason`
+		// inside hookSpecificOutput — silently drops the redirect instructions.
+		const output = runHook({
+			tool_name: "WebFetch",
+			tool_input: { url: "https://example.com/docs" },
+		});
+
+		const parsed = JSON.parse(output) as {
+			decision?: string;
+			reason?: string;
+			hookSpecificOutput: {
+				hookEventName?: string;
+				permissionDecisionReason?: string;
+				reason?: string;
+			};
+		};
+
+		assert.strictEqual(parsed.hookSpecificOutput.hookEventName, "PreToolUse");
+		assert.match(
+			parsed.hookSpecificOutput.permissionDecisionReason ?? "",
+			/fetch_and_index\(url: "https:\/\/example\.com\/docs"/,
+		);
+		assert.strictEqual(parsed.hookSpecificOutput.reason, undefined);
+		assert.strictEqual(parsed.decision, undefined);
+		assert.strictEqual(parsed.reason, undefined);
 	});
 
 	it("adds additionalContext for Read tool", () => {

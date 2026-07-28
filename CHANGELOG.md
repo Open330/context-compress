@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026.7.1 (2026-07-29)
+
+Modernization pass: align the hook and MCP surfaces with the current specs, and refresh the toolchain baseline.
+
+> **Upgrade note:** Node 18 is no longer supported (it reached end-of-life in April 2025). The minimum runtime is now Node 20.
+
+### Fixed
+
+- **PreToolUse deny reasons were silently dropped** — the WebFetch block emitted `hookSpecificOutput.reason`, but Claude Code reads `permissionDecisionReason`. Agents saw a bare denial with no redirect to `fetch_and_index`. Now uses the correct field, with a regression test asserting the legacy `decision`/`reason` pair is never emitted.
+- **Duplicate PreToolUse hook registration** — `hooks/hooks.json` (the path plugin hosts auto-discover by convention) sat alongside the explicitly declared `hooks/claude-codex-hooks.json`, so a plugin install could spawn the hook twice per tool call and emit two conflicting decisions. The orphaned file is removed and a test keeps it gone.
+- **`curl` / `wget` / inline-HTTP blocks** now return `permissionDecision: "deny"` with the redirect in the reason instead of rewriting the command into `echo "..."` — the agent gets the alternative immediately instead of paying for a shell round-trip.
+
+### Changed
+
+- **All 8 MCP tools migrated from the deprecated `server.tool()` overloads to `registerTool()`** — each now advertises a `title` and full `ToolAnnotations` (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`). Code-executing tools (`execute`, `execute_file`, `batch_execute`) are pessimistically annotated as non-read-only, destructive, and open-world; `search` / `stats` / `discover` are read-only and closed-world.
+- **No `outputSchema` on any tool, by design** — an output schema obliges the server to send `structuredContent` plus a serialized text duplicate, billing the same payload to the context window twice. `tests/integration/tool-manifest.test.ts` locks in both the annotation contract and the text-only response shape by driving the real server over an in-memory MCP transport.
+- **`createServer()` now returns the `McpServer` instance and `shutdown`** alongside `start()`, so the server can be exercised over a test transport.
+- **Node baseline raised to >= 20** (Node 18 reached end-of-life in April 2025). CI matrix is now 20/22/24; esbuild targets `node20`; `actions/checkout` and `actions/setup-node` bumped to v5.
+- **Dependencies refreshed** — MCP SDK 1.27 → 1.30, better-sqlite3 12 → 13, Biome 1.9 → 2.5 (config migrated), TypeScript 5.7 → 5.9, esbuild 0.27 → 0.28, `@types/node` 20 → 24. `npm audit` now reports 0 vulnerabilities (the fixed advisories were all in the SDK's unused HTTP-transport dependency tree).
+- **Dead code removed** that Biome 2 newly surfaced: unused imports in `executor.ts` / `uninstall.ts`, an unused parameter in `filterBuildOutput`, and three stale `biome-ignore` comments for a rule that no longer exists.
+
+### Packaging
+
+- **Hook bundle and its SHA-256 are now emitted by the same build step.** `npm run build` regenerated `hooks/pretooluse.mjs` but left `hooks/pretooluse.sha256` untouched, and `prepublishOnly` runs `build` — so a publish could ship a fresh bundle beside a stale checksum and make `doctor` report a bogus integrity failure to every user. `esbuild.config.mjs` now writes both, and `build:hooks` delegates to it via `--hooks-only` instead of duplicating the bundling command.
+
 ## 2026.7.0 (2026-07-06)
 
 Smarter compression release — grounded in the 2026 agent-compression literature, whose core finding is that token-level extractive compression breaks agents by destroying action grammar. Every addition here operates on **whole structural units**, never partial tokens.

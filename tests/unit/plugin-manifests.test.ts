@@ -56,6 +56,17 @@ describe("plugin manifests", () => {
 		assert.ok(existsSync(join(root, "hooks/claude-codex-hooks.json")));
 	});
 
+	it("ships exactly one PreToolUse hook manifest", () => {
+		// `hooks/hooks.json` is the path plugin hosts auto-discover by convention.
+		// Keeping it alongside the explicitly declared `hooks/claude-codex-hooks.json`
+		// registers the same PreToolUse hook twice — every Bash/Read/Grep call would
+		// spawn the hook process twice and emit two conflicting decisions.
+		assert.ok(
+			!existsSync(join(root, "hooks/hooks.json")),
+			"hooks/hooks.json would double-register the PreToolUse hook",
+		);
+	});
+
 	it("Claude hook config enables transparent Bash compression", () => {
 		const hooks = readJson<{
 			hooks: {

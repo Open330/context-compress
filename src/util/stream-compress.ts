@@ -19,7 +19,7 @@
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires \x1b
 const ANSI_RE_G = /\x1b\[[0-9;]*[a-zA-Z]/g;
 
-const PROGRESS_BAR_RE = /^[\s\[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/;
+const PROGRESS_BAR_RE = /^[\s[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/;
 const SPINNER_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\-\\|/]\s/;
 const DOWNLOAD_RE = /(?:downloading|uploading|fetching|resolving)\s+[\d.]+\s*[kmg]?b/i;
 const SPEED_ETA_RE = /\d+\.?\d*\s*[kmg]?b\/s/i;
