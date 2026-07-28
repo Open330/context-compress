@@ -4,7 +4,7 @@
 
 Modernization pass: align the hook and MCP surfaces with the current specs, and refresh the toolchain baseline.
 
-> **Upgrade note:** Node 18 is no longer supported (it reached end-of-life in April 2025). The minimum runtime is now Node 20.
+> **Upgrade note:** the minimum runtime is now **Node 22**. Node 18 (EOL April 2025) and Node 20 (EOL April 2026) are both past end-of-life, and better-sqlite3 13 declares `engines: {node: ">=22"}` — on Node 20 it segfaults rather than failing cleanly. Stay on 2026.7.0 if you cannot move off Node 20.
 
 ### Fixed
 
@@ -17,7 +17,7 @@ Modernization pass: align the hook and MCP surfaces with the current specs, and 
 - **All 8 MCP tools migrated from the deprecated `server.tool()` overloads to `registerTool()`** — each now advertises a `title` and full `ToolAnnotations` (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`). Code-executing tools (`execute`, `execute_file`, `batch_execute`) are pessimistically annotated as non-read-only, destructive, and open-world; `search` / `stats` / `discover` are read-only and closed-world.
 - **No `outputSchema` on any tool, by design** — an output schema obliges the server to send `structuredContent` plus a serialized text duplicate, billing the same payload to the context window twice. `tests/integration/tool-manifest.test.ts` locks in both the annotation contract and the text-only response shape by driving the real server over an in-memory MCP transport.
 - **`createServer()` now returns the `McpServer` instance and `shutdown`** alongside `start()`, so the server can be exercised over a test transport.
-- **Node baseline raised to >= 20** (Node 18 reached end-of-life in April 2025). CI matrix is now 20/22/24; esbuild targets `node20`; `actions/checkout` and `actions/setup-node` bumped to v5.
+- **Node baseline raised to >= 22.** Node 18 and Node 20 are both end-of-life, and better-sqlite3 13 requires Node 22+; CI caught the mismatch as a SIGSEGV across every SQLite-touching test on the Node 20 leg. CI matrix is now 22/24; esbuild targets `node22`; `actions/checkout` and `actions/setup-node` bumped to v5.
 - **Dependencies refreshed** — MCP SDK 1.27 → 1.30, better-sqlite3 12 → 13, Biome 1.9 → 2.5 (config migrated), TypeScript 5.7 → 5.9, esbuild 0.27 → 0.28, `@types/node` 20 → 24. `npm audit` now reports 0 vulnerabilities (the fixed advisories were all in the SDK's unused HTTP-transport dependency tree).
 - **Dead code removed** that Biome 2 newly surfaced: unused imports in `executor.ts` / `uninstall.ts`, an unused parameter in `filterBuildOutput`, and three stale `biome-ignore` comments for a rule that no longer exists.
 

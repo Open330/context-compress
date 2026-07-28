@@ -13,6 +13,20 @@
  *   context-compress wrap <cmd>         → run cmd, compress its stdout, exit with cmd's code
  */
 
+// better-sqlite3 declares `engines: {node: ">=22"}` but npm only warns, and on an
+// older runtime the native binding segfaults with no diagnostic at all. Fail with
+// a sentence the user can act on instead.
+const MIN_NODE_MAJOR = 22;
+const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
+if (Number.isFinite(nodeMajor) && nodeMajor < MIN_NODE_MAJOR) {
+	console.error(
+		`context-compress requires Node >= ${MIN_NODE_MAJOR} (running ${process.version}).\n` +
+			"Node 18 and 20 are both past end-of-life; the SQLite binding crashes on them.\n" +
+			"Upgrade Node, or pin context-compress@2026.7.0.",
+	);
+	process.exit(1);
+}
+
 const args = process.argv.slice(2);
 const command = args[0];
 const rest = args.slice(1);

@@ -23,7 +23,7 @@
     "prepublishOnly": "npm run lint && npm run test && npm run build"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
