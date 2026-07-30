@@ -20,6 +20,9 @@
 const ANSI_RE_G = /\x1b\[[0-9;]*[a-zA-Z]/g;
 
 const PROGRESS_BAR_RE = /^[\s[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/;
+// A progress bar must contain an actual progress marker — otherwise plain
+// numeric lines ("12345") and separators ("----") would be deleted too.
+const PROGRESS_MARKER_RE = /%|=>|[▓░█▒▏▎▍▌▋▊▉]/;
 const SPINNER_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\-\\|/]\s/;
 const DOWNLOAD_RE = /(?:downloading|uploading|fetching|resolving)\s+[\d.]+\s*[kmg]?b/i;
 const SPEED_ETA_RE = /\d+\.?\d*\s*[kmg]?b\/s/i;
@@ -28,7 +31,7 @@ const ETA_RE = /eta|remaining/i;
 function isProgressLine(line: string): boolean {
 	const t = line.trim();
 	if (t === "") return false; // keep empty lines (they delimit blocks)
-	if (PROGRESS_BAR_RE.test(t) && t.length > 3) return true;
+	if (PROGRESS_BAR_RE.test(t) && t.length > 3 && PROGRESS_MARKER_RE.test(t)) return true;
 	if (SPINNER_RE.test(t)) return true;
 	if (DOWNLOAD_RE.test(t)) return true;
 	if (SPEED_ETA_RE.test(t) && ETA_RE.test(t)) return true;
@@ -63,10 +66,7 @@ export class StreamCompressor {
 				continue;
 			}
 
-			if (this.repeatCount > 1) {
-				out += `  ... (×${this.repeatCount} identical lines)\n`;
-			}
-			this.repeatCount = 0;
+			out += this.drainRepeatCounter();
 			out += `${filtered}\n`;
 			this.prevLine = filtered;
 		}
@@ -97,9 +97,19 @@ export class StreamCompressor {
 		return counter + filtered + (filtered.endsWith("\n") ? "" : "\n");
 	}
 
-	/** Emit "(×N identical lines)" if a repeat counter is pending; reset state. */
+	/**
+	 * End a run of duplicates. Matches executor.deduplicateLines semantics:
+	 * 3+ identical consecutive lines collapse to one line + a ×N marker
+	 * (N = total including the already-emitted first line); a single duplicate
+	 * is re-emitted verbatim — never silently dropped.
+	 */
 	private drainRepeatCounter(): string {
-		const out = this.repeatCount > 1 ? `  ... (×${this.repeatCount} identical lines)\n` : "";
+		let out = "";
+		if (this.repeatCount >= 2) {
+			out = `  ... (×${this.repeatCount + 1} identical lines)\n`;
+		} else if (this.repeatCount === 1 && this.prevLine !== null) {
+			out = `${this.prevLine}\n`;
+		}
 		this.repeatCount = 0;
 		return out;
 	}

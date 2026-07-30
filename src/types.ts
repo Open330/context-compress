@@ -31,6 +31,13 @@ export interface ExecOptions {
 	timeout?: number;
 	intent?: string;
 	maxOutputBytes?: number;
+	/**
+	 * Force a specific runtime binary instead of the fastest detected one.
+	 * Used by the fetch tool, whose DNS-rebinding defense depends on socket
+	 * pinning that Bun's `node:http` shim silently ignores. Execution fails
+	 * closed if the required runtime is not installed.
+	 */
+	requireRuntime?: string;
 }
 
 export interface ExecFileOptions extends ExecOptions {

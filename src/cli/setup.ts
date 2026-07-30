@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,17 +43,28 @@ function isBuiltJs(p: string): boolean {
 	return p.endsWith(".js") || p.endsWith(".mjs");
 }
 
-function readSettings(path: string): ClaudeSettings {
+/** Exported for tests. Throws on malformed JSON instead of returning {} (fail closed). */
+export function readSettings(path: string): ClaudeSettings {
 	if (!existsSync(path)) return {};
+	const raw = readFileSync(path, "utf-8");
 	try {
-		return JSON.parse(readFileSync(path, "utf-8")) as ClaudeSettings;
-	} catch {
-		return {};
+		return JSON.parse(raw) as ClaudeSettings;
+	} catch (err) {
+		// Fail closed: returning {} here would silently destroy the user's
+		// existing hooks/MCP servers/permissions on the next write.
+		throw new Error(
+			`cannot parse ${path}: ${err instanceof Error ? err.message : String(err)}. ` +
+				"Fix the file (or move it aside) and re-run setup. No changes were made.",
+		);
 	}
 }
 
 function writeSettings(path: string, settings: ClaudeSettings): void {
 	mkdirSync(dirname(path), { recursive: true });
+	// Back up before overwriting so a bad write is recoverable.
+	if (existsSync(path)) {
+		copyFileSync(path, `${path}.bak`);
+	}
 	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 }
 
@@ -166,7 +177,14 @@ export async function setup(args: string[] = []): Promise<void> {
 	// --auto: write settings.json directly
 	const settingsPath = resolve(homedir(), ".claude", "settings.json");
 	console.log(`  Writing config to ${settingsPath}...`);
-	const settings = readSettings(settingsPath);
+	let settings: ClaudeSettings;
+	try {
+		settings = readSettings(settingsPath);
+	} catch (err) {
+		console.error(`\n  Setup aborted: ${err instanceof Error ? err.message : String(err)}\n`);
+		process.exitCode = 1;
+		return;
+	}
 	const changes = applyAutoConfig(settings, paths, opts.filterBash);
 
 	if (changes.length === 0) {
@@ -175,6 +193,7 @@ export async function setup(args: string[] = []): Promise<void> {
 		writeSettings(settingsPath, settings);
 		console.log();
 		for (const c of changes) console.log(`  + ${c}`);
+		console.log(`  Backup saved to ${settingsPath}.bak`);
 		console.log();
 	}
 

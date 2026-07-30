@@ -86,6 +86,57 @@ describe("SessionTracker", () => {
 		}
 	});
 
+	it("saveCumulative does not double-count when called repeatedly without new activity", () => {
+		const dir = join(tmpdir(), `cc-test-cumulative-idem-${process.pid}`);
+		mkdirSync(dir, { recursive: true });
+		const filePath = join(dir, "stats.json");
+
+		try {
+			const tracker = new SessionTracker(filePath);
+			tracker.trackCall("execute", 100);
+			tracker.trackIndexed(400);
+			tracker.saveCumulative();
+			tracker.saveCumulative();
+			tracker.saveCumulative();
+
+			const data = JSON.parse(readFileSync(filePath, "utf-8"));
+			assert.strictEqual(data.totalSessions, 1, "session counted once");
+			assert.strictEqual(data.totalBytesSaved, 400, "bytes not inflated by repeat saves");
+			assert.strictEqual(data.totalCalls, 1, "calls not inflated by repeat saves");
+			assert.strictEqual(data.perCommand.execute.calls, 1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("saveCumulative flushes only the delta when new activity follows a save", () => {
+		const dir = join(tmpdir(), `cc-test-cumulative-delta-${process.pid}`);
+		mkdirSync(dir, { recursive: true });
+		const filePath = join(dir, "stats.json");
+
+		try {
+			const tracker = new SessionTracker(filePath);
+			tracker.trackCall("execute", 100);
+			tracker.trackIndexed(400);
+			tracker.saveCumulative();
+
+			tracker.trackCall("execute", 60);
+			tracker.trackCall("search", 20);
+			tracker.trackIndexed(150);
+			tracker.saveCumulative();
+
+			const data = JSON.parse(readFileSync(filePath, "utf-8"));
+			assert.strictEqual(data.totalSessions, 1);
+			assert.strictEqual(data.totalBytesSaved, 550); // 400 + 150
+			assert.strictEqual(data.totalBytesProcessed, 550 + 180); // saved + returned(100+60+20)
+			assert.strictEqual(data.totalCalls, 3);
+			assert.strictEqual(data.perCommand.execute.calls, 2);
+			assert.strictEqual(data.perCommand.search.calls, 1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("formatReport includes cumulative section when file exists", () => {
 		const dir = join(tmpdir(), `cc-test-cumulative3-${process.pid}`);
 		mkdirSync(dir, { recursive: true });

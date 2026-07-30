@@ -40,22 +40,29 @@ describe("StreamCompressor", () => {
 	it("collapses adjacent identical lines and emits a counter", () => {
 		const c = new StreamCompressor();
 		// 5 identical, then a different line — should emit "first identical" once,
-		// then "(×N identical)", then the different line.
+		// then "(×N identical)" where N is the total count (executor-compatible),
+		// then the different line.
 		const input = "same\nsame\nsame\nsame\nsame\ndifferent\n";
 		const out = c.process(input);
 		assert.match(out, /^same\n/);
-		assert.ok(out.includes("×4 identical lines"));
+		assert.ok(out.includes("×5 identical lines"));
 		assert.ok(out.includes("different"));
 		const sameCount = (out.match(/^same$/gm) ?? []).length;
 		assert.strictEqual(sameCount, 1, "should emit 'same' exactly once");
 	});
 
+	it("keeps exactly-two identical lines verbatim (matches executor dedup semantics)", () => {
+		const c = new StreamCompressor();
+		const out = c.process("same\nsame\nnext\n");
+		assert.strictEqual(out, "same\nsame\nnext\n", "a single duplicate must not be dropped");
+	});
+
 	it("flush() drains buffered partial line and pending dedup counter", () => {
 		const c = new StreamCompressor();
 		c.process("dup\ndup\ndup\n");
-		// `dup\n` repeated; only the first emitted by process(), counter pending.
+		// `dup\n` ×3; only the first emitted by process(), counter pending.
 		const tail = c.flush();
-		assert.match(tail, /×2 identical lines/);
+		assert.match(tail, /×3 identical lines/);
 	});
 
 	it("flush() emits a buffered final line without trailing newline", () => {

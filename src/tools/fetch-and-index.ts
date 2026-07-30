@@ -77,6 +77,10 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 						language: "javascript",
 						code: fetchCode,
 						timeout: 30_000,
+						// Not negotiable: Bun's node:http shim ignores both `lookup` and
+						// `createConnection`, so the IP pinning that defends against DNS
+						// rebinding would be silently inert there. See fetch-code.ts.
+						requireRuntime: "node",
 					}),
 				);
 			} catch (e) {

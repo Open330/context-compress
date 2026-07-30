@@ -31,6 +31,12 @@ export class SessionTracker {
 
 	private cumulativeFile: string | null;
 
+	/** High-water marks: what saveCumulative() has already flushed. */
+	private savedKeptOut = 0;
+	private savedReturned = 0;
+	private savedCalls: Record<string, number> = {};
+	private sessionCounted = false;
+
 	constructor(cumulativeFile?: string) {
 		this.cumulativeFile = cumulativeFile ?? null;
 	}
@@ -69,12 +75,30 @@ export class SessionTracker {
 		}
 	}
 
-	/** Save current session stats to cumulative file */
+	/** Save current session stats to cumulative file (delta-only: safe to call repeatedly) */
 	saveCumulative(): void {
 		if (!this.cumulativeFile) return;
 		const snap = this.stats;
 		const keptOut = snap.bytesIndexed + snap.bytesSandboxed;
 		const totalReturned = Object.values(snap.bytesReturned).reduce((a, b) => a + b, 0);
+
+		// Only accumulate what changed since the last save — calling this on
+		// every stats request must not inflate cumulative totals.
+		const dKeptOut = keptOut - this.savedKeptOut;
+		const dReturned = totalReturned - this.savedReturned;
+		const dCalls: Record<string, number> = {};
+		for (const [name, count] of Object.entries(snap.calls)) {
+			const delta = count - (this.savedCalls[name] ?? 0);
+			if (delta > 0) dCalls[name] = delta;
+		}
+		if (
+			dKeptOut <= 0 &&
+			dReturned <= 0 &&
+			Object.keys(dCalls).length === 0 &&
+			this.sessionCounted
+		) {
+			return; // nothing new to flush
+		}
 
 		const cumulative = this.loadCumulative() ?? {
 			totalBytesSaved: 0,
@@ -86,22 +110,30 @@ export class SessionTracker {
 			perCommand: {},
 		};
 
-		cumulative.totalBytesSaved += keptOut;
-		cumulative.totalBytesProcessed += keptOut + totalReturned;
-		cumulative.totalCalls += Object.values(snap.calls).reduce((a, b) => a + b, 0);
-		cumulative.totalSessions += 1;
+		cumulative.totalBytesSaved += dKeptOut;
+		cumulative.totalBytesProcessed += dKeptOut + dReturned;
+		cumulative.totalCalls += Object.values(dCalls).reduce((a, b) => a + b, 0);
+		if (!this.sessionCounted) {
+			cumulative.totalSessions += 1;
+			this.sessionCounted = true;
+		}
 		cumulative.lastSeen = new Date().toISOString();
 
 		// Per-command breakdown
-		for (const [name, calls] of Object.entries(snap.calls)) {
+		for (const [name, delta] of Object.entries(dCalls)) {
 			if (!cumulative.perCommand[name]) {
 				cumulative.perCommand[name] = { calls: 0 };
 			}
-			cumulative.perCommand[name].calls += calls;
+			cumulative.perCommand[name].calls += delta;
 		}
 
 		try {
 			writeFileSync(this.cumulativeFile, JSON.stringify(cumulative, null, 2));
+			this.savedKeptOut = keptOut;
+			this.savedReturned = totalReturned;
+			for (const [name, count] of Object.entries(snap.calls)) {
+				this.savedCalls[name] = count;
+			}
 		} catch {
 			// Ignore write errors
 		}

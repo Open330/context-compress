@@ -65,6 +65,40 @@ function saveCache(cache: CacheMap): void {
 }
 
 /**
+ * Redact common secret shapes before text leaves the machine. Auto mode sends
+ * the command line plus a 500-byte output sample to the Anthropic API (or the
+ * `claude` CLI); both routinely contain tokens, keys, and passwords, so scrub
+ * first. Best-effort — do not treat as a guarantee.
+ */
+export function scrubSecrets(text: string): string {
+	return (
+		text
+			// Credentials embedded in a URL: postgres://user:pw@host
+			.replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s:/@]+):([^\s@/]+)@/gi, "$1$2:[REDACTED]@")
+			// mysql/mariadb inline password flag (-psecret)
+			.replace(/\b(mysql|mysqldump|mariadb|mariadb-dump)\b([^\n]*?)\s-p\S+/g, "$1$2 -p[REDACTED]")
+			// AWS access key id
+			.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[REDACTED]")
+			// GitHub / GitLab tokens
+			.replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{15,})\b/g, "[REDACTED]")
+			// Anthropic / OpenAI-style API keys
+			.replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+			// Bearer tokens
+			.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{10,}/gi, "Bearer [REDACTED]")
+			// PEM private keys
+			.replace(
+				/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+				"[REDACTED PRIVATE KEY]",
+			)
+			// key=value secrets (password, token, secret, api key, credentials)
+			.replace(
+				/\b(password|passwd|pwd|secret|token|api[_-]?key|auth[_-]?token|access[_-]?key|client[_-]?secret)(\s*[=:]\s*)("?)[^\s"']{4,}("?)/gi,
+				"$1$2[REDACTED]",
+			)
+	);
+}
+
+/**
  * Cache key: the first two whitespace-separated tokens of the command.
  * "git log -10 --abbrev-commit" → "git log"
  * Coarse enough to share decisions across argument variants, fine enough
@@ -178,7 +212,10 @@ async function decideBaseMode(
 ): Promise<[FilterMode, AutoResult["source"]]> {
 	if (opts.noLlm) return [heuristicMode(cmd, output), "heuristic"];
 
-	const prompt = buildPrompt(cmd, output.slice(0, SAMPLE_BYTES));
+	// Scrub before anything can reach an external API — this is the project's
+	// only egress point. The command line needs it as much as the output does:
+	// `psql "postgres://user:pw@host"`, `curl -H "Authorization: Bearer …"`.
+	const prompt = buildPrompt(scrubSecrets(cmd), scrubSecrets(output.slice(0, SAMPLE_BYTES)));
 	try {
 		return [await callAnthropic(prompt, opts), "api"];
 	} catch {

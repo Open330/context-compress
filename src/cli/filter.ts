@@ -204,7 +204,7 @@ function runBuffered(
 		resolve(127);
 	});
 
-	proc.on("close", (code) => {
+	proc.on("close", (code, signal) => {
 		const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
 		const stderr = Buffer.concat(stderrChunks).toString("utf-8");
 		// auto mode triggers an LLM call; concrete modes are sync. Both flow
@@ -213,7 +213,9 @@ function runBuffered(
 			process.stdout.write(compressed);
 			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
 			if (stderr) process.stderr.write(stderr);
-			resolve(code ?? 0);
+			if (signal) process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
+			// Signal-killed children report code=null — never mask that as success.
+			resolve(code ?? 1);
 		});
 	});
 }
@@ -235,9 +237,11 @@ function runStreaming(proc: ReturnType<typeof spawn>, resolve: (code: number) =>
 		resolve(127);
 	});
 
-	proc.on("close", (code) => {
+	proc.on("close", (code, signal) => {
 		const tail = compressor.flush();
 		if (tail) process.stdout.write(tail);
-		resolve(code ?? 0);
+		if (signal) process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
+		// Signal-killed children report code=null — never mask that as success.
+		resolve(code ?? 1);
 	});
 }

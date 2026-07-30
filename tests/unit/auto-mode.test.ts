@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { heuristicMode, pickModeAuto } from "../../src/util/auto-mode.js";
+import { heuristicMode, pickModeAuto, scrubSecrets } from "../../src/util/auto-mode.js";
 
 describe("heuristicMode", () => {
 	it("picks conservative for tiny outputs", () => {
@@ -57,5 +57,48 @@ describe("pickModeAuto with noLlm: true", () => {
 			noCache: true,
 		});
 		assert.strictEqual(r.source, "heuristic");
+	});
+});
+
+describe("scrubSecrets", () => {
+	it("redacts common token shapes before the sample leaves the machine", () => {
+		const sample = [
+			"AWS key: AKIAIOSFODNN7EXAMPLE",
+			"github: ghp_abcdefghijklmnopqrstuvwxyz123456",
+			"openai: sk-abcdefghijklmnopqrstuvwxyz",
+			"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+			"password=hunter2secret",
+			"API_KEY: abcdef1234567890",
+		].join("\n");
+		const scrubbed = scrubSecrets(sample);
+		assert.ok(!scrubbed.includes("AKIAIOSFODNN7EXAMPLE"));
+		assert.ok(!scrubbed.includes("ghp_abcdefghijklmnopqrstuvwxyz123456"));
+		assert.ok(!scrubbed.includes("sk-abcdefghijklmnopqrstuvwxyz"));
+		assert.ok(!scrubbed.includes("eyJhbGciOiJIUzI1NiJ9"));
+		assert.ok(!scrubbed.includes("hunter2secret"));
+		assert.ok(!scrubbed.includes("abcdef1234567890"));
+		assert.ok(scrubbed.includes("[REDACTED]"));
+	});
+
+	it("redacts credentials that appear in the command line, not just output", () => {
+		// The command line is sent to the LLM too — it is just as likely to carry
+		// a secret as the output sample is.
+		assert.ok(!scrubSecrets('psql "postgres://admin:s3cr3t@db.internal/app"').includes("s3cr3t"));
+		assert.ok(!scrubSecrets("mysql -uroot -phunter2 mydb").includes("hunter2"));
+		assert.ok(
+			!scrubSecrets('curl -H "Authorization: Bearer abcdefghijklmnop"').includes("abcdefghij"),
+		);
+		// The non-secret parts still have to survive, or mode selection degrades.
+		const scrubbed = scrubSecrets('psql "postgres://admin:s3cr3t@db.internal/app"');
+		assert.ok(scrubbed.includes("postgres://admin:"));
+		assert.ok(scrubbed.includes("@db.internal/app"));
+	});
+
+	it("leaves ordinary output untouched", () => {
+		const sample = "PASS src/foo.test.ts\n✓ works (3ms)\nTests: 5 passed, 5 total";
+		assert.strictEqual(scrubSecrets(sample), sample);
+		// URLs without credentials must not be touched by the userinfo rule.
+		const url = "cloning https://github.com/acme/repo.git into ./repo";
+		assert.strictEqual(scrubSecrets(url), url);
 	});
 });

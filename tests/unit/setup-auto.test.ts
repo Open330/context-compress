@@ -1,6 +1,9 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
-import { applyAutoConfig } from "../../src/cli/setup.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+import { applyAutoConfig, readSettings } from "../../src/cli/setup.js";
 
 const PATHS = {
 	serverEntry: "/abs/path/to/dist/index.js",
@@ -115,5 +118,26 @@ describe("applyAutoConfig", () => {
 		};
 		assert.deepStrictEqual(s.mcpServers["context-compress"].args, [PATHS.serverEntry]);
 		assert.ok(changes.some((c) => c.includes("Registered MCP server")));
+	});
+});
+
+describe("readSettings", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cc-setup-test-"));
+	after(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("returns {} when the settings file does not exist", () => {
+		assert.deepStrictEqual(readSettings(join(dir, "nope.json")), {});
+	});
+
+	it("parses a valid settings file", () => {
+		const p = join(dir, "valid.json");
+		writeFileSync(p, JSON.stringify({ theme: "dark", env: { A: "1" } }));
+		assert.deepStrictEqual(readSettings(p), { theme: "dark", env: { A: "1" } });
+	});
+
+	it("throws on malformed JSON instead of returning {} (fail closed — protects existing settings)", () => {
+		const p = join(dir, "broken.json");
+		writeFileSync(p, '{ "hooks": { "PreToolUse": [ },'); // truncated/invalid
+		assert.throws(() => readSettings(p), /cannot parse/);
 	});
 });

@@ -95,7 +95,10 @@ describe("balanced mode — find/ls -R lower threshold", () => {
 		const r = applyCommandFilter("find src -name '*.ts'", stdout, "balanced");
 		// Should now summarize (was previously below the 30-line threshold)
 		assert.strictEqual(r.filtered, true);
-		assert.ok(r.output.includes("files found"));
+		assert.ok(r.output.includes("entries"));
+		// Balanced keeps real paths — first entries verbatim, only the tail folds.
+		assert.ok(r.output.includes("src/dir0/file0.ts"), "keeps first entries verbatim");
+		assert.ok(r.output.includes("remainder by directory"));
 	});
 
 	it("still leaves a 15-line find result alone", () => {
@@ -154,7 +157,7 @@ Date:   Mon May 6 09:00:00 2026 +0900
 
 describe("aggressive mode — git status", () => {
 	const sample =
-		"On branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  (use \"git add <file>...\" to update)\n\tmodified:   src/foo.ts\n\tmodified:   src/bar.ts\n\nUntracked files:\n  (use \"git add <file>...\" to include)\n\tnew.ts\n";
+		'On branch main\nYour branch is up to date with \'origin/main\'.\n\nChanges not staged for commit:\n  (use "git add <file>..." to update)\n\tmodified:   src/foo.ts\n\tmodified:   src/bar.ts\n\nUntracked files:\n  (use "git add <file>..." to include)\n\tnew.ts\n';
 
 	it("uses terse markers (M/A/D) in aggressive mode", () => {
 		const r = applyCommandFilter("git status", sample, "aggressive");

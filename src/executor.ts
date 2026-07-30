@@ -6,11 +6,17 @@ import type { Config } from "./config.js";
 import { applyCommandFilter } from "./filters.js";
 import { applyFormatFilter } from "./format-filter.js";
 import { debug } from "./logger.js";
-import type { RuntimeMap } from "./runtime/index.js";
+import { findRuntimeBinary, type RuntimeMap } from "./runtime/index.js";
 import type { ExecFileOptions, ExecOptions, ExecResult } from "./types.js";
 import { formatBytes } from "./utils.js";
 
 const DEFAULT_TIMEOUT = 30_000;
+
+/** Human-readable timeout for kill messages — "1.5s" beats rounding to "2s". */
+function formatDuration(ms: number): string {
+	const s = ms / 1000;
+	return `${Number.isInteger(s) ? s : s.toFixed(1)}s`;
+}
 
 /** Strip ANSI escape codes from output */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires \x1b
@@ -104,7 +110,14 @@ function stripProgressLines(output: string): string {
 		// ANSI escape sequences (colors, cursor movement)
 		if (ANSI_RE.test(l) && trimmed.replace(ANSI_RE_G, "").trim() === "") return false;
 		// Pure progress bars: [=====>    ] 45%  or  ████░░░░ 45%
-		if (/^[\s[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) && trimmed.length > 3) return false;
+		// Must contain an actual progress marker — otherwise plain numeric
+		// lines ("12345") and separators ("----") would be deleted too.
+		if (
+			/^[\s[│├└─═━▓░█▒▏▎▍▌▋▊▉\]>=#\-.\d%]+$/.test(trimmed) &&
+			trimmed.length > 3 &&
+			/%|=>|[▓░█▒▏▎▍▌▋▊▉]/.test(trimmed)
+		)
+			return false;
 		// Spinner lines: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏ or - \ | /
 		if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\-\\|/]\s/.test(trimmed)) return false;
 		// Download progress: "Downloading 45.2 MB / 100.3 MB"
@@ -303,7 +316,26 @@ export class SubprocessExecutor {
 			};
 		}
 
-		const { plugin, runtime } = entry;
+		const { plugin } = entry;
+		let runtime = entry.runtime;
+
+		// A caller may need a specific runtime for correctness, not speed (the
+		// fetch tool's IP pinning is a no-op under Bun). Fail closed rather than
+		// silently running on a runtime that drops the guarantee.
+		if (opts.requireRuntime && runtime !== opts.requireRuntime) {
+			const forced = findRuntimeBinary(opts.requireRuntime);
+			if (!forced) {
+				return {
+					stdout: "",
+					stderr: `This operation requires the "${opts.requireRuntime}" runtime, which was not found on PATH.`,
+					exitCode: 1,
+					truncated: false,
+					killed: false,
+				};
+			}
+			runtime = forced;
+		}
+
 		const timeout = opts.timeout ?? DEFAULT_TIMEOUT;
 		const maxOutput = opts.maxOutputBytes ?? this.config.maxOutputBytes;
 		const tmpDir = this.createTempDir();
@@ -406,7 +438,8 @@ export class SubprocessExecutor {
 			const stdoutChunks: Buffer[] = [];
 			const stderrChunks: Buffer[] = [];
 			let totalBytes = 0;
-			let killed = false;
+			let capped = false;
+			let timedOut = false;
 			let networkBytes: number | undefined;
 			let resolved = false;
 
@@ -414,17 +447,26 @@ export class SubprocessExecutor {
 				cwd,
 				env: { ...this.env, TMPDIR: cwd },
 				stdio: ["ignore", "pipe", "pipe"],
-				timeout,
+				// No `timeout` option here — it SIGTERMs only the direct child,
+				// leaking grandchildren in the detached process group. Our own
+				// timer below kills the whole tree instead.
 				shell: useShell,
 				detached: process.platform !== "win32",
 			});
 
 			this.activeProcesses.add(proc);
 
+			const timer = setTimeout(() => {
+				timedOut = true;
+				if (proc.pid) killProcessTree(proc.pid);
+			}, timeout);
+			// Don't let the timer keep the process alive on its own.
+			timer.unref?.();
+
 			proc.stdout?.on("data", (chunk: Buffer) => {
 				totalBytes += chunk.length;
 				if (totalBytes > hardCap) {
-					killed = true;
+					capped = true;
 					if (proc.pid) killProcessTree(proc.pid);
 					return;
 				}
@@ -434,7 +476,7 @@ export class SubprocessExecutor {
 			proc.stderr?.on("data", (chunk: Buffer) => {
 				totalBytes += chunk.length;
 				if (totalBytes > hardCap) {
-					killed = true;
+					capped = true;
 					if (proc.pid) killProcessTree(proc.pid);
 					return;
 				}
@@ -442,6 +484,7 @@ export class SubprocessExecutor {
 			});
 
 			proc.on("error", (err) => {
+				clearTimeout(timer);
 				debug("Process error:", err.message);
 				this.activeProcesses.delete(proc);
 				if (!resolved) {
@@ -457,11 +500,13 @@ export class SubprocessExecutor {
 			});
 
 			proc.on("close", (code) => {
+				clearTimeout(timer);
 				this.activeProcesses.delete(proc);
 				if (resolved) return;
 				resolved = true;
 				let stdout = Buffer.concat(stdoutChunks).toString("utf-8");
 				let stderr = Buffer.concat(stderrChunks).toString("utf-8");
+				const killed = capped || timedOut;
 
 				// Extract network bytes from JS/TS stderr marker
 				const netMatch = stderr.match(/__CM_NET__:(\d+)/);
@@ -470,8 +515,11 @@ export class SubprocessExecutor {
 					stderr = stderr.replace(/__CM_NET__:\d+\n?/, "");
 				}
 
-				if (killed) {
+				if (capped) {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
+				}
+				if (timedOut) {
+					stderr += `\n[killed: timed out after ${formatDuration(timeout)}]`;
 				}
 
 				// Strip ANSI codes first so command-specific filters can detect markers
@@ -511,7 +559,9 @@ export class SubprocessExecutor {
 				resolve({
 					stdout,
 					stderr,
-					exitCode: code,
+					// Signal kills report code=null — map to 1 so a killed
+					// process is never mistaken for a successful one.
+					exitCode: code ?? (killed ? 1 : null),
 					truncated,
 					killed,
 					networkBytes,

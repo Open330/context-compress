@@ -7,6 +7,9 @@
  * Config: Reads CONTEXT_COMPRESS_* env vars for opt-out of blocking behavior.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 const TOOL_PREFIX = "context-compress";
 
 // Read config from env
@@ -41,12 +44,44 @@ const WRAP_TARGETS: RegExp[] = [
 	/^helm\s+(list|status|history|get)/,
 	/^(make|gradle|bazel|nx|turbo)\b/,
 	/^ps\s+(aux|-ef)/,
-	/^(top|htop)\b/,
+	// NOTE: top/htop/watch and follow-mode commands are deliberately absent —
+	// they never terminate, and buffered `wrap` would hang until Bash timeout.
 	/^(df|du)\b/,
 	/^(go|rustc)\s+(test|build|vet|run)/,
 ];
 
-function shouldWrap(cmd: string): boolean {
+/**
+ * Does a package.json script body start a long-running watcher?
+ *
+ * `npm test` is on the wrap allowlist, but in a great many projects it maps to
+ * a bare `vitest`/`jest --watch`, which never exits. Matching on the command
+ * line alone cannot see that, so the script body has to be read.
+ */
+function isWatcherScript(body: string): boolean {
+	const s = body.trim();
+	if (/(^|\s)(--watch|--watchAll|--hot|-w)(\s|$)/.test(s)) return true;
+	if (/(^|\s)(nodemon|concurrently|watchexec|cargo-watch|tsc-watch)(\s|$)/.test(s)) return true;
+	// Tools that watch by default unless given a one-shot subcommand.
+	if (/(^|\s)vitest(\s|$)/.test(s) && !/(^|\s)vitest\s+(run|related|bench)\b/.test(s)) return true;
+	if (/(^|\s)vite(\s|$)/.test(s) && !/(^|\s)vite\s+(build|preview|optimize)\b/.test(s)) return true;
+	if (/(^|\s)(next|nuxt|astro|remix|svelte-kit|expo)\s+(dev|start)\b/.test(s)) return true;
+	return false;
+}
+
+/** Body of a package.json script in `cwd`, or null if unreadable/absent. */
+function packageScriptBody(script: string, cwd: string): string | null {
+	try {
+		const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf-8")) as {
+			scripts?: Record<string, unknown>;
+		};
+		const body = pkg.scripts?.[script];
+		return typeof body === "string" ? body : null;
+	} catch {
+		return null;
+	}
+}
+
+function shouldWrap(cmd: string, cwd: string): boolean {
 	const trimmed = cmd.trim();
 	// Don't wrap if user is redirecting output to a file/device — they want raw.
 	if (/(?:^|\s)(?:>|>>|\d?>&)\s*\S/.test(trimmed)) return false;
@@ -55,6 +90,27 @@ function shouldWrap(cmd: string): boolean {
 	// Don't wrap multi-statement scripts (semicolons, &&, ||) — too hard to
 	// reason about state side-effects across statements.
 	if (/&&|\|\||;/.test(trimmed)) return false;
+	// Never-ending / interactive commands: buffered wrap captures stdout until
+	// exit, so these would hang with zero output until the Bash timeout.
+	if (/^(top|htop|watch)\b/.test(trimmed)) return false;
+	if (/\blogs\b[^|]*\s(-[a-zA-Z]*f|--follow)\b/.test(trimmed)) return false; // docker/kubectl logs -f
+	if (/^docker\s+stats\b/.test(trimmed) && !trimmed.includes("--no-stream")) return false;
+	if (/\s--?watch\b/.test(trimmed)) return false; // tsc --watch, vitest --watch, etc.
+	if (/^cargo\s+watch\b/.test(trimmed)) return false;
+	// Bare `vitest` starts watch mode; only the one-shot subcommands are safe.
+	if (/^vitest\b/.test(trimmed) && !/^vitest\s+(run|related|bench)\b/.test(trimmed)) return false;
+	// Dev servers / watchers via package scripts never terminate either.
+	if (/^(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|watch|serve)\b/.test(trimmed)) return false;
+	// Watcher-ish build-tool targets: `make dev`, `nx serve app`, `turbo watch`.
+	if (/^(make|gradle|bazel|nx|turbo)\s+\S*\b(dev|watch|serve|start)\b/.test(trimmed)) return false;
+	// Finally, resolve package scripts: the name says nothing about whether the
+	// body exits ("npm test" → "vitest" is a watcher).
+	const script = trimmed.match(/^(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?([A-Za-z0-9:._-]+)/);
+	if (script) {
+		const name = script[1] === "t" ? "test" : script[1];
+		const body = packageScriptBody(name, cwd);
+		if (body && isWatcherScript(body)) return false;
+	}
 	return WRAP_TARGETS.some((re) => re.test(trimmed));
 }
 
@@ -116,7 +172,9 @@ if (tool === "Bash") {
 
 	// Auto-wrap output-heavy commands so their stdout flows through the
 	// compression pipeline transparently. Opt-in via CONTEXT_COMPRESS_FILTER_BASH=1.
-	if (filterBash && shouldWrap(command)) {
+	// `cwd` comes from the hook payload; fall back to our own for direct invocations.
+	const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
+	if (filterBash && shouldWrap(command, cwd)) {
 		const modeFlag = ccMode ? ` --mode ${ccMode}` : "";
 		respond({
 			updatedInput: {

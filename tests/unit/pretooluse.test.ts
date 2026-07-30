@@ -1,6 +1,8 @@
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -45,7 +47,7 @@ describe("pretooluse hook", () => {
 	it("blocks inline HTTP calls in Bash tool", () => {
 		const output = runHook({
 			tool_name: "Bash",
-			tool_input: { command: 'python -c "import requests; requests.get(\'https://x.com\')"' },
+			tool_input: { command: "python -c \"import requests; requests.get('https://x.com')\"" },
 		});
 
 		const parsed = JSON.parse(output) as {
@@ -155,10 +157,7 @@ describe("pretooluse hook", () => {
 		const parsed = JSON.parse(output) as {
 			hookSpecificOutput: { updatedInput?: { command?: string } };
 		};
-		assert.match(
-			parsed.hookSpecificOutput.updatedInput?.command ?? "",
-			/^context-compress wrap '/,
-		);
+		assert.match(parsed.hookSpecificOutput.updatedInput?.command ?? "", /^context-compress wrap '/);
 	});
 
 	it("auto-wraps npm install with custom CONTEXT_COMPRESS_BIN", () => {
@@ -213,6 +212,85 @@ describe("pretooluse hook", () => {
 			{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
 		);
 		assert.strictEqual(output, "", "compound commands should pass through unchanged");
+	});
+
+	it("does NOT wrap never-ending commands (they would hang under buffered wrap)", () => {
+		const streaming = [
+			"top",
+			"htop",
+			"watch ls",
+			"kubectl logs -f my-pod",
+			"docker logs --follow app",
+			"docker stats",
+			"npm run dev",
+			"npm start",
+			"cargo watch",
+		];
+		for (const command of streaming) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command } },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
+			);
+			assert.strictEqual(output, "", `"${command}" must not be wrapped`);
+		}
+	});
+
+	it("still wraps one-shot commands similar to streaming ones", () => {
+		for (const command of [
+			"kubectl logs my-pod",
+			"docker stats --no-stream",
+			"docker logs --tail 50 app",
+		]) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command } },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: undefined },
+			);
+			const parsed = JSON.parse(output) as {
+				hookSpecificOutput: { updatedInput?: { command?: string } };
+			};
+			assert.match(
+				parsed.hookSpecificOutput.updatedInput?.command ?? "",
+				/wrap '/,
+				`"${command}" should be wrapped`,
+			);
+		}
+	});
+
+	it("does NOT wrap a package script whose body is a watcher", () => {
+		// `npm test` is on the allowlist, but here it maps to a bare `vitest`,
+		// which never exits — the hook has to read package.json to know that.
+		const dir = mkdtempSync(join(tmpdir(), "cc-hook-watch-"));
+		try {
+			writeFileSync(
+				join(dir, "package.json"),
+				JSON.stringify({ scripts: { test: "vitest", dev: "next dev", ci: "vitest run" } }),
+			);
+			for (const command of ["npm test", "npm run dev", "pnpm run test"]) {
+				const output = runHook(
+					{ tool_name: "Bash", tool_input: { command }, cwd: dir },
+					{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
+				);
+				assert.strictEqual(output, "", `"${command}" must not be wrapped`);
+			}
+			// A one-shot script in the same project still gets wrapped.
+			const wrapped = runHook(
+				{ tool_name: "Bash", tool_input: { command: "npm run ci" }, cwd: dir },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
+			);
+			assert.match(wrapped, /wrap /, "npm run ci → `vitest run` exits, so wrap it");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does NOT wrap watcher-style build-tool targets", () => {
+		for (const command of ["make dev", "nx serve my-app", "turbo watch"]) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command } },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1" },
+			);
+			assert.strictEqual(output, "", `"${command}" must not be wrapped`);
+		}
 	});
 
 	it("does NOT wrap commands not on the WRAP_TARGETS allowlist", () => {

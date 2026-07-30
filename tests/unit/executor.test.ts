@@ -242,3 +242,61 @@ describe("groupErrorLines", () => {
 		assert.strictEqual(result, input);
 	});
 });
+
+describe("SubprocessExecutor requireRuntime", () => {
+	beforeEach(() => {
+		isolateConfigHome();
+		resetConfig();
+	});
+
+	afterEach(() => {
+		resetConfig();
+		if (ORIGINAL_HOME === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = ORIGINAL_HOME;
+		}
+	});
+
+	it("fails closed when the required runtime is not installed", async (t) => {
+		const { executor, runtimes } = await createExecutor();
+		if (!runtimes.has("javascript")) {
+			t.skip("javascript runtime not detected");
+			return;
+		}
+		try {
+			const result = await executor.execute({
+				language: "javascript",
+				code: "console.log('should not run')",
+				requireRuntime: "definitely-not-a-real-runtime",
+				timeout: 10_000,
+			});
+			assert.strictEqual(result.exitCode, 1);
+			assert.match(result.stderr, /requires the "definitely-not-a-real-runtime" runtime/);
+			assert.strictEqual(result.stdout, "", "code must not run on a substitute runtime");
+		} finally {
+			executor.shutdown();
+		}
+	});
+
+	it("runs on the required runtime when it is available", async (t) => {
+		const { executor, runtimes } = await createExecutor();
+		if (!runtimes.has("javascript")) {
+			t.skip("javascript runtime not detected");
+			return;
+		}
+		try {
+			const result = await executor.execute({
+				language: "javascript",
+				// process.versions.bun exists only under Bun.
+				code: "console.log(process.versions.bun ? 'bun' : 'node')",
+				requireRuntime: "node",
+				timeout: 10_000,
+			});
+			assert.strictEqual(result.exitCode, 0, result.stderr);
+			assert.strictEqual(result.stdout.trim(), "node");
+		} finally {
+			executor.shutdown();
+		}
+	});
+});

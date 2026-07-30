@@ -245,6 +245,8 @@ context-compress offers four compression modes that trade fidelity for compactne
 | `aggressive` | Drop metadata too — git log → oneline, ls -la → name+size, find lower threshold, grep grouped | Maximum token savings; agent will rarely need the dropped detail |
 | `auto` | An LLM (Anthropic API or `claude -p`) picks one of the above per command, based on a 500-byte sample of the output. Decisions cached for 24h | You don't want to think about it — let the model judge per output |
 
+> **Privacy note for `auto` mode:** the command line and a 500-byte output sample are sent to the Anthropic API (or the local `claude` CLI) — it is the only context-compress feature that sends your data anywhere. Common secret shapes (API keys, tokens, `password=...`, private keys, URL credentials) are scrubbed from both before sending, best-effort. If either may contain credentials, prefer a fixed mode.
+
 ```bash
 # CLI flag (per-call override)
 context-compress wrap --mode aggressive "git log -50"
@@ -303,7 +305,8 @@ Aggressive mode covers a wider command surface than the table above hints — it
 What balanced now does (over conservative):
 - `ls -l*` drops `total N`, `.`/`..` entries (universal noise) but keeps perms/dates
 - `git log` keeps headers + first 3 body lines per commit, replacing the rest with `[+N lines omitted]`
-- `find` / `ls -R` summarizes per-directory once output exceeds 20 entries
+- `find` / `ls -R` keeps the first 20 entries verbatim, then summarizes the remainder per-directory
+- `kubectl get` (>30 rows) folds healthy rows into per-namespace/status counts but keeps non-healthy rows verbatim; output with no `STATUS` column (`get svc`, `get events`) keeps the first 20 rows verbatim instead, since there is nothing to fold on
 - Generic dedup/progress/group runs at 5KB instead of 10KB
 
 > RTK has a single fixed compression strategy — comparable to context-compress `aggressive`. context-compress lets the agent choose: reach for `aggressive` when the question is "what changed", `balanced` when the question is "explain why".
@@ -425,7 +428,7 @@ context-compress filter --cmd "git push" < captured.log    # pipe filter
 
 ### Bash auto-wrap (transparent mode)
 
-Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-heavy `Bash` calls through `context-compress wrap` automatically — the agent doesn't need to call `execute()` to benefit. Combine with `CONTEXT_COMPRESS_MODE=aggressive` for maximum compression.
+Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-heavy `Bash` calls through `context-compress wrap` automatically — the agent doesn't need to call `execute()` to benefit. Combine with `CONTEXT_COMPRESS_MODE=aggressive` for maximum compression. Never-ending commands (`top`, `kubectl logs -f`, `docker stats`, dev servers, watch modes) are never wrapped — buffered wrapping would hang them. That includes package scripts: the hook reads `package.json`, so `npm test` is left alone when it maps to a watcher like a bare `vitest`.
 
 ### Doctor Output Example
 
@@ -517,7 +520,8 @@ context-compress/
 | Credential leakage | `passthroughEnvVars` defaults to `[]` — zero env vars passed to subprocesses unless opted in |
 | Shell injection | `execFileSync` with array arguments throughout — no string interpolation into shells |
 | SSRF / private-IP fetch | `fetch_and_index` blocks RFC1918, link-local, loopback, IPv4-mapped IPv6 (incl. hex form `::ffff:HHHH:HHHH`), CGNAT |
-| DNS rebinding (TOCTOU) | `resolveAndValidate` + URL pinning to the resolved IP with original `Host` header preserved |
+| DNS rebinding (TOCTOU) | `resolveAndValidate`, then the socket is opened directly against the validated IP via `createConnection` while the URL keeps its hostname (so TLS SNI and cert validation still apply). Runs on the Node runtime only — Bun's `node:http` shim ignores connection pinning, so the fetch tool refuses to run there rather than proceed unpinned |
+| Redirect-based SSRF | Redirects are reported, never followed: the target has not been through `resolveAndValidate` |
 | Path traversal | `isWithinProject` uses `realpathSync` to defeat symlink escapes; falls back to string-prefix for not-yet-existing paths |
 | Hook self-modification | Hooks are read-only — no `fs.writeFileSync` in `src/hooks/`. Hook integrity SHA-256 verified by `doctor` |
 | Arbitrary code execution | No `upgrade` command — no `git clone` or `npm install` at runtime. Setup writes only to `~/.claude/settings.json` |

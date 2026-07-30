@@ -54,13 +54,15 @@ export function applyCommandFilter(
 	if (cmd === "npm" || cmd === "yarn" || cmd === "pnpm" || cmd === "bun")
 		return filterPackageManager(fullCmd, stdout, mode);
 
-	// Test runners
+	// Test runners — match on the command token, never substrings of the whole
+	// command line ("cat latest.log" and "ls test-results/" must NOT route here;
+	// filterTestOutput can drop everything before the first failure marker).
 	if (
-		fullCmd.includes("test") ||
-		fullCmd.includes("jest") ||
-		fullCmd.includes("vitest") ||
-		fullCmd.includes("pytest") ||
-		fullCmd.includes("cargo test")
+		/^(pytest|py\.test|jest|vitest|mocha|ava|bats|ctest|phpunit|rspec|gotestsum)$/.test(cmd) ||
+		(cmd === "go" && /^go\s+test\b/.test(fullCmd)) ||
+		((cmd === "npx" || cmd === "bunx" || cmd === "pnpx") &&
+			/^\S+\s+(jest|vitest|mocha|ava|pytest)\b/.test(fullCmd)) ||
+		/\bnode\s+.*--test\b/.test(fullCmd)
 	) {
 		return filterTestOutput(stdout);
 	}
@@ -78,7 +80,12 @@ export function applyCommandFilter(
 
 	// grep — aggressive mode only (group by file, drop long lines)
 	if (cmd === "grep" || cmd === "rg" || cmd === "ripgrep") {
-		if (mode === "aggressive") return filterGrep(stdout);
+		if (mode === "aggressive") {
+			// Recursive greps prefix each match with the file path even without -n;
+			// rg is recursive (and path-prefixed) by default.
+			const recursive = cmd !== "grep" || /(^|\s)-[a-zA-Z]*(r|R)/.test(fullCmd);
+			return filterGrep(stdout, recursive);
+		}
 	}
 
 	// System tabular commands: df, du, ps — aggressive mode only.
@@ -122,8 +129,19 @@ export function filterGit(
 	// the remainder with "[+N more lines]". Keeps the "why" intact while
 	// dropping verbose tail content.
 	if (/git\s+log/.test(cmd) && !cmd.includes("--oneline")) {
+		// Custom formats, graphs, and patch/name output don't follow the
+		// "commit / Author: / Date: / subject" grammar — parsing them as if
+		// they did yields empty or mangled output. Pass them through.
+		if (/--(format|pretty|graph|patch|stat|name-only|name-status|numstat)\b|\s-p(\s|$)/.test(cmd)) {
+			return { output: stdout, filtered: false };
+		}
 		if (mode === "aggressive") {
-			return { output: aggressiveGitLog(stdout), filtered: true };
+			const collapsed = aggressiveGitLog(stdout);
+			// Safety net: never return empty output for non-empty input.
+			if (collapsed.trim() === "" && stdout.trim() !== "") {
+				return { output: stdout, filtered: false };
+			}
+			return { output: collapsed, filtered: true };
 		}
 		if (mode === "balanced") {
 			const truncated = balancedGitLog(stdout);
@@ -509,8 +527,10 @@ export function filterContainerOutput(cmd: string, stdout: string): FilterResult
 		return { output: filtered.join("\n"), filtered: true };
 	}
 
-	// kubectl get / describe / logs with many rows: summarize per namespace/status
-	if (/^kubectl\s+(get|describe)\b/.test(cmd)) {
+	// kubectl get with many rows: summarize per namespace/status.
+	// (kubectl describe is key-value text, not a table — summarizing it as
+	// columns destroys the entire output, so it passes through untouched.)
+	if (/^kubectl\s+get\b/.test(cmd)) {
 		const lines = stdout.split("\n").filter((l) => l.length > 0);
 		// Keep header and short outputs as-is.
 		if (lines.length <= 30) return { output: stdout, filtered: false };
@@ -524,19 +544,54 @@ export function filterContainerOutput(cmd: string, stdout: string): FilterResult
 		const hasNamespace = headerCols[0]?.toUpperCase() === "NAMESPACE";
 		const statusIdx = headerCols.findIndex((c) => /^STATUS$/i.test(c));
 
+		// Not a recognizable table (e.g. -o json/yaml) — pass through rather than
+		// produce garbage counts.
+		if (headerCols.length < 2) return { output: stdout, filtered: false };
+
+		// No STATUS column (`get svc`, `get events`, `get cm`, `get pv`, …). There
+		// is no health signal to fold on, and counting by namespace alone would
+		// throw away every name, IP, and port — the only content such output has.
+		// Keep the head verbatim and count the tail instead.
+		if (statusIdx < 0) {
+			const KEEP = 20;
+			const head = rows.slice(0, KEEP);
+			return {
+				output: [
+					header,
+					...head,
+					`  … ${rows.length - head.length} more rows (no STATUS column to summarize by)`,
+				].join("\n"),
+				filtered: true,
+			};
+		}
+
+		// Unhealthy rows are kept verbatim — the whole point of `get` at this
+		// scale is finding what's broken; healthy rows fold into counts.
+		const HEALTHY = /^(Running|Succeeded|Completed|Ready|Active|Bound|Available)$/;
+		const keptRows: string[] = [];
 		const counts = new Map<string, number>();
 		for (const row of rows) {
 			const cols = row.split(/\s{2,}/);
 			const ns = hasNamespace ? cols[0] : "(default)";
-			const status = statusIdx >= 0 ? cols[statusIdx] : "—";
+			const status = cols[statusIdx] ?? "—";
+			if (!HEALTHY.test(status)) {
+				keptRows.push(row);
+				continue;
+			}
 			const key = `${ns}\t${status}`;
 			counts.set(key, (counts.get(key) ?? 0) + 1);
 		}
 
-		const summaryLines = [`${header}`, `(${rows.length} rows summarized by namespace/status)`];
+		const summaryLines = [
+			`${header}`,
+			`(${rows.length} rows: ${keptRows.length} non-healthy kept verbatim, rest summarized by namespace/status)`,
+		];
 		for (const [key, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
 			const [ns, status] = key.split("\t");
 			summaryLines.push(`  ${ns} — ${status}: ${n}`);
+		}
+		if (keptRows.length > 0) {
+			summaryLines.push("── Non-healthy rows ──", ...keptRows);
 		}
 		return { output: summaryLines.join("\n"), filtered: true };
 	}
@@ -584,6 +639,27 @@ export function filterFileList(
 		}
 
 		if (dirs.size > minDirs) {
+			if (mode === "balanced") {
+				// Balanced keeps names: first 20 entries verbatim, the tail folds
+				// into per-directory counts. An agent asking "what's there" still
+				// sees real paths; only the bulk is summarized.
+				const KEEP = 20;
+				const head = lines.slice(0, KEEP);
+				const tailDirs = new Map<string, number>();
+				for (const line of lines.slice(KEEP)) {
+					const parts = line.split("/");
+					const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
+					tailDirs.set(dir, (tailDirs.get(dir) ?? 0) + 1);
+				}
+				const summary = Array.from(tailDirs.entries())
+					.sort((a, b) => b[1] - a[1])
+					.map(([dir, count]) => `  ${dir}/ (${count} files)`)
+					.join("\n");
+				return {
+					output: `${lines.length} entries (first ${head.length} shown, rest summarized):\n${head.join("\n")}\n…remainder by directory:\n${summary}`,
+					filtered: true,
+				};
+			}
 			const summary = Array.from(dirs.entries())
 				.sort((a, b) => b[1] - a[1])
 				.map(([dir, count]) => `  ${dir}/ (${count} files)`)
@@ -676,29 +752,66 @@ function formatSize(s: string): string {
 }
 
 /**
+ * Does the text before the first ":" plausibly name a file?
+ *
+ * grep gives no way to tell a "path:line:content" hit from a match whose own
+ * content happens to contain colons, so the prefix has to be vetted. It never
+ * contains whitespace and is never a bare number, which rules out log
+ * timestamps ("12:30:15 ERROR …") — those used to be parsed as file "12",
+ * line 30, with the message mangled into a fake location.
+ *
+ * `strict` additionally demands a separator or an extension. Use it for the
+ * "path:line:content" form, where a false positive silently invents a line
+ * number; the looser check is enough for "path:content", where the worst case
+ * is an extensionless filename kept verbatim.
+ */
+function looksLikePathPrefixed(line: string, strict: boolean): boolean {
+	const idx = line.indexOf(":");
+	if (idx <= 0) return false;
+	const prefix = line.slice(0, idx);
+	if (/\s/.test(prefix) || /^\d+$/.test(prefix)) return false;
+	if (!strict) return true;
+	return prefix.includes("/") || prefix.includes("\\") || /\.[A-Za-z0-9]{1,12}$/.test(prefix);
+}
+
+/**
  * Group grep output by file, truncate long matched lines, drop redundant context.
  * Aggressive only — balanced mode passes grep through.
  */
-export function filterGrep(stdout: string): FilterResult {
+export function filterGrep(stdout: string, recursive = false): FilterResult {
 	const lines = stdout.split("\n").filter((l) => l.length > 0);
 	if (lines.length === 0) return { output: stdout, filtered: false };
 
 	const byFile = new Map<string, string[]>();
+	const pushHit = (file: string, hit: string) => {
+		const arr = byFile.get(file) ?? [];
+		arr.push(hit);
+		byFile.set(file, arr);
+	};
 	for (const line of lines) {
 		// grep -rn / rg: "path:lineNo:content"
-		const m = line.match(/^([^:]+):(\d+):(.*)$/);
-		if (!m) {
-			// Plain match — group under "(no path)"
-			const arr = byFile.get("(no path)") ?? [];
-			arr.push(line.length > 100 ? `${line.slice(0, 100)}…` : line);
-			byFile.set("(no path)", arr);
+		// The path check matters: without it a timestamped log line matched by a
+		// single-file grep ("2024-01-01 12:30:15 ERROR boom") parses as
+		// file "2024-01-01 12" / line 30, mangling content into a fake location.
+		const m = looksLikePathPrefixed(line, true) ? line.match(/^([^:]+):(\d+):(.*)$/) : null;
+		if (m) {
+			const [, file, lineNo, content] = m;
+			const truncated = content.length > 100 ? `${content.slice(0, 100)}…` : content;
+			pushHit(file, `  L${lineNo}: ${truncated.trim()}`);
 			continue;
 		}
-		const [, file, lineNo, content] = m;
-		const truncated = content.length > 100 ? `${content.slice(0, 100)}…` : content;
-		const arr = byFile.get(file) ?? [];
-		arr.push(`  L${lineNo}: ${truncated.trim()}`);
-		byFile.set(file, arr);
+		// grep -r without -n: "path:content" — don't lose the file name.
+		if (recursive && looksLikePathPrefixed(line, false)) {
+			const m2 = line.match(/^([^:]+):(.*)$/);
+			if (m2) {
+				const [, file, content] = m2;
+				const truncated = content.length > 100 ? `${content.slice(0, 100)}…` : content;
+				pushHit(file, `  ${truncated.trim()}`);
+				continue;
+			}
+		}
+		// Plain match with no path prefix
+		pushHit("(no path)", line.length > 100 ? `${line.slice(0, 100)}…` : line);
 	}
 
 	const out: string[] = [];

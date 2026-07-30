@@ -1,5 +1,5 @@
 import { accessSync, constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { debug } from "../logger.js";
 import type { Language } from "../types.js";
 // Import all language plugins
@@ -85,6 +85,20 @@ export function detectRuntimes(): RuntimeMap {
 	}
 
 	return map;
+}
+
+/**
+ * Resolve one specific runtime binary by name, or null when it isn't installed.
+ *
+ * Used when a caller cannot accept the fastest available runtime (see
+ * ExecOptions.requireRuntime). The currently-running binary is checked first: it
+ * is frequently the exact one asked for and may live outside PATH (nvm shims,
+ * packaged installs).
+ */
+export function findRuntimeBinary(name: string): string | null {
+	const self = basename(process.execPath).replace(/\.exe$/i, "");
+	if (self === name) return process.execPath;
+	return commandExists(name) ? name : null;
 }
 
 /**
