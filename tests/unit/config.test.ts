@@ -1,11 +1,13 @@
 import assert from "node:assert";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { getConfig, loadConfig, resetConfig } from "../../src/config.js";
 
 const ENV_KEYS = [
 	"CONTEXT_COMPRESS_DEBUG",
 	"CONTEXT_COMPRESS_PASSTHROUGH_ENV",
-	"CONTEXT_COMPRESS_BLOCK_CURL",
 	"CONTEXT_COMPRESS_MAX_OUTPUT_BYTES",
 	"CONTEXT_COMPRESS_HARD_CAP_BYTES",
 	"CONTEXT_COMPRESS_SEARCH_MAX_BYTES",
@@ -46,7 +48,6 @@ describe("config", () => {
 		const cfg = loadConfig();
 		assert.deepStrictEqual(cfg.passthroughEnvVars, []);
 		assert.strictEqual(cfg.debug, false);
-		assert.strictEqual(cfg.blockCurl, true);
 	});
 
 	it("enables debug when CONTEXT_COMPRESS_DEBUG=1", () => {
@@ -59,12 +60,6 @@ describe("config", () => {
 		process.env.CONTEXT_COMPRESS_PASSTHROUGH_ENV = "GH_TOKEN,AWS_PROFILE";
 		const cfg = loadConfig();
 		assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN", "AWS_PROFILE"]);
-	});
-
-	it("sets blockCurl false when CONTEXT_COMPRESS_BLOCK_CURL=0", () => {
-		process.env.CONTEXT_COMPRESS_BLOCK_CURL = "0";
-		const cfg = loadConfig();
-		assert.strictEqual(cfg.blockCurl, false);
 	});
 
 	it("getConfig returns loaded singleton", () => {
@@ -93,7 +88,34 @@ describe("config", () => {
 		// With HOME pointing to a non-existent directory, loadFileConfig returns {}
 		// so we get defaults
 		const cfg = loadConfig("/tmp/nonexistent-dir-" + Date.now());
-		assert.strictEqual(cfg.blockCurl, true);
 		assert.strictEqual(cfg.maxOutputBytes, 102_400);
+	});
+
+	it("loads server file settings without exposing hook-only keys", () => {
+		const dir = mkdtempSync(join(tmpdir(), "context-compress-config-"));
+		try {
+			writeFileSync(
+				join(dir, ".context-compress.json"),
+				JSON.stringify({
+					passthroughEnvVars: ["GH_TOKEN"],
+					debug: true,
+					maxOutputBytes: 200_000,
+					blockCurl: false,
+					blockWebFetch: false,
+					nudgeOnRead: false,
+					nudgeOnGrep: false,
+				}),
+			);
+
+			const cfg = loadConfig(dir);
+			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"]);
+			assert.strictEqual(cfg.debug, true);
+			assert.strictEqual(cfg.maxOutputBytes, 200_000);
+			for (const key of ["blockCurl", "blockWebFetch", "nudgeOnRead", "nudgeOnGrep"]) {
+				assert.strictEqual(Object.hasOwn(cfg, key), false, `${key} is hook-only`);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

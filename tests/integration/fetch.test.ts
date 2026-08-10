@@ -2,12 +2,18 @@ import assert from "node:assert";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig, resetConfig } from "../../src/config.js";
 import { SubprocessExecutor } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime/index.js";
+import { SessionTracker } from "../../src/stats.js";
 import { ContentStore } from "../../src/store.js";
+import type { ToolContext } from "../../src/tools/context.js";
+import { registerFetchAndIndexTool } from "../../src/tools/fetch-and-index.js";
+import type { ExecResult } from "../../src/types.js";
 import { buildFetchCode } from "../../src/util/fetch-code.js";
 import { htmlToMarkdownSnippet } from "../../src/util/html-to-markdown.js";
+import { createIntentFilter } from "../../src/util/intent-filter.js";
 
 const ORIGINAL_HOME = process.env.HOME;
 
@@ -19,6 +25,23 @@ function isolateConfigHome(): void {
 // exercises the real pipeline and the two can never drift.
 function buildHtmlToMarkdownCode(html: string): string {
 	return `const html = ${JSON.stringify(html)};\n${htmlToMarkdownSnippet()}`;
+}
+
+type FetchHandler = (args: {
+	url: string;
+	source?: string;
+}) => Promise<{ content: Array<{ type: string; text: string }> }>;
+
+function captureFetchHandler(ctx: ToolContext): FetchHandler {
+	let handler: FetchHandler | undefined;
+	const server = {
+		registerTool(_name: unknown, _definition: unknown, callback: FetchHandler) {
+			handler = callback;
+		},
+	} as unknown as McpServer;
+	registerFetchAndIndexTool(server, ctx);
+	assert.ok(handler, "fetch handler must be registered");
+	return handler;
 }
 
 describe("integration: fetch conversion workflow", () => {
@@ -74,7 +97,7 @@ describe("integration: fetch conversion workflow", () => {
 				});
 
 				assert.strictEqual(result.exitCode, 0);
-				const markdown = result.stdout.trim();
+				const markdown = result.indexableStdout.trim();
 				assert.match(markdown, /# Main Title/);
 				assert.match(markdown, /\[Docs\]\(https:\/\/example\.com\/docs\)/);
 				assert.ok(!markdown.includes("console.log"));
@@ -90,6 +113,50 @@ describe("integration: fetch conversion workflow", () => {
 			}
 		},
 	);
+
+	it("indexes pre-filter fetch content while previewing compressed stdout", async () => {
+		const config = loadConfig();
+		const store = new ContentStore(":memory:");
+		const tracker = new SessionTracker();
+		const sentinel = "rpfhiddenfetchsentinel";
+		const result: ExecResult = {
+			indexableStdout: `# Visible\n\npreview only\n\n## Hidden\n\n${sentinel} remains searchable`,
+			stdout: "# Visible\n\npreview only",
+			stderr: "",
+			exitCode: 0,
+			truncated: true,
+			killed: false,
+			networkBytes: 128,
+		};
+		const executor = {
+			execute: async () => result,
+		} as unknown as SubprocessExecutor;
+		const ctx: ToolContext = {
+			config,
+			store,
+			tracker,
+			executor,
+			projectDir: process.cwd(),
+			bunDetected: false,
+			dbFallback: false,
+			withExecutionLimit: (fn) => fn(),
+			applyIntentFilter: createIntentFilter({ config, store, tracker }),
+		};
+
+		try {
+			const response = await captureFetchHandler(ctx)({
+				// A public raw IP avoids ambient DNS/network dependence; the executor
+				// is injected, so this test exercises only the production tool flow.
+				url: "http://8.8.8.8/",
+				source: "fetch:retention-test",
+			});
+			const text = response.content[0].text;
+			assert.ok(!text.includes(sentinel), "preview must use compressed stdout");
+			assert.ok(store.search(sentinel).results.length > 0, "hidden fetch content is searchable");
+		} finally {
+			store.close();
+		}
+	});
 });
 
 /**

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "context-compress",
-  "description": "MCP server and hook toolkit that keeps large tool output searchable instead of dumping it into context.",
+  "description": "MCP server and hook toolkit that compresses responses and keeps explicitly indexed output searchable.",
   "owner": {
     "name": "Open330",
     "url": "https://github.com/Open330"

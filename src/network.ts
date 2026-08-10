@@ -1,79 +1,181 @@
 import dns from "node:dns";
+import { isIP } from "node:net";
 
-/**
- * SSRF protection: detect private/internal hostnames.
- */
-export function isPrivateHost(hostname: string): boolean {
-	// Strip brackets from IPv6 literals like [::1]
-	const h = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
-	const lower = h.toLowerCase();
+interface IpLiteral {
+	address: string;
+	bytes: number[];
+	family: 4 | 6;
+	scoped: boolean;
+}
 
-	// Localhost variants
-	if (lower === "localhost" || lower === "0.0.0.0") return true;
+interface IpRange {
+	bytes: number[];
+	prefixLength: number;
+}
 
-	// IPv4 "this network" range: 0.0.0.0/8
-	if (/^0\./.test(h)) return true;
+const NON_GLOBAL_IPV4_RANGES: IpRange[] = [
+	{ bytes: [0], prefixLength: 8 },
+	{ bytes: [10], prefixLength: 8 },
+	{ bytes: [100, 64], prefixLength: 10 },
+	{ bytes: [127], prefixLength: 8 },
+	{ bytes: [169, 254], prefixLength: 16 },
+	{ bytes: [172, 16], prefixLength: 12 },
+	{ bytes: [192, 0, 0], prefixLength: 24 },
+	{ bytes: [192, 0, 2], prefixLength: 24 },
+	{ bytes: [192, 88, 99], prefixLength: 24 },
+	{ bytes: [192, 168], prefixLength: 16 },
+	{ bytes: [198, 18], prefixLength: 15 },
+	{ bytes: [198, 51, 100], prefixLength: 24 },
+	{ bytes: [203, 0, 113], prefixLength: 24 },
+	{ bytes: [224], prefixLength: 4 },
+	{ bytes: [240], prefixLength: 4 },
+];
 
-	// IPv4 loopback: 127.0.0.0/8
-	if (/^127\./.test(h)) return true;
+const NON_GLOBAL_IPV6_RANGES: IpRange[] = [
+	{ bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], prefixLength: 96 },
+	{ bytes: [0x01, 0x00, 0, 0, 0, 0, 0, 0], prefixLength: 64 },
+	{ bytes: [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01], prefixLength: 48 },
+	{ bytes: [0x20, 0x01, 0x00, 0x02, 0, 0], prefixLength: 48 },
+	{ bytes: [0x20, 0x01, 0x00, 0x10], prefixLength: 28 },
+	{ bytes: [0x20, 0x01, 0x00, 0x20], prefixLength: 28 },
+	{ bytes: [0x20, 0x01, 0x0d, 0xb8], prefixLength: 32 },
+	{ bytes: [0x3f, 0xff, 0], prefixLength: 20 },
+	{ bytes: [0x5f, 0x00], prefixLength: 16 },
+	{ bytes: [0xfc], prefixLength: 7 },
+	{ bytes: [0xfe, 0x80], prefixLength: 10 },
+	{ bytes: [0xfe, 0xc0], prefixLength: 10 },
+	{ bytes: [0xff], prefixLength: 8 },
+];
 
-	// IPv4 private ranges
-	if (/^10\./.test(h)) return true;
-	if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-	if (/^192\.168\./.test(h)) return true;
-
-	// IPv4 link-local: 169.254.0.0/16
-	if (/^169\.254\./.test(h)) return true;
-
-	// Carrier-grade NAT: 100.64.0.0/10 (100.64-127.*)
-	if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h)) return true;
-
-	// IPv6 loopback
-	if (lower === "::1") return true;
-
-	// IPv6 unspecified address
-	if (lower === "::" || lower === "0:0:0:0:0:0:0:0") return true;
-
-	// IPv6 mapped IPv4: ::ffff:127.0.0.1, ::ffff:10.*, etc.
-	const mappedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-	if (mappedMatch) return isPrivateHost(mappedMatch[1]);
-
-	// IPv6 mapped IPv4, hex form: ::ffff:7f00:1 (= 127.0.0.1), ::ffff:c0a8:101 (= 192.168.1.1)
-	const hexMappedMatch = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-	if (hexMappedMatch) {
-		const g1 = hexMappedMatch[1].padStart(4, "0");
-		const g2 = hexMappedMatch[2].padStart(4, "0");
-		const b1 = Number.parseInt(g1.slice(0, 2), 16);
-		const b2 = Number.parseInt(g1.slice(2, 4), 16);
-		const b3 = Number.parseInt(g2.slice(0, 2), 16);
-		const b4 = Number.parseInt(g2.slice(2, 4), 16);
-		return isPrivateHost(`${b1}.${b2}.${b3}.${b4}`);
+function matchesRange(address: number[], range: IpRange): boolean {
+	const completeBytes = Math.floor(range.prefixLength / 8);
+	for (let index = 0; index < completeBytes; index += 1) {
+		if (address[index] !== range.bytes[index]) return false;
 	}
 
-	// IPv6 link-local: fe80::/10
-	if (/^fe[89ab]/i.test(h)) return true;
+	const remainingBits = range.prefixLength % 8;
+	if (remainingBits === 0) return true;
 
-	// IPv6 ULA: fc00::/7 (fc* and fd*)
-	if (/^f[cd]/i.test(h)) return true;
+	const mask = (0xff << (8 - remainingBits)) & 0xff;
+	return (address[completeBytes] & mask) === (range.bytes[completeBytes] & mask);
+}
 
-	return false;
+function ipv6Bytes(address: string): number[] {
+	const [left = "", right = ""] = address.split("::");
+	const leftGroups = left === "" ? [] : left.split(":");
+	const rightGroups = right === "" ? [] : right.split(":");
+	const omittedGroups = address.includes("::") ? 8 - leftGroups.length - rightGroups.length : 0;
+	const groups = [
+		...leftGroups,
+		...Array.from({ length: omittedGroups }, () => "0"),
+		...rightGroups,
+	];
+
+	return groups.flatMap((group) => {
+		const value = Number.parseInt(group, 16);
+		return [value >> 8, value & 0xff];
+	});
+}
+
+function normalizeIpLiteral(hostname: string): IpLiteral | null {
+	const unwrapped =
+		hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+	const scopeIndex = unwrapped.indexOf("%");
+	const addressWithoutScope = scopeIndex === -1 ? unwrapped : unwrapped.slice(0, scopeIndex);
+
+	if (isIP(unwrapped) === 6 || (scopeIndex !== -1 && isIP(addressWithoutScope) === 6)) {
+		const normalized = new URL(`http://[${addressWithoutScope}]/`).hostname.slice(1, -1);
+		return {
+			address: normalized,
+			bytes: ipv6Bytes(normalized),
+			family: 6,
+			scoped: scopeIndex !== -1,
+		};
+	}
+
+	if (isIP(unwrapped) === 4) {
+		return {
+			address: unwrapped,
+			bytes: unwrapped.split(".").map(Number),
+			family: 4,
+			scoped: false,
+		};
+	}
+
+	// The URL parser canonicalizes legacy IPv4 forms such as 2130706433 and 0x7f000001.
+	if (/^[0-9a-fx.]+$/i.test(unwrapped)) {
+		try {
+			const normalized = new URL(`http://${unwrapped}/`).hostname;
+			if (isIP(normalized) === 4) {
+				return {
+					address: normalized,
+					bytes: normalized.split(".").map(Number),
+					family: 4,
+					scoped: false,
+				};
+			}
+		} catch {
+			// Not an IP literal; hostnames are checked after DNS resolution.
+		}
+	}
+
+	return null;
+}
+
+function isNonGlobalIp(ip: IpLiteral): boolean {
+	if (ip.scoped) return true;
+
+	if (ip.family === 4) {
+		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes, range));
+	}
+
+	const isIpv4Mapped =
+		ip.bytes.slice(0, 10).every((byte) => byte === 0) &&
+		ip.bytes[10] === 0xff &&
+		ip.bytes[11] === 0xff;
+	if (isIpv4Mapped) {
+		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(12), range));
+	}
+
+	return NON_GLOBAL_IPV6_RANGES.some((range) => matchesRange(ip.bytes, range));
 }
 
 /**
- * DNS rebinding protection: resolve hostname to IP and validate it is not private.
- * This prevents attackers from using DNS to resolve a public hostname to a private IP.
- * Throws an error if the resolved IP is private.
+ * SSRF protection: detect local and non-global IP addresses or hostnames.
+ */
+export function isPrivateHost(hostname: string): boolean {
+	const lower = hostname.toLowerCase();
+	if (lower === "localhost") return true;
+
+	const ip = normalizeIpLiteral(hostname);
+	return ip !== null && isNonGlobalIp(ip);
+}
+
+function validateResolvedIp(hostname: string, address: string, label: string): string {
+	const ip = normalizeIpLiteral(address);
+	if (!ip) {
+		throw new Error(`Blocked: ${hostname} returned an invalid ${label} address`);
+	}
+	if (isNonGlobalIp(ip)) {
+		throw new Error(`Blocked: ${hostname} resolved to non-global ${label} ${ip.address}`);
+	}
+	return ip.address;
+}
+
+/**
+ * DNS rebinding protection: resolve a hostname, reject non-global answers, and return
+ * one canonical address that callers can pin the connection to.
  */
 export async function resolveAndValidate(
 	url: string,
 ): Promise<{ url: string; resolvedIp: string | null }> {
 	const parsed = new URL(url);
 	const hostname = parsed.hostname;
+	const rawIp = normalizeIpLiteral(hostname);
 
-	// Skip DNS resolution for raw IP addresses — isPrivateHost already handles them
-	if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":")) {
-		if (isPrivateHost(hostname)) {
-			throw new Error(`Blocked: resolved IP ${hostname} is a private/internal address`);
+	if (rawIp) {
+		if (isNonGlobalIp(rawIp)) {
+			throw new Error(`Blocked: resolved IP ${rawIp.address} is a private/internal address`);
 		}
 		return { url, resolvedIp: null };
 	}
@@ -82,33 +184,24 @@ export async function resolveAndValidate(
 	let v4Error = false;
 	let v6Error = false;
 
-	// Resolve IPv4 and IPv6 in parallel
 	const [v4Result, v6Result] = await Promise.allSettled([
 		dns.promises.lookup(hostname, { family: 4 }),
 		dns.promises.lookup(hostname, { family: 6 }),
 	]);
 
-	// Process v4
 	if (v4Result.status === "fulfilled") {
-		if (isPrivateHost(v4Result.value.address)) {
-			throw new Error(`Blocked: ${hostname} resolved to private IP ${v4Result.value.address}`);
-		}
-		resolvedIp = v4Result.value.address;
+		resolvedIp = validateResolvedIp(hostname, v4Result.value.address, "IP");
 	} else {
 		v4Error = true;
 	}
 
-	// Process v6
 	if (v6Result.status === "fulfilled") {
-		if (isPrivateHost(v6Result.value.address)) {
-			throw new Error(`Blocked: ${hostname} resolved to private IPv6 ${v6Result.value.address}`);
-		}
-		if (!resolvedIp) resolvedIp = v6Result.value.address;
+		const normalizedV6 = validateResolvedIp(hostname, v6Result.value.address, "IPv6");
+		if (!resolvedIp) resolvedIp = normalizedV6;
 	} else {
 		v6Error = true;
 	}
 
-	// If BOTH resolutions failed (not blocked, just DNS errors), fail closed
 	if (v4Error && v6Error) {
 		throw new Error(`DNS resolution failed for ${hostname}: unable to verify host safety`);
 	}

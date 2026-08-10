@@ -88,13 +88,14 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 				return { content: [{ type: "text" as const, text: msg }], isError: true };
 			}
 
-			if (result.exitCode !== 0 || !result.stdout.trim()) {
+			if (result.exitCode !== 0 || !result.indexableStdout.trim()) {
 				const errMsg = `Failed to fetch ${url}: ${result.stderr || "empty response"}`;
 				tracker.trackCall("fetch_and_index", Buffer.byteLength(errMsg));
 				return { content: [{ type: "text" as const, text: errMsg }], isError: true };
 			}
 
-			const markdown = result.stdout;
+			const markdown = result.indexableStdout;
+			const responseMarkdown = result.stdout;
 			tracker.trackSandboxed(result.networkBytes ?? 0);
 
 			const injectionWarnings = detectInjectionPatterns(markdown);
@@ -102,12 +103,12 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 			const indexed = store.index(markdown, label);
 			tracker.trackIndexed(Buffer.byteLength(markdown));
 
-			const preview = markdown.slice(0, 3072);
+			const preview = responseMarkdown.slice(0, 3072);
 			const terms = store.getDistinctiveTerms(indexed.sourceId);
 
 			let output = `Indexed "${label}": ${indexed.totalChunks} chunks.\n\n`;
 			output += `**Preview:**\n${preview}`;
-			if (markdown.length > 3072) output += "\n…(truncated)";
+			if (responseMarkdown.length > 3072) output += "\n…(truncated)";
 			if (terms.length > 0) {
 				output += `\n\nSearchable terms: ${terms.join(", ")}`;
 			}

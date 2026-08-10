@@ -1,7 +1,57 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { ExecResult, SearchResult } from "../types.js";
 import { limitConcurrency } from "../utils.js";
 import type { ToolContext } from "./context.js";
+
+function getExecutionStatus(result: ExecResult): string {
+	if (result.killed) return "killed";
+	if (result.exitCode === 0) return "completed";
+	if (result.exitCode === null) return "unknown";
+	return "failed";
+}
+
+function formatCommandResult(
+	label: string,
+	result: ExecResult,
+): { corpus: string; inventory: string } {
+	const output = result.indexableStdout || "(no output)";
+	const lineCount = (result.stdout || "(no output)").split("\n").length;
+	const status = getExecutionStatus(result);
+	const exitCode = result.exitCode === null ? "unknown" : String(result.exitCode);
+	const diagnostics = [
+		"### Execution diagnostics",
+		`Status: ${status}`,
+		`Exit code: ${exitCode}`,
+		`Killed: ${result.killed ? "yes" : "no"}`,
+		`Output truncated: ${result.truncated ? "yes" : "no"}`,
+	].join("\n");
+	const stderr = result.stderr ? `\n\n### STDERR\n\n${result.stderr}` : "";
+	const corpus = `## ${label}\n\n${output}\n\n${diagnostics}${stderr}`;
+
+	if (result.exitCode === 0 && !result.killed && !result.truncated) {
+		return { corpus, inventory: `- **${label}**: ${lineCount} lines` };
+	}
+
+	const states: string[] = [];
+	if (status === "failed") states.push("failed");
+	if (result.killed) states.push("killed");
+	if (result.truncated) states.push("truncated");
+	return {
+		corpus,
+		inventory: `- **${label}**: ${lineCount} lines — ${states.join(", ") || status} (exit ${exitCode})`,
+	};
+}
+
+function formatSearchBlock(query: string, result: SearchResult): string {
+	let block = `## ${query}\n\n`;
+	if (result.results.length === 0) return `${block}No results found.\n`;
+
+	for (const hit of result.results) {
+		block += `--- [${hit.source}] ---\n### ${hit.title}\n\n${hit.snippet}\n\n`;
+	}
+	return block;
+}
 
 export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, store, tracker, config, withExecutionLimit } = ctx;
@@ -51,15 +101,8 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 				4,
 			);
 
-			// Cap the combined buffer so a few high-output commands can't exhaust
-			// memory before indexing. Per-command output is also capped so one
-			// command can't consume the whole budget.
-			const COMBINED_CAP = config.batchMaxBytes;
-			const PER_COMMAND_CAP = Math.max(64_000, Math.floor(COMBINED_CAP / 4));
-
-			let combined = "";
 			const inventory: string[] = [];
-			let truncatedCommands = 0;
+			const indexedSourceIds: number[] = [];
 
 			for (let i = 0; i < commandResults.length; i++) {
 				const settled = commandResults[i];
@@ -67,28 +110,19 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 
 				if (settled.status === "fulfilled") {
 					const { result } = settled.value;
-					let output = result.stdout || "(no output)";
-					const lineCount = output.split("\n").length;
-					if (Buffer.byteLength(output) > PER_COMMAND_CAP) {
-						output = `${output.slice(0, PER_COMMAND_CAP)}\n…(output truncated)`;
-						truncatedCommands++;
-					}
-					combined += `## ${label}\n\n${output}\n\n`;
-					inventory.push(`- **${label}**: ${lineCount} lines`);
+					const { corpus, inventory: inventoryEntry } = formatCommandResult(label, result);
+					const indexed = store.index(corpus, "batch_execute");
+					indexedSourceIds.push(indexed.sourceId);
+					tracker.trackIndexed(Buffer.byteLength(corpus));
+					inventory.push(inventoryEntry);
 				} else {
-					combined += `## ${label}\n\n(error: ${settled.reason})\n\n`;
+					const errorOutput = `## ${label}\n\n(error: ${settled.reason})`;
+					const indexed = store.index(errorOutput, "batch_execute");
+					indexedSourceIds.push(indexed.sourceId);
+					tracker.trackIndexed(Buffer.byteLength(errorOutput));
 					inventory.push(`- **${label}**: error`);
 				}
-
-				if (Buffer.byteLength(combined) >= COMBINED_CAP) {
-					combined += "\n…(remaining command output omitted: combined size limit reached)\n";
-					truncatedCommands += commandResults.length - i - 1;
-					break;
-				}
 			}
-
-			const indexed = store.index(combined, "batch_execute");
-			tracker.trackIndexed(Buffer.byteLength(combined));
 
 			const searchResults: string[] = [];
 			let totalBytes = 0;
@@ -101,25 +135,17 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 					result = store.search(query, { limit: 5 });
 				}
 
-				let block = `## ${query}\n\n`;
-				if (result.results.length === 0) {
-					block += "No results found.\n";
-				} else {
-					for (const hit of result.results) {
-						block += `--- [${hit.source}] ---\n### ${hit.title}\n\n${hit.snippet}\n\n`;
-					}
-				}
+				const block = formatSearchBlock(query, result);
 
 				searchResults.push(block);
 				totalBytes += Buffer.byteLength(block);
 			}
 
-			const terms = store.getDistinctiveTerms(indexed.sourceId);
+			const terms = [
+				...new Set(indexedSourceIds.flatMap((sourceId) => store.getDistinctiveTerms(sourceId))),
+			].slice(0, 40);
 
 			let output = `**Inventory** (${commands.length} commands):\n${inventory.join("\n")}\n\n`;
-			if (truncatedCommands > 0) {
-				output += `_Note: ${truncatedCommands} command output(s) truncated to stay within size limits; use search() to retrieve indexed content._\n\n`;
-			}
 			output += searchResults.join("\n---\n\n");
 			if (terms.length > 0) {
 				output += `\n\nSearchable terms: ${terms.join(", ")}`;

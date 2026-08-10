@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
@@ -308,6 +308,7 @@ export class SubprocessExecutor {
 		const entry = this.runtimes.get(opts.language);
 		if (!entry) {
 			return {
+				indexableStdout: "",
 				stdout: "",
 				stderr: `Language "${opts.language}" is not available. No runtime detected.`,
 				exitCode: 1,
@@ -326,6 +327,7 @@ export class SubprocessExecutor {
 			const forced = findRuntimeBinary(opts.requireRuntime);
 			if (!forced) {
 				return {
+					indexableStdout: "",
 					stdout: "",
 					stderr: `This operation requires the "${opts.requireRuntime}" runtime, which was not found on PATH.`,
 					exitCode: 1,
@@ -371,6 +373,7 @@ export class SubprocessExecutor {
 				} catch (e: unknown) {
 					const err = e as { stderr?: Buffer; message?: string };
 					return {
+						indexableStdout: "",
 						stdout: "",
 						stderr: err.stderr?.toString() ?? err.message ?? "Compilation failed",
 						exitCode: 1,
@@ -406,6 +409,7 @@ export class SubprocessExecutor {
 		const entry = this.runtimes.get(opts.language);
 		if (!entry) {
 			return {
+				indexableStdout: "",
 				stdout: "",
 				stderr: `Language "${opts.language}" is not available.`,
 				exitCode: 1,
@@ -490,6 +494,7 @@ export class SubprocessExecutor {
 				if (!resolved) {
 					resolved = true;
 					resolve({
+						indexableStdout: "",
 						stdout: "",
 						stderr: err.message,
 						exitCode: 1,
@@ -514,6 +519,11 @@ export class SubprocessExecutor {
 					networkBytes = Number.parseInt(netMatch[1], 10);
 					stderr = stderr.replace(/__CM_NET__:\d+\n?/, "");
 				}
+
+				// Preserve the executor-capped corpus before filters discard command
+				// noise, fold repeated lines, or truncate the response. ANSI escapes
+				// are presentation metadata, so keep the searchable copy clean too.
+				const indexableStdout = stripAnsi(stdout);
 
 				if (capped) {
 					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
@@ -557,6 +567,7 @@ export class SubprocessExecutor {
 				}
 
 				resolve({
+					indexableStdout,
 					stdout,
 					stderr,
 					// Signal kills report code=null — map to 1 so a killed
@@ -571,9 +582,7 @@ export class SubprocessExecutor {
 	}
 
 	private createTempDir(): string {
-		const base = join(tmpdir(), "context-compress");
-		mkdirSync(base, { recursive: true });
-		return mkdtempSync(join(base, "exec-"));
+		return mkdtempSync(join(tmpdir(), "context-compress-exec-"));
 	}
 
 	private cleanupTempDir(dir: string): void {
@@ -598,7 +607,7 @@ export class SubprocessExecutor {
  */
 function wrapWithNetworkTracking(code: string): string {
 	const preamble =
-		"let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.headers.get('content-length');if(cl){__cm_net+=parseInt(cl,10)}else{const b=await r.clone().arrayBuffer();__cm_net+=b.byteLength}}catch{}return r};}";
+		"let __cm_net=0;const __cm_f=globalThis.fetch;if(__cm_f){globalThis.fetch=async(...a)=>{const r=await __cm_f(...a);try{const cl=r.headers.get('content-length');if(cl){__cm_net+=parseInt(cl,10)}}catch{}return r};}";
 	const epilogue = `\nprocess.stderr.write('__CM_NET__:'+__cm_net+'\\n');`;
 
 	// Wrap in async IIFE

@@ -66,12 +66,17 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 			}
 
 			let output = result.stdout;
+			let indexableOutput = result.indexableStdout;
 			if (result.stderr && result.exitCode !== 0) {
 				output += `\n\nSTDERR:\n${result.stderr}`;
+				indexableOutput += `\n\nSTDERR:\n${result.stderr}`;
 			}
 
 			if (intent) {
-				output = applyIntentFilter(output, intent, `execute:${language}`);
+				const filtered = applyIntentFilter(indexableOutput, intent, `execute:${language}`);
+				// Small corpora are returned unchanged by the intent filter. In that
+				// case retain the executor's already-compressed response copy.
+				if (filtered !== indexableOutput) output = filtered;
 			}
 
 			const responseBytes = Buffer.byteLength(output);

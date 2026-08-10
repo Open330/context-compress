@@ -10,14 +10,6 @@ export interface Config {
 	passthroughEnvVars: string[];
 	/** Enable debug logging to stderr */
 	debug: boolean;
-	/** Block curl/wget commands in Bash hook */
-	blockCurl: boolean;
-	/** Block WebFetch tool in hook */
-	blockWebFetch: boolean;
-	/** Nudge on Read tool usage */
-	nudgeOnRead: boolean;
-	/** Nudge on Grep tool usage */
-	nudgeOnGrep: boolean;
 	/** Threshold in bytes to trigger intent-based search filtering */
 	intentSearchThreshold: number;
 	/** Byte budget for query-ranked content inlined into an intent-filtered summary */
@@ -49,10 +41,6 @@ export interface Config {
 const DEFAULTS: Config = {
 	passthroughEnvVars: [],
 	debug: false,
-	blockCurl: true,
-	blockWebFetch: true,
-	nudgeOnRead: true,
-	nudgeOnGrep: true,
 	intentSearchThreshold: 5_000,
 	intentBudgetBytes: 1_800,
 	maxOutputBytes: 102_400,
@@ -92,10 +80,6 @@ const LEVEL_OVERRIDES: Record<CompressionLevel, Partial<Config>> = {
 const ConfigSchema = z.object({
 	passthroughEnvVars: z.array(z.string()).optional(),
 	debug: z.boolean().optional(),
-	blockCurl: z.boolean().optional(),
-	blockWebFetch: z.boolean().optional(),
-	nudgeOnRead: z.boolean().optional(),
-	nudgeOnGrep: z.boolean().optional(),
 	intentSearchThreshold: z.number().int().positive().optional(),
 	intentBudgetBytes: z.number().int().positive().optional(),
 	maxOutputBytes: z.number().int().positive().optional(),
@@ -152,19 +136,6 @@ function loadEnvConfig(): Partial<Config> {
 			.map((s) => s.trim())
 			.filter(Boolean);
 	}
-	if (process.env.CONTEXT_COMPRESS_BLOCK_CURL !== undefined) {
-		partial.blockCurl = process.env.CONTEXT_COMPRESS_BLOCK_CURL !== "0";
-	}
-	if (process.env.CONTEXT_COMPRESS_BLOCK_WEBFETCH !== undefined) {
-		partial.blockWebFetch = process.env.CONTEXT_COMPRESS_BLOCK_WEBFETCH !== "0";
-	}
-	if (process.env.CONTEXT_COMPRESS_NUDGE_READ !== undefined) {
-		partial.nudgeOnRead = process.env.CONTEXT_COMPRESS_NUDGE_READ !== "0";
-	}
-	if (process.env.CONTEXT_COMPRESS_NUDGE_GREP !== undefined) {
-		partial.nudgeOnGrep = process.env.CONTEXT_COMPRESS_NUDGE_GREP !== "0";
-	}
-
 	// Numeric overrides
 	const maxOutput = parseIntEnv("CONTEXT_COMPRESS_MAX_OUTPUT_BYTES");
 	if (maxOutput !== undefined) partial.maxOutputBytes = maxOutput;

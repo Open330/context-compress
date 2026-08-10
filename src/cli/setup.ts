@@ -11,14 +11,60 @@ interface SetupOptions {
 	filterBash: boolean;
 }
 
+interface ClaudeHook {
+	command?: string;
+	type?: string;
+}
+
+interface ClaudeHookEntry {
+	matcher?: string;
+	hooks?: ClaudeHook[];
+}
+
 interface ClaudeSettings {
-	hooks?: Record<
-		string,
-		Array<{ matcher?: string; hooks?: Array<{ command?: string; type?: string }> }>
-	>;
+	hooks?: Record<string, ClaudeHookEntry[]>;
 	mcpServers?: Record<string, { command: string; args: string[] }>;
 	env?: Record<string, string>;
 	[k: string]: unknown;
+}
+
+const PRE_TOOL_USE_MATCHER = "Bash|Read|Grep|WebFetch|Task";
+
+/** Match the exact command shape emitted by prior context-compress setup runs. */
+function isOwnedHookCommand(command: string | undefined): boolean {
+	return (
+		typeof command === "string" &&
+		/^(?:node .+[\\/]pretooluse\.mjs|tsx .+[\\/]pretooluse\.ts)$/.test(command)
+	);
+}
+
+function configurePreToolUseHook(
+	hookEntries: ClaudeHookEntry[],
+	hookCmd: string,
+): "Installed" | "Updated" | undefined {
+	const currentHook = hookEntries.some(
+		(entry) =>
+			entry.matcher === PRE_TOOL_USE_MATCHER &&
+			entry.hooks?.some((hook) => hook.type === "command" && hook.command === hookCmd),
+	);
+	if (currentHook) return undefined;
+
+	const staleEntry = hookEntries.find((entry) =>
+		entry.hooks?.some((hook) => isOwnedHookCommand(hook.command)),
+	);
+	const staleHook = staleEntry?.hooks?.find((hook) => isOwnedHookCommand(hook.command));
+	if (staleEntry && staleHook) {
+		staleEntry.matcher = PRE_TOOL_USE_MATCHER;
+		staleHook.type = "command";
+		staleHook.command = hookCmd;
+		return "Updated";
+	}
+
+	hookEntries.push({
+		matcher: PRE_TOOL_USE_MATCHER,
+		hooks: [{ type: "command", command: hookCmd }],
+	});
+	return "Installed";
 }
 
 /**
@@ -41,6 +87,18 @@ function resolvePaths(): { serverEntry: string; hookEntry: string; binPath: stri
 
 function isBuiltJs(p: string): boolean {
 	return p.endsWith(".js") || p.endsWith(".mjs");
+}
+
+function removeFilterBashEnv(env: Record<string, string> | undefined, changes: string[]): void {
+	if (!env) return;
+	if (Object.hasOwn(env, "CONTEXT_COMPRESS_FILTER_BASH")) {
+		delete env.CONTEXT_COMPRESS_FILTER_BASH;
+		changes.push("Removed CONTEXT_COMPRESS_FILTER_BASH");
+	}
+	if (Object.hasOwn(env, "CONTEXT_COMPRESS_BIN")) {
+		delete env.CONTEXT_COMPRESS_BIN;
+		changes.push("Removed CONTEXT_COMPRESS_BIN");
+	}
 }
 
 /** Exported for tests. Throws on malformed JSON instead of returning {} (fail closed). */
@@ -95,16 +153,8 @@ export function applyAutoConfig(
 	settings.hooks.PreToolUse ??= [];
 	const hookCmd = isBuiltJs(paths.hookEntry) ? `node ${paths.hookEntry}` : `tsx ${paths.hookEntry}`;
 	const hookEntries = settings.hooks.PreToolUse;
-	const alreadyInstalled = hookEntries.some((entry) =>
-		entry.hooks?.some((h) => h.command?.includes("pretooluse")),
-	);
-	if (!alreadyInstalled) {
-		hookEntries.push({
-			matcher: "Bash|Read|Grep|WebFetch|Task",
-			hooks: [{ type: "command", command: hookCmd }],
-		});
-		changes.push(`Installed PreToolUse hook (${hookCmd})`);
-	}
+	const hookChange = configurePreToolUseHook(hookEntries, hookCmd);
+	if (hookChange) changes.push(`${hookChange} PreToolUse hook (${hookCmd})`);
 
 	// 3. Bash filter mode (opt-in, but on by default with --auto)
 	if (filterBash) {
@@ -119,6 +169,8 @@ export function applyAutoConfig(
 			settings.env.CONTEXT_COMPRESS_BIN = binCmd;
 			changes.push(`Set CONTEXT_COMPRESS_BIN to ${binCmd}`);
 		}
+	} else {
+		removeFilterBashEnv(settings.env, changes);
 	}
 
 	return changes;

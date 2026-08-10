@@ -1,9 +1,55 @@
 import assert from "node:assert";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { isWithinProject } from "../../src/util/path.js";
+import { isPathWithin, isWithinProject } from "../../src/util/path.js";
+
+describe("isPathWithin", () => {
+	const cases = [
+		{
+			name: "POSIX",
+			pathSemantics: posix,
+			root: "/workspace/project",
+			descendant: "/workspace/project/src/index.ts",
+			prefixSibling: "/workspace/project-evil/secret.txt",
+			traversal: "/workspace/project/../../secret.txt",
+		},
+		{
+			name: "Windows",
+			pathSemantics: win32,
+			root: "C:\\workspace\\project",
+			descendant: "C:\\workspace\\project\\src\\index.ts",
+			prefixSibling: "C:\\workspace\\project-evil\\secret.txt",
+			traversal: "C:\\workspace\\project\\..\\..\\secret.txt",
+			crossDrive: "D:\\workspace\\project\\secret.txt",
+		},
+	] as const;
+
+	for (const pathCase of cases) {
+		it(`uses ${pathCase.name} root and separator semantics`, () => {
+			assert.strictEqual(isPathWithin(pathCase.root, pathCase.root, pathCase.pathSemantics), true);
+			assert.strictEqual(
+				isPathWithin(pathCase.descendant, pathCase.root, pathCase.pathSemantics),
+				true,
+			);
+			assert.strictEqual(
+				isPathWithin(pathCase.prefixSibling, pathCase.root, pathCase.pathSemantics),
+				false,
+			);
+			assert.strictEqual(
+				isPathWithin(pathCase.traversal, pathCase.root, pathCase.pathSemantics),
+				false,
+			);
+			if ("crossDrive" in pathCase) {
+				assert.strictEqual(
+					isPathWithin(pathCase.crossDrive, pathCase.root, pathCase.pathSemantics),
+					false,
+				);
+			}
+		});
+	}
+});
 
 describe("isWithinProject", () => {
 	let projectDir: string;
@@ -44,8 +90,8 @@ describe("isWithinProject", () => {
 	});
 
 	it("rejects ../-traversal that escapes the project", () => {
-		const escape = resolve(projectDir, "..", "neighbor", "secret.txt");
-		assert.strictEqual(isWithinProject(escape, projectDir), false);
+		const escapedPath = resolve(projectDir, "..", "neighbor", "secret.txt");
+		assert.strictEqual(isWithinProject(escapedPath, projectDir), false);
 	});
 
 	it("rejects a sibling directory whose name is a prefix of the project's name", () => {
@@ -75,5 +121,16 @@ describe("isWithinProject", () => {
 	it("rejects non-existent paths outside the project", () => {
 		const ghost = join(outsideDir, "phantom.txt");
 		assert.strictEqual(isWithinProject(ghost, projectDir), false);
+	});
+
+	it("accepts roots and descendants when both paths use the fallback", () => {
+		const ghostProject = join(projectDir, "does-not-exist");
+		assert.strictEqual(isWithinProject(ghostProject, ghostProject), true);
+		assert.strictEqual(isWithinProject(join(ghostProject, "nested.txt"), ghostProject), true);
+	});
+
+	it("rejects a prefix sibling when both paths use the fallback", () => {
+		const ghostProject = join(projectDir, "does-not-exist");
+		assert.strictEqual(isWithinProject(`${ghostProject}-evil`, ghostProject), false);
 	});
 });

@@ -1,7 +1,7 @@
 {
   "name": "context-compress",
   "version": "2026.7.1",
-  "description": "Keep large tool output searchable without flooding the agent context window.",
+  "description": "Compress tool responses and keep explicitly indexed output searchable without flooding the agent context window.",
   "author": {
     "name": "Open330",
     "url": "https://github.com/Open330"
@@ -21,7 +21,7 @@
   "interface": {
     "displayName": "Context Compress",
     "shortDescription": "Compress tool output before it enters context.",
-    "longDescription": "Run commands, fetch pages, index large outputs, and search the retained data through an MCP server so agents see concise answers instead of raw logs.",
+    "longDescription": "Run commands with concise responses, then explicitly index, fetch, or batch large data when it must remain searchable through the MCP server.",
     "developerName": "Open330",
     "category": "Productivity",
     "capabilities": [

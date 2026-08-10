@@ -146,6 +146,24 @@ describe("pretooluse hook", () => {
 		assert.strictEqual(output, "");
 	});
 
+	it("does not read hook controls from .context-compress.json", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cc-hook-config-"));
+		try {
+			writeFileSync(join(dir, ".context-compress.json"), JSON.stringify({ blockCurl: false }));
+			const output = runHook({
+				tool_name: "Bash",
+				tool_input: { command: "curl https://example.com" },
+				cwd: dir,
+			});
+			const parsed = JSON.parse(output) as {
+				hookSpecificOutput: { permissionDecision?: string };
+			};
+			assert.strictEqual(parsed.hookSpecificOutput.permissionDecision, "deny");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("auto-wraps git status when CONTEXT_COMPRESS_FILTER_BASH=1", () => {
 		const output = runHook(
 			{
@@ -179,6 +197,70 @@ describe("pretooluse hook", () => {
 			parsed.hookSpecificOutput.updatedInput?.command ?? "",
 			/^\/usr\/local\/bin\/cc wrap '/,
 		);
+	});
+
+	it("supports node/tsx script bins and keeps path spaces and quotes inert", () => {
+		const cases = [
+			{
+				bin: "node /opt/Context Tools/cli/index.js",
+				expected: "node '/opt/Context Tools/cli/index.js' wrap 'git status --short'",
+			},
+			{
+				bin: "tsx /opt/Context Tools/owner's cli/index.ts",
+				expected: "tsx '/opt/Context Tools/owner'\\''s cli/index.ts' wrap 'git status --short'",
+			},
+		];
+
+		for (const { bin, expected } of cases) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command: "git status --short" } },
+				{
+					CONTEXT_COMPRESS_FILTER_BASH: "1",
+					CONTEXT_COMPRESS_BIN: bin,
+					CONTEXT_COMPRESS_MODE: undefined,
+				},
+			);
+			const parsed = JSON.parse(output) as {
+				hookSpecificOutput: { updatedInput?: { command?: string } };
+			};
+			assert.strictEqual(parsed.hookSpecificOutput.updatedInput?.command, expected);
+		}
+	});
+
+	it("supports a quoted absolute executable path as one inert token", () => {
+		const output = runHook(
+			{ tool_name: "Bash", tool_input: { command: "git status" } },
+			{
+				CONTEXT_COMPRESS_FILTER_BASH: "1",
+				CONTEXT_COMPRESS_BIN: '"/opt/Context Tools/context-compress"',
+				CONTEXT_COMPRESS_MODE: "balanced",
+			},
+		);
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { updatedInput?: { command?: string } };
+		};
+		assert.strictEqual(
+			parsed.hookSpecificOutput.updatedInput?.command,
+			"'/opt/Context Tools/context-compress' wrap --mode balanced 'git status'",
+		);
+	});
+
+	it("fails open without rewriting unsafe or unsupported bin configuration", () => {
+		for (const bin of [
+			"context-compress; touch /tmp/cc-owned",
+			"context-compress\n touch /tmp/cc-owned",
+			"context-compress$(touch /tmp/cc-owned)",
+			"context-compress`touch /tmp/cc-owned`",
+			"node --eval",
+			'node "/tmp/cli.js" --require "extra.js"',
+			"relative/path/context-compress",
+		]) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command: "git status" } },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_BIN: bin },
+			);
+			assert.strictEqual(output, "", `unsafe or unsupported bin must pass through: ${bin}`);
+		}
 	});
 
 	it("does NOT wrap commands containing pipes", () => {
@@ -320,19 +402,38 @@ describe("pretooluse hook", () => {
 		assert.ok(cmd.includes("'\\''"), `expected single-quote escape, got: ${cmd}`);
 	});
 
-	it("forwards CONTEXT_COMPRESS_MODE as --mode flag to wrap", () => {
-		const output = runHook(
-			{
-				tool_name: "Bash",
-				tool_input: { command: "git log -10" },
-			},
-			{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: "aggressive" },
-		);
-		const parsed = JSON.parse(output) as {
-			hookSpecificOutput: { updatedInput?: { command?: string } };
-		};
-		const cmd = parsed.hookSpecificOutput.updatedInput?.command ?? "";
-		assert.match(cmd, /context-compress wrap --mode aggressive '/);
+	it("forwards only supported CONTEXT_COMPRESS_MODE values as --mode flags", () => {
+		for (const mode of ["conservative", "balanced", "aggressive", "auto"]) {
+			const output = runHook(
+				{
+					tool_name: "Bash",
+					tool_input: { command: "git log -10" },
+				},
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: mode },
+			);
+			const parsed = JSON.parse(output) as {
+				hookSpecificOutput: { updatedInput?: { command?: string } };
+			};
+			const cmd = parsed.hookSpecificOutput.updatedInput?.command ?? "";
+			assert.match(cmd, new RegExp(`context-compress wrap --mode ${mode} `));
+		}
+	});
+
+	it("fails open without rewriting invalid or injectable CONTEXT_COMPRESS_MODE values", () => {
+		for (const mode of [
+			"",
+			"balanced ",
+			"balanced; touch /tmp/cc-owned",
+			"balanced\n touch /tmp/cc-owned",
+			"$(touch /tmp/cc-owned)",
+			"`touch /tmp/cc-owned`",
+		]) {
+			const output = runHook(
+				{ tool_name: "Bash", tool_input: { command: "git status" } },
+				{ CONTEXT_COMPRESS_FILTER_BASH: "1", CONTEXT_COMPRESS_MODE: mode },
+			);
+			assert.strictEqual(output, "", `invalid mode must pass through: ${mode}`);
+		}
 	});
 
 	it("omits --mode flag when CONTEXT_COMPRESS_MODE is unset", () => {

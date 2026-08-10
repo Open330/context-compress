@@ -79,12 +79,15 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 			}
 
 			let output = result.stdout;
+			let indexableOutput = result.indexableStdout;
 			if (result.stderr && result.exitCode !== 0) {
 				output += `\n\nSTDERR:\n${result.stderr}`;
+				indexableOutput += `\n\nSTDERR:\n${result.stderr}`;
 			}
 
 			if (intent) {
-				output = applyIntentFilter(output, intent, `file:${filePath}`);
+				const filtered = applyIntentFilter(indexableOutput, intent, `file:${filePath}`);
+				if (filtered !== indexableOutput) output = filtered;
 			}
 
 			const responseBytes = Buffer.byteLength(output);

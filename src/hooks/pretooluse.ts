@@ -12,7 +12,8 @@ import { join } from "node:path";
 
 const TOOL_PREFIX = "context-compress";
 
-// Read config from env
+// Hook controls are environment-only. This standalone bundled script does not
+// load the MCP server's .context-compress.json configuration.
 const blockCurl = process.env.CONTEXT_COMPRESS_BLOCK_CURL !== "0";
 const blockWebFetch = process.env.CONTEXT_COMPRESS_BLOCK_WEBFETCH !== "0";
 const nudgeOnRead = process.env.CONTEXT_COMPRESS_NUDGE_READ !== "0";
@@ -23,8 +24,69 @@ const nudgeOnGrep = process.env.CONTEXT_COMPRESS_NUDGE_GREP !== "0";
 const filterBash = process.env.CONTEXT_COMPRESS_FILTER_BASH === "1";
 const ccBin = process.env.CONTEXT_COMPRESS_BIN ?? "context-compress";
 // Compression mode plumbed through to `context-compress wrap`. Values:
-// "conservative" | "balanced" (default) | "aggressive".
+// "conservative" | "balanced" (default) | "aggressive" | "auto".
 const ccMode = process.env.CONTEXT_COMPRESS_MODE;
+
+const COMPRESSION_MODES = new Set(["conservative", "balanced", "aggressive", "auto"]);
+
+/**
+ * Reject configuration that could be interpreted as shell control or
+ * expansion syntax before constructing an updated Bash command. Quotes and
+ * spaces are deliberately allowed because valid installation paths may
+ * contain them; every accepted token is shell-quoted below.
+ */
+function hasUnsafeShellConfig(value: string): boolean {
+	for (const char of value) {
+		const codePoint = char.codePointAt(0) ?? 0;
+		if (codePoint < 32 || codePoint === 127 || ";&|<>`$".includes(char)) return true;
+	}
+	return false;
+}
+
+/** Remove one optional pair of quotes used to delimit a single config token. */
+function unwrapConfigToken(value: string): string | null {
+	if (value.length === 0 || value !== value.trim()) return null;
+	const quote = value[0];
+	if (quote !== "'" && quote !== '"') return value;
+	if (value.length < 2 || value.at(-1) !== quote) return null;
+	const unwrapped = value.slice(1, -1);
+	return unwrapped.length > 0 && !unwrapped.includes(quote) ? unwrapped : null;
+}
+
+function isAbsoluteExecutablePath(value: string): boolean {
+	return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]/.test(value);
+}
+
+function isSupportedScriptPath(value: string): boolean {
+	if (value.startsWith("-")) return false;
+	if (isAbsoluteExecutablePath(value)) return true;
+	// Relative script paths are supported only when they are already one token.
+	return !/\s/.test(value);
+}
+
+/**
+ * Parse the intentionally small CONTEXT_COMPRESS_BIN grammar:
+ *   - a package-provided executable name (for example context-compress)
+ *   - one absolute executable path
+ *   - node or tsx followed by exactly one script path
+ *
+ * The node/tsx remainder is treated as one path so the unquoted form emitted
+ * by older setup/plugin versions still works when its absolute path has spaces.
+ */
+function parseConfiguredBin(value: string): string[] | null {
+	if (hasUnsafeShellConfig(value)) return null;
+
+	const direct = unwrapConfigToken(value);
+	if (!direct) return null;
+	if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(direct)) return [direct];
+	if (isAbsoluteExecutablePath(direct)) return [direct];
+
+	const runtime = value.match(/^(node|tsx) +(.+)$/);
+	if (!runtime) return null;
+	const script = unwrapConfigToken(runtime[2]);
+	if (!script || !isSupportedScriptPath(script)) return null;
+	return [runtime[1], script];
+}
 
 /**
  * Commands whose output is the primary value and which produce no shell-state
@@ -115,7 +177,24 @@ function shouldWrap(cmd: string, cwd: string): boolean {
 }
 
 function shellQuote(s: string): string {
+	// Bare shell-safe words preserve the current readable command shape. All
+	// other values, including paths with spaces or quotes, become one inert word.
+	if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s;
 	return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function buildWrapCommand(command: string): string | null {
+	const binTokens = parseConfiguredBin(ccBin);
+	if (!binTokens) return null;
+	if (ccMode !== undefined && !COMPRESSION_MODES.has(ccMode)) return null;
+
+	const tokens = [
+		...binTokens,
+		"wrap",
+		...(ccMode === undefined ? [] : ["--mode", ccMode]),
+		command,
+	];
+	return tokens.map(shellQuote).join(" ");
 }
 
 let raw = "";
@@ -175,12 +254,14 @@ if (tool === "Bash") {
 	// `cwd` comes from the hook payload; fall back to our own for direct invocations.
 	const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
 	if (filterBash && shouldWrap(command, cwd)) {
-		const modeFlag = ccMode ? ` --mode ${ccMode}` : "";
-		respond({
-			updatedInput: {
-				command: `${ccBin} wrap${modeFlag} ${shellQuote(command)}`,
-			},
-		});
+		const updatedCommand = buildWrapCommand(command);
+		if (updatedCommand) {
+			respond({
+				updatedInput: {
+					command: updatedCommand,
+				},
+			});
+		}
 	}
 
 	// Allow all other Bash commands

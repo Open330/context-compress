@@ -45,6 +45,12 @@ export interface ExecFileOptions extends ExecOptions {
 }
 
 export interface ExecResult {
+	/**
+	 * Executor-capped stdout before lossy command, format, deduplication, and
+	 * response-truncation filters. Index-backed tools use this searchable copy
+	 * while `stdout` remains compact enough to return to the caller.
+	 */
+	indexableStdout: string;
 	stdout: string;
 	stderr: string;
 	exitCode: number | null;

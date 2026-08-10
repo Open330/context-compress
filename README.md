@@ -3,7 +3,7 @@
 # context-compress
 
 **Stop drowning your AI agent in shell output.**
-Large tool output stays searchable — not stuffed into the context window.
+Large tool output stays searchable in index-backed flows — not stuffed into the context window.
 Use it through an MCP server, a drop-in CLI, agent plugins, or all three.
 
 [![CI](https://github.com/Open330/context-compress/actions/workflows/ci.yml/badge.svg)](https://github.com/Open330/context-compress/actions/workflows/ci.yml)
@@ -29,7 +29,7 @@ Use it through an MCP server, a drop-in CLI, agent plugins, or all three.
 <td align="center" width="25%">
 
 **Searchable**
-<br>raw data retained
+<br>indexed data retained
 <br><sub>FTS5 + BM25</sub>
 
 </td>
@@ -77,8 +77,8 @@ That's it. Restart Claude Code and shell output is now compressed before it ente
 
 ```
 Install context-compress — an MCP server that compresses tool output for Claude Code.
-Raw data stays in sandboxed subprocesses, only concise summaries enter your context window.
-Saves ~99% of tokens on large outputs while keeping everything searchable via FTS5.
+Only the printed or filtered response enters your context window.
+For searchable retention, use index, fetch_and_index, batch_execute, or intent on a large execute call.
 
 npm install -g context-compress
 context-compress setup --auto
@@ -101,14 +101,14 @@ A single `git log` or `npm test` can dump 50KB+ into context — that's ~12,000 
 **context-compress** intercepts these tools, processes output in a sandbox, and returns only what matters:
 
 ```
-Before:  git log --oneline -100  →  8.2KB into context
-After:   execute("git log ...")  →  0.3KB summary + full data searchable in FTS5
+Before:  git log --oneline -100                    →  8.2KB into context
+After:   execute(..., intent: "recent changes")   →  0.3KB summary + bounded pre-filter data searchable in FTS5
 ```
 
 It works in two modes that compose freely:
 
 - **MCP server** — registers as a Claude Code MCP server with 8 tools (`execute`, `search`, `batch_execute`, `fetch_and_index`, `index`, `execute_file`, `stats`, `discover`). Agents call them directly when output would be large.
-- **Standalone CLI** — `context-compress wrap "<cmd>"` runs any shell command and pipes the output through the same compression pipeline. Drop-in for [RTK](https://github.com/rtk-ai/rtk) and friends. The PreToolUse hook can route `Bash` calls through it transparently when `CONTEXT_COMPRESS_FILTER_BASH=1`.
+- **Standalone CLI** — `context-compress wrap "<cmd>"` runs any shell command and pipes the output through the same compression pipeline. Drop-in for [RTK](https://github.com/rtk-ai/rtk) and friends. The PreToolUse hook can route `Bash` calls through it transparently when `CONTEXT_COMPRESS_FILTER_BASH=1`. This is response-only compression: detail omitted by a filter is not indexed or available to `search`.
 
 > Based on [context-mode](https://github.com/mksglu/claude-context-mode) by Mert Koseoğlu — rewritten in TypeScript with security hardening, architectural improvements, and better DX.
 
@@ -196,11 +196,16 @@ context-compress doctor
 └─────────────────────────────────────────────────────────┘
 ```
 
+The Store path applies only when a tool indexes content: `index`, `fetch_and_index`,
+`batch_execute`, and large `execute` calls with `intent`. Ordinary `execute` calls
+without `intent` and CLI `wrap` return compressed responses only; anything omitted
+from those responses is not searchable later.
+
 ### 8 MCP Tools
 
 | Tool | What it does |
 |:-----|:-------------|
-| **`execute`** | Run code in 11 languages. Only stdout enters context. |
+| **`execute`** | Run code in 11 languages. With `intent`, large executor-capped pre-filter output is indexed; without it, omitted response detail is not searchable. |
 | **`execute_file`** | Process a file via `FILE_CONTENT` variable — file never enters context. |
 | **`index`** | Chunk markdown/text into FTS5 knowledge base for search. |
 | **`search`** | BM25 search with Porter stemming → trigram → fuzzy fallback. |
@@ -262,7 +267,7 @@ The PreToolUse hook also forwards `CONTEXT_COMPRESS_MODE` automatically when wra
 Three capabilities layer on top of the modes above. All are grounded in the 2026 agent-compression literature, whose central finding is that *token-level* extractive compression (LLMLingua-2, Selective Context) breaks agents by destroying action grammar — so context-compress only ever operates on **whole structural units**, never partial tokens.
 
 - **Format-aware compression** — when no command-specific filter matches, output is compressed by its *shape*. Pretty-printed JSON is minified losslessly (balanced) or collapsed to a schema + sample (aggressive); NDJSON folds into per-shape summaries; repetitive logs fold into `template ×count` via variable masking (Drain-style). Error/warning lines are always kept verbatim, and balanced-mode JSON stays parseable. Typical wins: JSON −41% (still valid) to −96%, logs −98%.
-- **Intent-conditioned summaries** — pass `intent` to `execute` and large output is indexed, then the top query-ranked sections are inlined up to a byte budget (`CONTEXT_COMPRESS_INTENT_BUDGET_BYTES`, default 1800) instead of only listing section titles — fewer follow-up `search()` round-trips. Error lines are surfaced as a safety net.
+- **Intent-conditioned summaries** — pass `intent` to `execute` and large output is indexed from the executor-capped copy captured before lossy command, format, deduplication, and response-truncation filters. The top query-ranked sections are then inlined up to a byte budget (`CONTEXT_COMPRESS_INTENT_BUDGET_BYTES`, default 1800) instead of only listing section titles — fewer follow-up `search()` round-trips. Error lines are surfaced as a safety net. Without `intent`, `execute` only returns its compressed response and does not retain omitted detail.
 - **Self-tuning `auto` mode (ACON-style)** — when a command is compressed aggressively and then re-run fast (≤30s) repeatedly, `auto` records the "regret" and downgrades that command one step to preserve fidelity. Downgrades only ever *reduce* compression, so a false positive costs tokens, never correctness. See the self-tuning table in `stats`.
 
 Verify fidelity yourself with the quality-regression benchmark, which measures **survival of task-critical information**, not just token ratio:
@@ -333,7 +338,7 @@ context-compress achieves **99.2% token reduction** across a typical 12-operatio
 
 Without context-compress, 12 operations consume **133% of the 200K context window** — overflowing it entirely. With context-compress, the same operations use **1.1%**, leaving 98.9% free for actual conversation.
 
-> Data isn't deleted — it's indexed in FTS5 and searchable on demand. Small outputs (<5KB) pass through uncompressed.
+> Searchable retention applies to `index`, `fetch_and_index`, `batch_execute`, and large `execute` calls with `intent`. Ordinary `execute` and `wrap` calls only compress the response, so filtered-out detail is not available to `search`. Small intent-filter inputs (≤5KB by default) pass through without indexing.
 
 **[Read the full Token Reduction Report](docs/token-reduction-report.md)** — includes cost analysis, architecture deep-dive, and FAQ on context loss trade-offs.
 
@@ -360,9 +365,11 @@ Without context-compress, 12 operations consume **133% of the 200K context windo
 
 ## Configuration
 
-Loaded in order: **ENV vars** → **`.context-compress.json`** → **defaults**
+The MCP server loads its settings in this order: **ENV vars** →
+**`.context-compress.json`** → **defaults**. The standalone PreToolUse hook does
+not load that file; hook controls are environment-only.
 
-### Environment Variables
+### Server Environment Variables
 
 ```bash
 # Enable debug logging (stderr)
@@ -371,27 +378,6 @@ CONTEXT_COMPRESS_DEBUG=1
 # Pass specific env vars to subprocesses (default: none)
 CONTEXT_COMPRESS_PASSTHROUGH_ENV=GH_TOKEN,AWS_PROFILE
 
-# Disable curl/wget blocking
-CONTEXT_COMPRESS_BLOCK_CURL=0
-
-# Disable WebFetch blocking
-CONTEXT_COMPRESS_BLOCK_WEBFETCH=0
-
-# Disable Read/Grep nudges
-CONTEXT_COMPRESS_NUDGE_READ=0
-CONTEXT_COMPRESS_NUDGE_GREP=0
-
-# Compression mode: conservative | balanced (default) | aggressive | auto
-CONTEXT_COMPRESS_MODE=balanced
-
-# Auto mode prefers the Anthropic API when ANTHROPIC_API_KEY is set
-# in your shell or secret manager (faster than `claude -p` fallback)
-
-# RTK-style transparent Bash wrapping (default: off)
-CONTEXT_COMPRESS_FILTER_BASH=1
-
-# Override path to the context-compress binary used by the hook
-CONTEXT_COMPRESS_BIN=/usr/local/bin/context-compress
 ```
 
 ### Config File
@@ -401,11 +387,40 @@ Create `.context-compress.json` in your project root or home directory:
 ```json
 {
   "passthroughEnvVars": ["GH_TOKEN", "AWS_PROFILE", "KUBECONFIG"],
-  "blockCurl": true,
-  "blockWebFetch": true,
-  "debug": false
+  "debug": false,
+  "maxOutputBytes": 102400
 }
 ```
+
+Hook-only keys such as `blockCurl`, `blockWebFetch`, `nudgeOnRead`, and
+`nudgeOnGrep` are not part of the JSON-file schema.
+
+### PreToolUse Hook Environment Variables
+
+The hook reads these variables directly from its process environment:
+
+```bash
+# Disable curl/wget or WebFetch blocking
+CONTEXT_COMPRESS_BLOCK_CURL=0
+CONTEXT_COMPRESS_BLOCK_WEBFETCH=0
+
+# Disable Read/Grep nudges
+CONTEXT_COMPRESS_NUDGE_READ=0
+CONTEXT_COMPRESS_NUDGE_GREP=0
+
+# RTK-style transparent Bash wrapping (default: off)
+CONTEXT_COMPRESS_FILTER_BASH=1
+
+# Compression mode forwarded to wrap: conservative | balanced | aggressive | auto
+CONTEXT_COMPRESS_MODE=balanced
+
+# Override the context-compress binary used by the hook
+CONTEXT_COMPRESS_BIN=/usr/local/bin/context-compress
+```
+
+`CONTEXT_COMPRESS_MODE` also configures direct CLI `wrap`/`filter` calls. Auto
+mode prefers the Anthropic API when `ANTHROPIC_API_KEY` is set in your shell or
+secret manager (faster than the `claude -p` fallback).
 
 ---
 
@@ -425,6 +440,10 @@ context-compress wrap --mode aggressive "git log -50"  # max compression
 context-compress wrap --stream "tail -f /var/log/app.log"  # line-by-line for long-running cmds
 context-compress filter --cmd "git push" < captured.log    # pipe filter
 ```
+
+`wrap` and `filter` do not write to the FTS5 knowledge base. They reduce the
+response only, so content removed by their filters cannot be recovered with
+`search` unless you separately index the original content.
 
 ### Bash auto-wrap (transparent mode)
 

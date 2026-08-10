@@ -1,4 +1,7 @@
 import assert from "node:assert";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { ContentStore } from "../../src/store.js";
 
@@ -50,6 +53,64 @@ Final notes.
 		} finally {
 			store.close();
 		}
+	});
+
+	it("reopens the trigram index without duplicate backfill and indexes new chunks", () => {
+		const dir = mkdtempSync(join(tmpdir(), "cc-store-"));
+		const dbPath = join(dir, "store.db");
+		let store: ContentStore | undefined;
+
+		try {
+			store = new ContentStore(dbPath);
+			store.index("JavaScript runtime behavior and tooling details.", "runtime");
+			const initialResults = store.search("javscript", { limit: 10 });
+			const initialStats = store.getStats();
+
+			assert.ok(initialResults.results.length > 0);
+			assert.strictEqual(initialStats.hasTrigramTable, true);
+			store.close();
+
+			store = new ContentStore(dbPath);
+			assert.deepStrictEqual(store.getStats(), initialStats);
+			assert.strictEqual(
+				store.search("javscript", { limit: 10 }).results.length,
+				initialResults.results.length,
+			);
+
+			store.index("TypeScript compiler optimization and diagnostics.", "compiler");
+			assert.ok(store.search("typescrpt", { limit: 10 }).results.length > 0);
+			assert.strictEqual(store.getStats().totalChunks, initialStats.totalChunks + 1);
+		} finally {
+			store?.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("creates default databases in private random directories and removes them on close", {
+		skip: process.platform === "win32",
+	}, () => {
+		const first = new ContentStore();
+		const second = new ContentStore();
+		const firstPath = (first as unknown as { db: { name: string } }).db.name;
+		const secondPath = (second as unknown as { db: { name: string } }).db.name;
+		const firstDir = dirname(firstPath);
+		const secondDir = dirname(secondPath);
+
+		try {
+			assert.strictEqual(basename(firstPath), "store.db");
+			assert.notStrictEqual(firstDir, secondDir);
+			assert.notStrictEqual(firstPath, join(tmpdir(), `context-compress-${process.pid}.db`));
+			assert.strictEqual(statSync(firstDir).mode & 0o777, 0o700);
+			assert.strictEqual(statSync(secondDir).mode & 0o777, 0o700);
+			assert.ok(existsSync(firstPath));
+			assert.ok(existsSync(secondPath));
+		} finally {
+			first.close();
+			second.close();
+		}
+
+		assert.strictEqual(existsSync(firstDir), false);
+		assert.strictEqual(existsSync(secondDir), false);
 	});
 
 	it("getDistinctiveTerms returns strings and excludes stopwords", () => {

@@ -60,7 +60,7 @@ describe("applyAutoConfig", () => {
 		assert.ok(s.mcpServers["context-compress"], "ours must be added");
 	});
 
-	it("does not duplicate the hook when one already exists from a prior install", () => {
+	it("repairs a stale context-compress hook in place", () => {
 		const settings: Record<string, unknown> = {
 			hooks: {
 				PreToolUse: [
@@ -71,11 +71,68 @@ describe("applyAutoConfig", () => {
 				],
 			},
 		};
-		applyAutoConfig(settings, PATHS, true);
+		const changes = applyAutoConfig(settings, PATHS, true);
 		const s = settings as {
-			hooks: { PreToolUse: Array<unknown> };
+			hooks: {
+				PreToolUse: Array<{
+					matcher?: string;
+					hooks?: Array<{ type?: string; command?: string }>;
+				}>;
+			};
 		};
 		assert.strictEqual(s.hooks.PreToolUse.length, 1, "should not add a duplicate");
+		assert.deepStrictEqual(s.hooks.PreToolUse[0], {
+			matcher: "Bash|Read|Grep|WebFetch|Task",
+			hooks: [{ type: "command", command: `node ${PATHS.hookEntry}` }],
+		});
+		assert.ok(changes.some((change) => change.includes("Updated PreToolUse hook")));
+	});
+
+	it("preserves an unrelated pretooluse command and appends the owned hook", () => {
+		const unrelated = {
+			matcher: "Bash",
+			hooks: [{ type: "command", command: "node /other/tool-pretooluse.mjs" }],
+		};
+		const settings: Record<string, unknown> = {
+			hooks: { PreToolUse: [unrelated] },
+		};
+
+		applyAutoConfig(settings, PATHS, false);
+		const s = settings as {
+			hooks: {
+				PreToolUse: Array<{
+					matcher?: string;
+					hooks?: Array<{ type?: string; command?: string }>;
+				}>;
+			};
+		};
+		assert.strictEqual(s.hooks.PreToolUse.length, 2);
+		assert.deepStrictEqual(s.hooks.PreToolUse[0], unrelated);
+		assert.deepStrictEqual(s.hooks.PreToolUse[1], {
+			matcher: "Bash|Read|Grep|WebFetch|Task",
+			hooks: [{ type: "command", command: `node ${PATHS.hookEntry}` }],
+		});
+	});
+
+	it("recognizes the exact current hook without changes or duplicates", () => {
+		const settings: Record<string, unknown> = {
+			mcpServers: {
+				"context-compress": { command: "node", args: [PATHS.serverEntry] },
+			},
+			hooks: {
+				PreToolUse: [
+					{
+						matcher: "Bash|Read|Grep|WebFetch|Task",
+						hooks: [{ type: "command", command: `node ${PATHS.hookEntry}` }],
+					},
+				],
+			},
+		};
+
+		const changes = applyAutoConfig(settings, PATHS, false);
+		const s = settings as { hooks: { PreToolUse: Array<unknown> } };
+		assert.deepStrictEqual(changes, []);
+		assert.strictEqual(s.hooks.PreToolUse.length, 1);
 	});
 
 	it("skips env writes when filterBash is false", () => {
@@ -86,6 +143,39 @@ describe("applyAutoConfig", () => {
 			s.env === undefined || s.env.CONTEXT_COMPRESS_FILTER_BASH === undefined,
 			"filter-bash should not be set when disabled",
 		);
+	});
+
+	it("removes only filter-bash env keys when transitioning to disabled", () => {
+		const settings: Record<string, unknown> = {};
+		applyAutoConfig(settings, PATHS, true);
+		const s = settings as { env: Record<string, string> };
+		s.env.UNRELATED_FLAG = "preserved";
+
+		const changes = applyAutoConfig(settings, PATHS, false);
+
+		assert.deepStrictEqual(s.env, { UNRELATED_FLAG: "preserved" });
+		assert.ok(changes.includes("Removed CONTEXT_COMPRESS_FILTER_BASH"));
+		assert.ok(changes.includes("Removed CONTEXT_COMPRESS_BIN"));
+	});
+
+	it("is idempotent when filter-bash env keys are already absent", () => {
+		const settings: Record<string, unknown> = {
+			env: { UNRELATED_FLAG: "preserved" },
+			mcpServers: {
+				"context-compress": { command: "node", args: [PATHS.serverEntry] },
+			},
+			hooks: {
+				PreToolUse: [
+					{
+						matcher: "Bash|Read|Grep|WebFetch|Task",
+						hooks: [{ type: "command", command: `node ${PATHS.hookEntry}` }],
+					},
+				],
+			},
+		};
+
+		assert.deepStrictEqual(applyAutoConfig(settings, PATHS, false), []);
+		assert.deepStrictEqual(settings.env, { UNRELATED_FLAG: "preserved" });
 	});
 
 	it("uses tsx when given .ts source paths (dev mode)", () => {

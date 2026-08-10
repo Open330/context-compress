@@ -72,18 +72,26 @@ describe("plugin manifests", () => {
 			hooks: {
 				PreToolUse: Array<{
 					matcher: string;
-					hooks: Array<{ command: string; timeout: number }>;
+					hooks: Array<{ command: string; commandWindows: string; timeout: number }>;
 				}>;
 			};
 		}>("hooks/claude-codex-hooks.json");
 
 		const entry = hooks.hooks.PreToolUse[0];
 		const command = entry.hooks[0].command;
+		const commandWindows = entry.hooks[0].commandWindows;
 
 		assert.match(entry.matcher, /Bash/);
 		assert.match(command, /CONTEXT_COMPRESS_FILTER_BASH=1/);
 		assert.match(command, /CONTEXT_COMPRESS_BIN=.*dist\/cli\/index\.js/);
 		assert.match(command, /hooks\/pretooluse\.mjs/);
+		assert.match(commandWindows, /\$env:CONTEXT_COMPRESS_FILTER_BASH='1'/);
+		assert.match(
+			commandWindows,
+			/\$env:CONTEXT_COMPRESS_BIN="node `"\$env:CLAUDE_PLUGIN_ROOT\\dist\\cli\\index\.js`""/,
+		);
+		assert.doesNotMatch(commandWindows, /CONTEXT_COMPRESS_BIN='context-compress'/);
+		assert.match(commandWindows, /node "\$env:CLAUDE_PLUGIN_ROOT\\hooks\\pretooluse\.mjs"/);
 		assert.strictEqual(entry.hooks[0].timeout, 5);
 	});
 
@@ -109,6 +117,34 @@ describe("plugin manifests", () => {
 		const rewritten = parsed.hookSpecificOutput.updatedInput?.command ?? "";
 
 		assert.match(rewritten, /^node .*dist\/cli\/index\.js wrap --mode balanced 'git log -10'$/);
+	});
+
+	it("keeps the packaged Windows CLI path quoted when rewriting Bash commands", () => {
+		const hookPath = join(root, "src/hooks/pretooluse.ts");
+		const pluginRoot = "C:\\Users\\Jane Doe\\.claude\\plugins\\context-compress";
+		const packagedBin = `node "${pluginRoot}\\dist\\cli\\index.js"`;
+		const output = execFileSync("node", ["--import", "tsx", hookPath], {
+			input: JSON.stringify({
+				tool_name: "Bash",
+				tool_input: { command: "git log -10" },
+			}),
+			env: {
+				...process.env,
+				CONTEXT_COMPRESS_FILTER_BASH: "1",
+				CONTEXT_COMPRESS_BIN: packagedBin,
+				CONTEXT_COMPRESS_MODE: "balanced",
+			},
+			encoding: "utf-8",
+		});
+
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { updatedInput?: { command?: string } };
+		};
+
+		assert.strictEqual(
+			parsed.hookSpecificOutput.updatedInput?.command,
+			`node '${pluginRoot}\\dist\\cli\\index.js' wrap --mode balanced 'git log -10'`,
+		);
 	});
 
 	it("package distribution includes plugin, hook, skill, and benchmark assets", () => {

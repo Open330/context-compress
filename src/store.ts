@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -138,6 +138,7 @@ function levenshtein(a: string, b: string, maxDist?: number): number {
 
 export class ContentStore {
 	private db: Database.Database;
+	private ephemeralDir: string | null = null;
 	private hasTrigramTable = false;
 	private closed = false;
 
@@ -163,9 +164,14 @@ export class ContentStore {
 			path = join(dir, "store.db");
 			debug("Using persistent DB at", path);
 		} else {
-			path =
-				(typeof options === "object" ? options?.dbPath : undefined) ??
-				join(tmpdir(), `context-compress-${process.pid}.db`);
+			const explicitPath = typeof options === "object" ? options?.dbPath : undefined;
+			if (explicitPath !== undefined) {
+				path = explicitPath;
+			} else {
+				this.ephemeralDir = mkdtempSync(join(tmpdir(), "context-compress-store-"));
+				chmodSync(this.ephemeralDir, 0o700);
+				path = join(this.ephemeralDir, "store.db");
+			}
 		}
 		this.db = new Database(path);
 		this.db.pragma("journal_mode = WAL");
@@ -195,6 +201,11 @@ export class ContentStore {
 				word TEXT PRIMARY KEY
 			);
 		`);
+
+		this.hasTrigramTable =
+			this.db
+				.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_trigram'")
+				.get() !== undefined;
 
 		// Cache prepared statements
 		this.insertSourceStmt = this.db.prepare(
@@ -575,7 +586,32 @@ export class ContentStore {
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.db.close();
+		try {
+			this.db.close();
+		} finally {
+			this.removeEphemeralDb();
+		}
+	}
+
+	private removeEphemeralDb(): void {
+		const dir = this.ephemeralDir;
+		if (!dir) return;
+		this.ephemeralDir = null;
+
+		const dbPath = join(dir, "store.db");
+		for (const suffix of ["", "-wal", "-shm"]) {
+			try {
+				unlinkSync(dbPath + suffix);
+			} catch {
+				// SQLite may remove sidecars while closing.
+			}
+		}
+
+		try {
+			rmdirSync(dir);
+		} catch (error) {
+			debug("Ephemeral DB cleanup error:", error);
+		}
 	}
 }
 

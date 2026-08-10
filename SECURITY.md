@@ -57,4 +57,4 @@ For production or high-security deployments, consider the following:
 
 ## Reporting Vulnerabilities
 
-Please report security issues via [GitHub Issues](https://github.com/nickytonline/context-compress/issues). Include steps to reproduce and any relevant configuration details.
+Please report security issues via [GitHub's private vulnerability reporting](https://github.com/Open330/context-compress/security/advisories/new). Include steps to reproduce and any relevant configuration details.

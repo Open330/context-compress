@@ -79,8 +79,11 @@ export function scrubSecrets(text: string): string {
 			.replace(/\b(mysql|mysqldump|mariadb|mariadb-dump)\b([^\n]*?)\s-p\S+/g, "$1$2 -p[REDACTED]")
 			// AWS access key id
 			.replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[REDACTED]")
-			// GitHub / GitLab tokens
-			.replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{15,})\b/g, "[REDACTED]")
+			// npm / GitHub / GitLab tokens
+			.replace(
+				/\b(npm_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{15,})\b/g,
+				"[REDACTED]",
+			)
 			// Anthropic / OpenAI-style API keys
 			.replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
 			// Bearer tokens
@@ -92,7 +95,7 @@ export function scrubSecrets(text: string): string {
 			)
 			// key=value secrets (password, token, secret, api key, credentials)
 			.replace(
-				/\b(password|passwd|pwd|secret|token|api[_-]?key|auth[_-]?token|access[_-]?key|client[_-]?secret)(\s*[=:]\s*)("?)[^\s"']{4,}("?)/gi,
+				/\b((?:[a-z0-9]+_)*(?:password|passwd|pwd|secret|token|api[_-]?key|auth[_-]?token|access[_-]?key|client[_-]?secret))(\s*[=:]\s*)("?)[^\s"']{4,}("?)/gi,
 				"$1$2[REDACTED]",
 			)
 	);

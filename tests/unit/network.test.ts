@@ -117,6 +117,57 @@ describe("isPrivateHost", () => {
 		assert.strictEqual(isPrivateHost("example.com"), false);
 		assert.strictEqual(isPrivateHost("api.github.com"), false);
 	});
+
+	it("blocks non-global special-use ranges", () => {
+		const addresses = [
+			"192.0.0.0",
+			"192.0.0.255",
+			"198.18.0.1",
+			"198.19.255.255",
+			"224.0.0.1",
+			"239.255.255.255",
+			"240.0.0.1",
+			"255.255.255.255",
+			"ff02::1",
+			"ffff::1",
+			"fec0::1",
+			"feff::1",
+		];
+
+		for (const address of addresses) {
+			assert.strictEqual(isPrivateHost(address), true, `${address} should be blocked`);
+		}
+	});
+
+	it("normalizes alternate IP literal forms before classification", () => {
+		const cases: Array<[address: string, expected: boolean]> = [
+			["2130706433", true],
+			["0x7f000001", true],
+			["0177.0.0.1", true],
+			["0:0:0:0:0:ffff:7f00:1", true],
+			["[FEc0:0000:0000:0000:0000:0000:0000:0001]", true],
+			["0x08080808", false],
+			["0:0:0:0:0:ffff:808:808", false],
+		];
+
+		for (const [address, expected] of cases) {
+			assert.strictEqual(isPrivateHost(address), expected, address);
+		}
+	});
+
+	it("allows global addresses adjacent to blocked special-use ranges", () => {
+		const addresses = [
+			"192.0.1.1",
+			"198.17.255.255",
+			"198.20.0.1",
+			"223.255.255.254",
+			"2001:4860:4860::8888",
+		];
+
+		for (const address of addresses) {
+			assert.strictEqual(isPrivateHost(address), false, `${address} should be allowed`);
+		}
+	});
 });
 
 describe("resolveAndValidate", () => {
@@ -126,7 +177,10 @@ describe("resolveAndValidate", () => {
 			family: 4,
 		}));
 		const result = await resolveAndValidate("https://example.com/page");
-		assert.deepStrictEqual(result, { url: "https://example.com/page", resolvedIp: "93.184.216.34" });
+		assert.deepStrictEqual(result, {
+			url: "https://example.com/page",
+			resolvedIp: "93.184.216.34",
+		});
 		lookup.mock.restore();
 	});
 
@@ -197,6 +251,80 @@ describe("resolveAndValidate", () => {
 	it("allows raw public IPv4 addresses", async () => {
 		const result = await resolveAndValidate("https://8.8.8.8/dns");
 		assert.deepStrictEqual(result, { url: "https://8.8.8.8/dns", resolvedIp: null });
+	});
+
+	it("blocks raw special-use IP literals without DNS lookup", async () => {
+		const lookup = mock.method(dns.promises, "lookup", async () => {
+			throw new Error("raw IPs must not use DNS");
+		});
+		const urls = [
+			"https://192.0.0.1/",
+			"https://198.18.0.1/",
+			"https://224.0.0.1/",
+			"https://240.0.0.1/",
+			"https://[ff02::1]/",
+			"https://[fec0::1]/",
+			"https://2130706433/",
+		];
+
+		try {
+			for (const url of urls) {
+				await assert.rejects(() => resolveAndValidate(url), /Blocked/);
+			}
+			assert.strictEqual(lookup.mock.callCount(), 0);
+		} finally {
+			lookup.mock.restore();
+		}
+	});
+
+	it("blocks special-use IPv4 and IPv6 DNS answers", async () => {
+		const cases: Array<[address: string, family: 4 | 6]> = [
+			["192.0.0.1", 4],
+			["198.18.0.1", 4],
+			["224.0.0.1", 4],
+			["240.0.0.1", 4],
+			["ff02::1", 6],
+			["fec0::1", 6],
+		];
+
+		for (const [address, family] of cases) {
+			const lookup = mock.method(
+				dns.promises,
+				"lookup",
+				async (_hostname: string, opts: { family: number }) => {
+					if (opts.family !== family) throw new Error("ENOTFOUND");
+					return { address, family };
+				},
+			);
+			try {
+				await assert.rejects(
+					() => resolveAndValidate("https://evil.example/"),
+					(err: Error) => err.message.includes("Blocked") && err.message.includes(address),
+				);
+			} finally {
+				lookup.mock.restore();
+			}
+		}
+	});
+
+	it("normalizes a public IPv6 DNS answer for connection pinning", async () => {
+		const lookup = mock.method(
+			dns.promises,
+			"lookup",
+			async (_hostname: string, opts: { family: number }) => {
+				if (opts.family === 4) throw new Error("ENOTFOUND");
+				return { address: "2606:2800:0220:0001:0248:1893:25c8:1946", family: 6 };
+			},
+		);
+		try {
+			const result = await resolveAndValidate("https://example.com/page");
+			assert.deepStrictEqual(result, {
+				url: "https://example.com/page",
+				resolvedIp: "2606:2800:220:1:248:1893:25c8:1946",
+			});
+		} finally {
+			lookup.mock.restore();
+		}
 	});
 
 	it("rejects when DNS resolution fails for both families (fail-closed)", async () => {

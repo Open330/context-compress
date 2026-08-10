@@ -21,7 +21,7 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 					.string()
 					.optional()
 					.describe("Filter to a specific indexed source (partial match)."),
-				limit: z.number().default(3).describe("Results per query (default: 3)"),
+				limit: z.number().int().positive().default(3).describe("Results per query (default: 3)"),
 			},
 			// Pure read over the local FTS5 index — no writes, no network.
 			annotations: {
@@ -48,7 +48,7 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 			}
 
 			const effectiveLimit =
-				callCount > config.searchReduceAfter ? 1 : Math.min(limit, config.searchLimit);
+				callCount > config.searchReduceAfter ? 1 : Math.max(1, Math.min(limit, config.searchLimit));
 
 			const allResults: string[] = [];
 			let totalBytes = 0;

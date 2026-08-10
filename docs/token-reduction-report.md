@@ -48,7 +48,7 @@ The worst part: **99% of that tool output is noise** — import statements, boil
 
 ## The Solution: 4-Layer Architecture
 
-context-compress doesn't delete data — it **defers** it. All data is preserved and searchable. Only the relevant parts enter context.
+context-compress has two distinct paths. Response-only calls compress what enters context; details they omit are not retained. Index-backed calls preserve a bounded corpus in FTS5 so only relevant parts enter context while the indexed data remains searchable.
 
 ### Layer 0: Command-Specific Output Filters (v2026.3.22)
 
@@ -67,6 +67,10 @@ Before generic compression, output passes through command-aware filters that str
 Additionally, all output passes through:
 - **ANSI stripping**: Terminal escape codes (colors, cursor movement) are always removed — pure noise for LLMs
 - **Progress line removal**: Spinner characters, percentage bars, download/ETA lines are filtered
+
+These filters only change the returned response. CLI `wrap`/`filter` and an
+ordinary `execute` call without `intent` do not automatically store the original,
+so detail removed here is not available to `search`.
 
 ### Layer 1: Sandbox Execution
 
@@ -88,7 +92,7 @@ The agent isn't blindly losing context — it's **choosing** what matters via co
 
 ### Layer 2: FTS5 Knowledge Base
 
-Full data is stored in a searchable SQLite FTS5 database with BM25 ranking, Porter stemming, trigram matching, and Levenshtein fuzzy correction (with early-exit optimization).
+Content sent through `index`, `fetch_and_index`, or `batch_execute` is stored in a searchable SQLite FTS5 database with BM25 ranking, Porter stemming, trigram matching, and Levenshtein fuzzy correction (with early-exit optimization). A large `execute` call also uses this path when it includes `intent`.
 
 ```
 index(path: "snapshot.md")          → 56KB stored, 42 chunks created
@@ -97,7 +101,7 @@ search("navigation menu")           → 200B match returned
 search("order table row headers")   → 180B match returned
 ```
 
-Data is **not lost**. It's **indexed and searchable on demand**.
+For these index-backed calls, the bounded indexed corpus remains searchable on demand.
 
 **Persistence option**: Set `persistDb: true` in config to survive MCP server restarts.
 
@@ -109,10 +113,10 @@ When the agent provides an `intent` parameter, large outputs are automatically f
 execute(code: "npm test", intent: "failing tests")
 
 Output < 5KB  →  returned as-is (no compression)
-Output > 5KB  →  auto-indexed, only intent-matching sections returned
+Output > 5KB  →  executor-capped pre-filter output indexed; only intent-matching sections returned
 ```
 
-Small outputs are **never compressed**. Large outputs are filtered by what was actually asked for.
+On this intent path, small outputs pass through without indexing. Large outputs are indexed from the executor-capped copy captured before lossy command, format, deduplication, and response-truncation filters, then filtered by what was actually asked for.
 
 ---
 
@@ -151,7 +155,7 @@ The following comparison uses realistic output sizes measured from the context-c
 | | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
 | **Before** | 5,000 | ~1,250 | `Bash git log` → all commits in context |
-| **After** | 250 | ~63 | `execute` + `search` for specific commits |
+| **After** | 250 | ~63 | `execute` with `intent` + `search` for specific commits |
 | **Saved** | | **~1,187** | **95.0% reduction** |
 
 ### 5. git diff (3 commits, ~8KB)
@@ -159,7 +163,7 @@ The following comparison uses realistic output sizes measured from the context-c
 | | Bytes | Tokens (est.) | Method |
 |:--|--:|--:|:--|
 | **Before** | 8,000 | ~2,000 | `Bash git diff` → full patch in context |
-| **After** | 400 | ~100 | `execute` + `search` for changed functions |
+| **After** | 400 | ~100 | `execute` with `intent` + `search` for changed functions |
 | **Saved** | | **~1,900** | **95.0% reduction** |
 
 ### 6. grep across codebase (~1.4KB)
@@ -461,7 +465,7 @@ WITHOUT context-compress (passive exposure):
 │  - Quality degrades as context fills up              │
 └──────────────────────────────────────────────────────┘
 
-WITH context-compress (active retrieval):
+WITH an index-backed context-compress flow (active retrieval):
 ┌──────────────────────────────────────────────────────┐
 │ ~105 tokens loaded into context                       │
 │                                                      │
@@ -482,7 +486,7 @@ WITHOUT context-compress:
   "Here, read all 4.5 billion web pages, then answer my question."
   → Impossible. You overflow and forget the early pages.
 
-WITH context-compress:
+WITH an index-backed context-compress flow:
   "All pages are indexed in Google. What do you want to search?"
   → You find exactly what you need. Nothing is lost.
 ```
@@ -493,10 +497,11 @@ To be honest, there are edge cases:
 
 | Scenario | Risk Level | Mitigation |
 |:--|:--|:--|
+| A response-only `execute`, `wrap`, or `filter` omits needed detail | Medium | Re-run conservatively or send the original through `index`, `batch_execute`, or a large `execute` call with `intent` |
 | Agent needs full file review (every line) | Medium | Use `Read` directly for small files — context-compress doesn't override built-in tools |
 | Agent's search query misses relevant data | Low | Search again with different terms. FTS5 supports Porter stemming + trigram + fuzzy matching |
 | Agent forgets to search for something | Low | Same risk as any agent workflow. Agent can always `search()` later |
-| Small output from a command | None | Outputs under 5KB pass through uncompressed — no modification at all |
+| Small output on the intent-filter path | None | Outputs at or below the default 5KB intent threshold pass through without indexing |
 
 ### The Bottom Line
 
@@ -516,7 +521,7 @@ context-compress trades **passive exposure to noise** for **active retrieval of 
 
 | Tool | Mechanism | Best For |
 |:--|:--|:--|
-| `execute` | Runs code in sandbox (11 languages). Only `console.log` enters context | CLI commands, API calls, test runners |
+| `execute` | Runs code in sandbox (11 languages). Large output is searchable only when `intent` triggers indexing | CLI commands, API calls, test runners |
 | `execute_file` | Reads file into sandbox. Only printed summary enters context | Large source files, CSVs, logs, data files |
 | `index` + `search` | FTS5 stores all data. BM25 returns only matching chunks | Documentation, snapshots, large datasets |
 | `fetch_and_index` | HTML → markdown → FTS5. Returns 3KB preview + searchable index | Web pages, API docs, reference material |
@@ -526,7 +531,7 @@ context-compress trades **passive exposure to noise** for **active retrieval of 
 
 The core principle:
 
-> **Raw data stays in the sandbox or FTS5 database. Only the answer enters context.**
+> **Response-only calls return compressed output and do not retain omitted detail. Index-backed calls keep a bounded searchable corpus in FTS5 and return only the answer.**
 
 ---
 

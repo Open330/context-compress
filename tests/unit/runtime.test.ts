@@ -1,6 +1,12 @@
 import assert from "node:assert";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ALL_PLUGINS, detectRuntimes } from "../../src/runtime/index.js";
+
+const goAvailable = spawnSync("go", ["version"], { stdio: "ignore" }).status === 0;
 
 describe("runtime detection and plugins", () => {
 	it("detectRuntimes returns a map with javascript and shell", async () => {
@@ -32,6 +38,101 @@ describe("runtime detection and plugins", () => {
 		assert.match(preprocessed, /package main/);
 		assert.match(preprocessed, /func main/);
 	});
+
+	it("go plugin injects file variables after package imports", () => {
+		const plugin = ALL_PLUGINS.find((p) => p.language === "go");
+		assert.ok(plugin?.wrapWithFileContent);
+
+		const cases = [
+			{
+				name: "grouped imports without os",
+				code: 'package main\n\nimport (\n\t"fmt"\n\t"strings"\n)\n\nfunc main() { fmt.Print(strings.TrimSpace(FILE_CONTENT)) }\n',
+				originalImports: 'import (\n\t"fmt"\n\t"strings"\n)',
+				expectedReadFile: "os.ReadFile(FILE_CONTENT_PATH)",
+				expectedOsImports: 1,
+			},
+			{
+				name: "existing os import",
+				code: 'package main\n\nimport "os"\n\nfunc main() { println(FILE_CONTENT, os.Args[0]) }\n',
+				originalImports: 'import "os"',
+				expectedReadFile: "os.ReadFile(FILE_CONTENT_PATH)",
+				expectedOsImports: 1,
+			},
+			{
+				name: "aliased os import",
+				code: 'package main\n\nimport stdos "os"\n\nfunc main() { println(FILE_CONTENT, stdos.Args[0]) }\n',
+				originalImports: 'import stdos "os"',
+				expectedReadFile: "stdos.ReadFile(FILE_CONTENT_PATH)",
+				expectedOsImports: 1,
+			},
+			{
+				name: "no imports",
+				code: "package main\n\nfunc main() { println(FILE_CONTENT, FILE_CONTENT_PATH) }\n",
+				originalImports: undefined,
+				expectedReadFile: "os.ReadFile(FILE_CONTENT_PATH)",
+				expectedOsImports: 1,
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const generated = plugin.wrapWithFileContent(testCase.code, "/tmp/input.txt");
+			if (testCase.originalImports) {
+				assert.ok(
+					generated.includes(testCase.originalImports),
+					`${testCase.name}: existing import order changed`,
+				);
+			}
+			assert.strictEqual(
+				generated.split('"os"').length - 1,
+				testCase.expectedOsImports,
+				`${testCase.name}: os should be imported once`,
+			);
+			assert.ok(
+				generated.indexOf(testCase.expectedReadFile) < generated.indexOf("func main"),
+				`${testCase.name}: variables should follow imports and precede declarations`,
+			);
+			assert.match(generated, /var FILE_CONTENT_PATH = "\/tmp\/input\.txt"/);
+			assert.match(generated, /var FILE_CONTENT = func\(\) string/);
+		}
+	});
+
+	it("go plugin preserves CRLF in package-form generated code", () => {
+		const plugin = ALL_PLUGINS.find((p) => p.language === "go");
+		assert.ok(plugin?.wrapWithFileContent);
+
+		const code =
+			'package main\r\n\r\nimport "fmt"\r\n\r\nfunc main() { fmt.Print(FILE_CONTENT) }\r\n';
+		const generated = plugin.wrapWithFileContent(code, "C:\\input.txt");
+		assert.doesNotMatch(generated, /(?<!\r)\n/);
+		assert.match(generated, /import "fmt"\r\nimport "os"\r\n\r\nvar FILE_CONTENT_PATH/);
+	});
+
+	it(
+		"go plugin generates executable package-form code",
+		{ skip: !goAvailable },
+		() => {
+			const plugin = ALL_PLUGINS.find((p) => p.language === "go");
+			assert.ok(plugin?.wrapWithFileContent);
+			const dir = mkdtempSync(join(tmpdir(), "cc-go-runtime-"));
+			try {
+				const inputPath = join(dir, "input.txt");
+				const sourcePath = join(dir, "main.go");
+				writeFileSync(inputPath, "injected content");
+				writeFileSync(
+					sourcePath,
+					plugin.wrapWithFileContent(
+						'package main\n\nimport "fmt"\n\nfunc main() { fmt.Print(FILE_CONTENT) }\n',
+						inputPath,
+					),
+				);
+				const result = spawnSync("go", ["run", sourcePath], { encoding: "utf8" });
+				assert.strictEqual(result.status, 0, result.stderr);
+				assert.strictEqual(result.stdout, "injected content");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("rust plugin compileStep returns execFile-style argument array", () => {
 		const plugin = ALL_PLUGINS.find((p) => p.language === "rust");

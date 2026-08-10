@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { loadConfig } from "../config.js";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
 import {
 	applyCommandFilter,
@@ -10,6 +11,7 @@ import {
 import { applyFormatFilter } from "../format-filter.js";
 import { pickModeAuto } from "../util/auto-mode.js";
 import { StreamCompressor } from "../util/stream-compress.js";
+import { formatBytes } from "../utils.js";
 
 // Generic dedup/progress/group pipeline kicks in once output crosses these
 // thresholds. Lower thresholds = pipeline runs on more outputs = better
@@ -143,7 +145,11 @@ export async function runFilter(args: string[]): Promise<number> {
  *   context-compress wrap --stream "tail -f /var/log/app.log"
  *   context-compress wrap -- npm test
  */
-export async function runWrap(args: string[]): Promise<number> {
+export async function runWrap(
+	args: string[],
+	/** Override the configured hard cap; intended for embedded callers and deterministic tests. */
+	options: { captureCapBytes?: number } = {},
+): Promise<number> {
 	if (args.length === 0) {
 		process.stderr.write("Usage: context-compress wrap [--stream] [--mode <m>] <command...>\n");
 		return 2;
@@ -177,27 +183,84 @@ export async function runWrap(args: string[]): Promise<number> {
 			shell: true,
 			stdio: ["inherit", "pipe", "pipe"],
 			env: { ...process.env, NO_COLOR: "1" },
+			// A separate process group lets the capture cap terminate the shell and
+			// descendants that may otherwise keep its stdout/stderr pipes open.
+			detached: process.platform !== "win32",
 		});
 
 		if (stream) {
 			runStreaming(proc, resolve);
 		} else {
-			runBuffered(proc, cmdLine, mode, resolve);
+			const captureCapBytes = options.captureCapBytes ?? loadConfig().hardCapBytes;
+			runBuffered(proc, cmdLine, mode, captureCapBytes, resolve);
 		}
 	});
+}
+
+/** Kill the spawned shell and all descendants so no writer can keep a capture pipe open. */
+function killProcessTree(pid: number): void {
+	try {
+		if (process.platform === "win32") {
+			execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)]);
+		} else {
+			process.kill(-pid, "SIGKILL");
+		}
+	} catch {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Process already exited.
+		}
+	}
+}
+
+function writeBufferedStderr(
+	stderr: string,
+	signal: NodeJS.Signals | null,
+	capped: boolean,
+	captureCapBytes: number,
+): void {
+	if (stderr) process.stderr.write(stderr);
+	if (capped) {
+		process.stderr.write(
+			`context-compress wrap: combined stdout/stderr exceeded the ${formatBytes(captureCapBytes)} capture limit; process killed. Re-run with --stream or increase CONTEXT_COMPRESS_HARD_CAP_BYTES.\n`,
+		);
+	} else if (signal) {
+		process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
+	}
 }
 
 function runBuffered(
 	proc: ReturnType<typeof spawn>,
 	cmdLine: string,
 	mode: RequestedMode,
+	captureCapBytes: number,
 	resolve: (code: number) => void,
 ): void {
 	const stdoutChunks: Buffer[] = [];
 	const stderrChunks: Buffer[] = [];
+	let capturedBytes = 0;
+	let capped = false;
 
-	proc.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
-	proc.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+	const capture = (chunk: Buffer, chunks: Buffer[]): void => {
+		if (capped) return;
+
+		const remaining = captureCapBytes - capturedBytes;
+		if (chunk.length <= remaining) {
+			chunks.push(chunk);
+			capturedBytes += chunk.length;
+			return;
+		}
+
+		// Retain only the portion within the cap; never keep the overflowing chunk.
+		if (remaining > 0) chunks.push(Buffer.from(chunk.subarray(0, remaining)));
+		capturedBytes = captureCapBytes;
+		capped = true;
+		if (proc.pid) killProcessTree(proc.pid);
+	};
+
+	proc.stdout?.on("data", (chunk: Buffer) => capture(chunk, stdoutChunks));
+	proc.stderr?.on("data", (chunk: Buffer) => capture(chunk, stderrChunks));
 
 	proc.on("error", (err) => {
 		process.stderr.write(`context-compress wrap: ${err.message}\n`);
@@ -212,10 +275,9 @@ function runBuffered(
 		compressOutputAsync(stdout, cmdLine, mode).then(({ output: compressed }) => {
 			process.stdout.write(compressed);
 			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
-			if (stderr) process.stderr.write(stderr);
-			if (signal) process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
+			writeBufferedStderr(stderr, signal, capped, captureCapBytes);
 			// Signal-killed children report code=null — never mask that as success.
-			resolve(code ?? 1);
+			resolve(capped ? 1 : (code ?? 1));
 		});
 	});
 }

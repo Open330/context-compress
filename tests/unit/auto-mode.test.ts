@@ -60,7 +60,69 @@ describe("pickModeAuto with noLlm: true", () => {
 	});
 });
 
+describe("pickModeAuto with an LLM", () => {
+	it("scrubs secrets before sending the API prompt", async () => {
+		const secrets = [
+			"npm_abcdefghijklmnopqrstuvwxyz0123456789",
+			"github_pat_11AAabcdefghijklmnopqrstuvwxyz0123456789",
+			"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		];
+		const sample = [
+			`//registry.npmjs.org/:_authToken=${secrets[0]}`,
+			`github: ${secrets[1]}`,
+			`AWS_SECRET_ACCESS_KEY=${secrets[2]}`,
+		].join("\n");
+		const originalFetch = globalThis.fetch;
+		let requestBody = "";
+		globalThis.fetch = async (_input, init) => {
+			requestBody = String(init?.body ?? "");
+			return new Response(JSON.stringify({ content: [{ type: "text", text: "balanced" }] }));
+		};
+
+		try {
+			const result = await pickModeAuto("printenv", sample, {
+				apiKey: "test-key",
+				noCache: true,
+				noRegret: true,
+			});
+			assert.strictEqual(result.source, "api");
+			for (const secret of secrets) assert.ok(!requestBody.includes(secret));
+			assert.ok(requestBody.includes("[REDACTED]"));
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+});
+
 describe("scrubSecrets", () => {
+	it("redacts npm, fine-grained GitHub, and prefixed secret assignments", () => {
+		const secrets = [
+			"npm_abcdefghijklmnopqrstuvwxyz0123456789",
+			"github_pat_11AAabcdefghijklmnopqrstuvwxyz0123456789",
+			"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		];
+		const sample = [
+			`//registry.npmjs.org/:_authToken=${secrets[0]}`,
+			`github: ${secrets[1]}`,
+			`AWS_SECRET_ACCESS_KEY=${secrets[2]}`,
+		].join("\n");
+		const scrubbed = scrubSecrets(sample);
+
+		for (const secret of secrets) assert.ok(!scrubbed.includes(secret));
+		assert.strictEqual(scrubbed.match(/\[REDACTED\]/g)?.length, 3);
+	});
+
+	it("does not redact benign underscore-delimited variables", () => {
+		const sample = [
+			"TOKEN_COUNT=42",
+			"API_KEY_ROTATION_DAYS=30",
+			"SECRET_SANTA_NAME=alice",
+			"MONKEY_TOKENIZER=enabled",
+		].join("\n");
+
+		assert.strictEqual(scrubSecrets(sample), sample);
+	});
+
 	it("redacts common token shapes before the sample leaves the machine", () => {
 		const sample = [
 			"AWS key: AKIAIOSFODNN7EXAMPLE",

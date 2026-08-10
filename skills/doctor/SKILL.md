@@ -8,7 +8,7 @@ Run the context-compress doctor diagnostic:
 ```
 mcp__context-compress__execute({
   language: "shell",
-  code: "node dist/cli/index.js doctor"
+  code: "context-compress doctor"
 })
 ```
 

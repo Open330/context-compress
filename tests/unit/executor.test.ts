@@ -1,6 +1,17 @@
 import assert from "node:assert";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { loadConfig, resetConfig } from "../../src/config.js";
+import { type Config, loadConfig, resetConfig } from "../../src/config.js";
 import { SubprocessExecutor, deduplicateLines, groupErrorLines } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime/index.js";
 
@@ -11,14 +22,33 @@ function isolateConfigHome(): void {
 	process.env.HOME = `/tmp/context-compress-home-${process.pid}-${Date.now()}`;
 }
 
-async function createExecutor(): Promise<{
+async function createExecutor(configOverrides: Partial<Config> = {}): Promise<{
 	executor: SubprocessExecutor;
 	runtimes: Awaited<ReturnType<typeof detectRuntimes>>;
 }> {
 	resetConfig();
-	const config = loadConfig();
+	const config = { ...loadConfig(), ...configOverrides };
 	const runtimes = await detectRuntimes();
 	return { executor: new SubprocessExecutor(runtimes, config), runtimes };
+}
+
+function processExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!processExists(pid)) return true;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	return !processExists(pid);
 }
 
 describe("SubprocessExecutor", () => {
@@ -100,6 +130,150 @@ describe("SubprocessExecutor", () => {
 
 			assert.strictEqual(result.exitCode, 0);
 			assert.match(result.stdout, /hello/);
+		},
+	);
+
+	it(
+		"preserves executor-capped stdout before command filtering",
+		{ timeout: 10_000 },
+		async (t) => {
+			const { executor, runtimes } = await createExecutor();
+			if (!runtimes.has("shell")) {
+				t.skip("shell runtime not detected");
+				return;
+			}
+
+			try {
+				const sentinel = "rpfhiddenexecutorsentinel";
+				const result = await executor.execute({
+					language: "shell",
+					code: `npm test >/dev/null 2>&1 || true\nprintf '${sentinel}\\nPASS visible.test.ts\\nTests: 1 passed\\n'`,
+					timeout: 10_000,
+				});
+
+				assert.strictEqual(result.exitCode, 0, result.stderr);
+				assert.ok(!result.stdout.includes(sentinel), "filtered response must stay compact");
+				assert.ok(
+					result.indexableStdout.includes(sentinel),
+					"pre-filter stdout must remain available for indexing",
+				);
+			} finally {
+				executor.shutdown();
+			}
+		},
+	);
+
+	it(
+		"returns chunked fetch responses before their bodies complete",
+		{ timeout: 10_000 },
+		async (t) => {
+			const { executor, runtimes } = await createExecutor();
+			if (!runtimes.has("javascript")) {
+				t.skip("javascript runtime not detected");
+				return;
+			}
+
+			let streamResponse: ServerResponse | undefined;
+			let releasedWhileStreaming = false;
+			const server = createServer((req, res) => {
+				if (req.url === "/chunked") {
+					streamResponse = res;
+					res.writeHead(200, { "content-type": "text/plain" });
+					res.write("alpha");
+					return;
+				}
+
+				if (req.url === "/release") {
+					releasedWhileStreaming = streamResponse !== undefined && !streamResponse.writableEnded;
+					streamResponse?.end("omega");
+					const body = "released";
+					res.writeHead(200, { "content-length": Buffer.byteLength(body) });
+					res.end(body);
+					return;
+				}
+
+				res.writeHead(404).end();
+			});
+
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(0, "127.0.0.1", resolve);
+			});
+
+			try {
+				const address = server.address();
+				assert.ok(address && typeof address !== "string");
+				const baseUrl = `http://127.0.0.1:${address.port}`;
+				const result = await executor.execute({
+					language: "javascript",
+					code: `
+						const response = await fetch(${JSON.stringify(`${baseUrl}/chunked`)});
+						await fetch(${JSON.stringify(`${baseUrl}/release`)});
+						console.log(await response.text());
+					`,
+					timeout: 5_000,
+				});
+
+				assert.strictEqual(result.exitCode, 0, result.stderr);
+				assert.strictEqual(result.stdout.trim(), "alphaomega");
+				assert.ok(releasedWhileStreaming, "fetch must resolve before the chunked body completes");
+				assert.strictEqual(result.networkBytes, Buffer.byteLength("released"));
+			} finally {
+				executor.shutdown();
+				streamResponse?.destroy();
+				server.closeAllConnections();
+				await new Promise<void>((resolve, reject) => {
+					server.close((error) => (error ? reject(error) : resolve()));
+				});
+			}
+		},
+	);
+
+	it(
+		"uses a private temp leaf without touching the legacy shared parent",
+		{ timeout: 10_000 },
+		async (t) => {
+			const { executor, runtimes } = await createExecutor();
+			if (!runtimes.has("javascript")) {
+				t.skip("javascript runtime not detected");
+				return;
+			}
+
+			const legacyParent = join(tmpdir(), "context-compress");
+			const sentinel = join(
+				legacyParent,
+				`legacy-sentinel-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+			);
+			mkdirSync(legacyParent, { recursive: true });
+			writeFileSync(sentinel, "legacy parent must remain untouched", { flag: "wx" });
+
+			try {
+				const result = await executor.execute({
+					language: "javascript",
+					code: `
+						const { statSync } = await import("node:fs");
+						console.log(JSON.stringify({
+							cwd: process.cwd(),
+							mode: statSync(process.cwd()).mode & 0o777,
+						}));
+					`,
+					timeout: 10_000,
+				});
+
+				assert.strictEqual(result.exitCode, 0, result.stderr);
+				const execution = JSON.parse(result.stdout.trim()) as { cwd: string; mode: number };
+				const executionDir = execution.cwd;
+				assert.strictEqual(realpathSync(dirname(executionDir)), realpathSync(tmpdir()));
+				assert.match(basename(executionDir), /^context-compress-exec-/);
+				if (process.platform !== "win32") {
+					assert.strictEqual(execution.mode, 0o700, "private temp leaf must be mode 0700");
+				}
+				assert.ok(!existsSync(executionDir), "private temp leaf must be cleaned up");
+				assert.strictEqual(readFileSync(sentinel, "utf8"), "legacy parent must remain untouched");
+			} finally {
+				executor.shutdown();
+				rmSync(sentinel, { force: true });
+			}
 		},
 	);
 
