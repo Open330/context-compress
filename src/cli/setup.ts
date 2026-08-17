@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -118,6 +119,68 @@ function writeSettings(path: string, settings: ClaudeSettings): void {
 	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 }
 
+/** Result of registering the MCP server through the supported Claude Code path. */
+export interface McpRegistration {
+	status: "registered" | "unavailable" | "failed";
+	/** The exact command a user can run themselves. */
+	command: string;
+	detail: string;
+}
+
+type CommandRunner = (
+	file: string,
+	args: string[],
+) => { status: number | null; stdout: string; stderr: string };
+
+const defaultRunner: CommandRunner = (file, args) => {
+	const result = spawnSync(file, args, { encoding: "utf-8", timeout: 30_000 });
+	return {
+		status: result.error ? null : result.status,
+		stdout: result.stdout ?? "",
+		stderr: result.stderr ?? "",
+	};
+};
+
+/**
+ * Register the MCP server with Claude Code.
+ *
+ * Writing `mcpServers` into settings.json does nothing — the key is ignored —
+ * so registration goes through `claude mcp add`, which owns ~/.claude.json and
+ * cannot race Claude Code's own writes to it. Re-registering upserts, because
+ * `add` refuses a name that already exists.
+ */
+export function registerMcpServer(
+	serverEntry: string,
+	run: CommandRunner = defaultRunner,
+): McpRegistration {
+	const runner = isBuiltJs(serverEntry) ? "node" : "tsx";
+	const addArgs = ["mcp", "add", "context-compress", "--scope", "user", "--", runner, serverEntry];
+	const command = `claude ${addArgs.map((arg) => shellQuotePath(arg)).join(" ")}`;
+
+	const listed = run("claude", ["mcp", "list"]);
+	if (listed.status === null) {
+		return {
+			status: "unavailable",
+			command,
+			detail: "the `claude` CLI is not on PATH",
+		};
+	}
+	if (listed.stdout.includes("context-compress")) {
+		// Ignore failure: absence is the desired precondition either way.
+		run("claude", ["mcp", "remove", "context-compress", "--scope", "user"]);
+	}
+
+	const added = run("claude", addArgs);
+	if (added.status !== 0) {
+		return {
+			status: "failed",
+			command,
+			detail: (added.stderr || added.stdout).trim().split("\n")[0] || "unknown error",
+		};
+	}
+	return { status: "registered", command, detail: `${runner} ${serverEntry}` };
+}
+
 /**
  * PreToolUse hook commands that look like a pretooluse hook but are not ours.
  *
@@ -139,18 +202,15 @@ export function applyAutoConfig(
 ): string[] {
 	const changes: string[] = [];
 
-	// 1. MCP server registration
-	const serverCmd = isBuiltJs(paths.serverEntry) ? "node" : "tsx";
-	const serverArgs = [paths.serverEntry];
-	settings.mcpServers ??= {};
-	const existing = settings.mcpServers["context-compress"];
-	if (
-		!existing ||
-		existing.command !== serverCmd ||
-		JSON.stringify(existing.args) !== JSON.stringify(serverArgs)
-	) {
-		settings.mcpServers["context-compress"] = { command: serverCmd, args: serverArgs };
-		changes.push(`Registered MCP server (${serverCmd} ${paths.serverEntry})`);
+	// MCP registration is deliberately NOT written here. `mcpServers` is not a
+	// recognized key in settings.json — Claude Code reads MCP config from
+	// ~/.claude.json (user/local scope) or a project .mcp.json — so writing it
+	// here registered nothing while the hook below still blocked WebFetch and
+	// curl in favour of tools that never appeared. See registerMcpServer().
+	if (settings.mcpServers && "context-compress" in settings.mcpServers) {
+		delete settings.mcpServers["context-compress"];
+		if (Object.keys(settings.mcpServers).length === 0) delete settings.mcpServers;
+		changes.push("Removed the ineffective settings.json MCP entry written by older versions");
 	}
 
 	// 2. PreToolUse hook
@@ -230,6 +290,22 @@ export async function setup(args: string[] = []): Promise<void> {
 		console.log("  Setup complete!\n");
 		return;
 	}
+
+	// Register the MCP server BEFORE installing the hook. The hook denies WebFetch
+	// and curl and points the agent at mcp__context-compress__* tools, so
+	// installing it without working tools leaves the agent strictly worse off than
+	// before setup ran.
+	console.log("  Registering MCP server with Claude Code...");
+	const registration = registerMcpServer(paths.serverEntry);
+	if (registration.status !== "registered") {
+		console.error(`\n  Setup aborted: could not register the MCP server (${registration.detail}).`);
+		console.error("  The PreToolUse hook was NOT installed, because it denies WebFetch and curl");
+		console.error("  in favour of the MCP tools — installing it now would leave you with neither.");
+		console.error(`\n  Run this, then re-run setup --auto:\n    ${registration.command}\n`);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(`  + Registered MCP server (${registration.detail})`);
 
 	// --auto: write settings.json directly
 	const settingsPath = resolve(homedir(), ".claude", "settings.json");

@@ -102,27 +102,81 @@ function parseIntEnv(key: string): number | undefined {
 	return Number.isNaN(n) ? undefined : n;
 }
 
-function loadFileConfig(projectDir?: string): Partial<Config> {
-	const paths = [
-		projectDir && join(projectDir, ".context-compress.json"),
-		join(homedir(), ".context-compress.json"),
-	].filter(Boolean) as string[];
+/**
+ * Keys a project-local `.context-compress.json` may NOT set.
+ *
+ * A project file travels with the repository, so an untrusted clone or a PR can
+ * add one. These keys decide which of the user's real credentials are copied
+ * into every subprocess environment, and where indexed content — including the
+ * full uncompressed command output whose whole premise is that it stays in the
+ * sandbox — is written and retained. Letting the untrusted artifact configure
+ * the control that is supposed to contain it defeats the control. They are
+ * honored only from the user's home file or the environment.
+ */
+const USER_SCOPE_ONLY_KEYS = [
+	"passthroughEnvVars",
+	"persistDb",
+	"dbDir",
+	"hardCapBytes",
+] as const satisfies readonly (keyof z.infer<typeof ConfigSchema>)[];
 
-	for (const p of paths) {
-		try {
-			const raw = readFileSync(p, "utf-8");
-			const parsed = JSON.parse(raw);
-			const result = ConfigSchema.safeParse(parsed);
-			if (result.success) {
-				return result.data as Partial<Config>;
-			}
-			// Invalid config — fall back to defaults
-			return {};
-		} catch {
-			// File doesn't exist or invalid JSON — skip
+function readConfigFile(path: string, scope: "project" | "user"): Partial<Config> {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf-8");
+	} catch {
+		return {}; // Absent is the normal case.
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (err) {
+		// Silently discarding the whole file made a single typo revert every setting
+		// with no signal at all, so say so on stderr.
+		console.error(
+			`[context-compress] Config: ignoring ${path} — invalid JSON (${
+				err instanceof Error ? err.message : String(err)
+			})`,
+		);
+		return {};
+	}
+
+	const result = ConfigSchema.safeParse(parsed);
+	if (!result.success) {
+		const fields = [...new Set(result.error.issues.map((issue) => issue.path.join(".")))];
+		console.error(
+			`[context-compress] Config: ignoring ${path} — invalid field(s): ${fields.join(", ")}`,
+		);
+		return {};
+	}
+
+	const config = result.data as Partial<Config>;
+	if (scope === "project") {
+		for (const key of USER_SCOPE_ONLY_KEYS) {
+			if (config[key] === undefined) continue;
+			delete config[key];
+			console.error(
+				`[context-compress] Config: ignoring "${key}" from ${path} — ` +
+					"it is only honored from ~/.context-compress.json or the environment, " +
+					"because a project file can arrive with untrusted code.",
+			);
 		}
 	}
-	return {};
+	return config;
+}
+
+/**
+ * Home config is the base; a project file layers over it.
+ *
+ * Returning on the first readable file meant a project file *replaced* the
+ * user's home config wholesale instead of overriding selected keys.
+ */
+function loadFileConfig(projectDir?: string): Partial<Config> {
+	const user = readConfigFile(join(homedir(), ".context-compress.json"), "user");
+	if (!projectDir) return user;
+	const project = readConfigFile(join(projectDir, ".context-compress.json"), "project");
+	return { ...user, ...project };
 }
 
 function loadEnvConfig(): Partial<Config> {

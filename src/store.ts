@@ -100,12 +100,47 @@ const STOPWORDS = new Set([
 	"much",
 ]);
 
-const HEADING_RE = /^(#{1,4})\s+(.+)$/;
+// `m` matters: without it `^`/`$` anchor to the whole string, so
+// HEADING_RE.test() on multi-line content was always false and the markdown
+// decision below fell through to a bare `includes("---")`.
+const HEADING_RE = /^(#{1,4})\s+(.+)$/m;
 const SEPARATOR_RE = /^[-_*]{3,}\s*$/;
+/** A real horizontal rule on its own line — unlike a `--- a/path` diff header. */
+const HORIZONTAL_RULE_RE = /^[-_*]{3,}\s*$/m;
+const FENCE_BLOCK_RE = /^`{3,}/m;
+/**
+ * Hard ceiling on one indexed chunk.
+ *
+ * FTS5 `highlight()` is superlinear in row size: a single 10.9 MB chunk measured
+ * 204 s per search, versus 6.6 ms for the same content chunked normally. Any
+ * chunker output is split to this bound before insertion.
+ */
+const MAX_CHUNK_CHARS = 8_192;
+
 const FENCE_RE = /^`{3,}/;
 const FTS_SPECIAL_RE = /['"(){}[\]*:^~]/g;
 const FTS_OPERATORS_RE = /\b(AND|OR|NOT|NEAR)\b/gi;
 const WORD_SPLIT_RE = /[^\p{L}\p{N}_-]+/u;
+
+/** Split any oversized chunk so no single row can make search pathological. */
+function boundChunkSize(chunks: Chunk[]): Chunk[] {
+	if (chunks.every((chunk) => chunk.content.length <= MAX_CHUNK_CHARS)) return chunks;
+
+	const bounded: Chunk[] = [];
+	for (const chunk of chunks) {
+		if (chunk.content.length <= MAX_CHUNK_CHARS) {
+			bounded.push(chunk);
+			continue;
+		}
+		for (let offset = 0; offset < chunk.content.length; offset += MAX_CHUNK_CHARS) {
+			bounded.push({
+				...chunk,
+				content: chunk.content.slice(offset, offset + MAX_CHUNK_CHARS),
+			});
+		}
+	}
+	return bounded;
+}
 
 /**
  * Sanitize user query for FTS5 MATCH.
@@ -155,8 +190,9 @@ export class ContentStore {
 	private vocabCountStmt!: Database.Statement;
 	private vocabInsertStmt!: Database.Statement;
 
-	// Cache for getDistinctiveTerms — keyed by sourceId, with "_all" for the global query.
-	// Invalidated whenever index() runs, since chunk counts/distributions change.
+	// Cache for getDistinctiveTerms — keyed by sourceId, with "_all" for the global
+	// query. index() only appends a new source, so per-source entries stay valid and
+	// only the store-wide entry is invalidated.
 	private distinctiveTermsCache = new Map<number | "_all", string[]>();
 
 	constructor(options?: string | { dbPath?: string; persistDb?: boolean; dbDir?: string | null }) {
@@ -267,9 +303,12 @@ export class ContentStore {
 	 * Index content into the store.
 	 */
 	index(content: string, label: string): IndexResult {
+		// `includes("---")` matched every git diff header (`--- a/path`) and most
+		// YAML, routing them to the heading-based chunker, which found no headings
+		// and emitted the whole document as one chunk.
 		const isMarkdown =
-			HEADING_RE.test(content) || content.includes("```") || content.includes("---");
-		const chunks = isMarkdown ? chunkMarkdown(content) : chunkPlainText(content);
+			HEADING_RE.test(content) || FENCE_BLOCK_RE.test(content) || HORIZONTAL_RULE_RE.test(content);
+		const chunks = boundChunkSize(isMarkdown ? chunkMarkdown(content) : chunkPlainText(content));
 
 		const insertSource = this.insertSourceStmt;
 		const insertChunk = this.insertChunkStmt;
@@ -305,8 +344,10 @@ export class ContentStore {
 
 		const sourceId = tx() as number;
 
-		// Invalidate distinctive-terms cache: new chunks change frequencies and totals.
-		this.distinctiveTermsCache.clear();
+		// Only the store-wide entry changes: indexing appends a NEW source, so an
+		// existing per-source result stays correct. Clearing everything meant
+		// batch_execute re-scanned for every command it had already looked up.
+		this.distinctiveTermsCache.delete("_all");
 
 		return {
 			sourceId,
@@ -506,15 +547,20 @@ export class ContentStore {
 		const cached = this.distinctiveTermsCache.get(cacheKey);
 		if (cached) return cached;
 
-		const totalChunks = (
-			this.db
-				.prepare(
-					sourceId
-						? "SELECT COUNT(*) as cnt FROM chunks WHERE source_id = ?"
-						: "SELECT COUNT(*) as cnt FROM chunks",
-				)
-				.get(...(sourceId ? [sourceId] : [])) as { cnt: number }
-		).cnt;
+		// `source_id` is UNINDEXED in the FTS5 table, so a filtered COUNT(*) over
+		// `chunks` is a full virtual-table scan — measured at 183-377 ms per call on
+		// a grown store, and batch_execute makes one call per command. The `sources`
+		// row already records the count, so read it from there instead.
+		const totalChunks =
+			(
+				this.db
+					.prepare(
+						sourceId
+							? "SELECT chunk_count as cnt FROM sources WHERE id = ?"
+							: "SELECT COUNT(*) as cnt FROM chunks",
+					)
+					.get(...(sourceId ? [sourceId] : [])) as { cnt: number } | undefined
+			)?.cnt ?? 0;
 
 		if (totalChunks === 0) {
 			this.distinctiveTermsCache.set(cacheKey, []);

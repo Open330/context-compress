@@ -42,7 +42,14 @@ export function createIntentFilter(deps: IntentFilterDeps) {
 		const indexed = store.index(output, sourceLabel);
 		tracker.trackIndexed(outputBytes);
 
-		const searchResults = store.search(intent, { limit: INTENT_SEARCH_LIMIT });
+		// Scope to the corpus this call just indexed. A store-wide search returned
+		// hits from every earlier execute/fetch/index in the session, and the header
+		// below attributes them to *this* command — so fetched third-party content
+		// could be reported as the output of the caller's own shell command.
+		const searchResults = store.search(intent, {
+			limit: INTENT_SEARCH_LIMIT,
+			sourceIds: [indexed.sourceId],
+		});
 		const terms = store.getDistinctiveTerms(indexed.sourceId);
 		const errorLines = extractErrorLines(output);
 

@@ -106,10 +106,24 @@ describe("intent filter (query-conditioned)", () => {
 			const doc = bigDoc();
 			const out = applyIntentFilter(doc, "timeout", "execute:shell");
 			assert.ok(out.includes("Indexed"), "reports indexing");
-			assert.ok(out.includes("timeout"), "surfaces the matching section content");
 			assert.ok(out.includes("Use search(queries: [...])"), "keeps the search affordance");
 			// Compression achieved: summary far smaller than the source doc.
 			assert.ok(out.length < doc.length, "summary is smaller than input");
+
+			// Assert the content was actually INLINED, not merely that the intent was
+			// echoed back. `out.includes("timeout")` is satisfied by the unconditional
+			// `N sections matched "timeout"` header, so it passes even when the
+			// renderer degrades every hit to a title-only line.
+			assert.match(
+				out,
+				/upstream service/,
+				"the matching section's body must be inlined, not just its title",
+			);
+			assert.doesNotMatch(
+				out,
+				/\*\*## Networking\*\* \(search to view\)/,
+				"the matching hit must not degrade to title-only at this budget",
+			);
 		} finally {
 			store.close();
 		}

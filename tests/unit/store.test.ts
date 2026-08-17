@@ -167,6 +167,70 @@ more filler content
 		}
 	});
 
+	it("chunks diff-shaped output instead of emitting one giant chunk", () => {
+		// `includes("---")` matched every `--- a/path` diff header and routed the
+		// document to the heading chunker, which found no headings and produced ONE
+		// chunk. FTS5 highlight() is superlinear in row size: a 10.9 MB chunk
+		// measured 204 s per search, and the snippet came back empty.
+		const diff = Array.from(
+			{ length: 400 },
+			(_, i) =>
+				`--- a/src/f${i}.ts\n+++ b/src/f${i}.ts\n@@ -1,2 +1,2 @@\n-old widget ${i}\n+new widget ${i}`,
+		).join("\n");
+
+		const store = new ContentStore(":memory:");
+		try {
+			const indexed = store.index(diff, "probe");
+			assert.ok(
+				indexed.totalChunks > 20,
+				`diff output must be split into many chunks, got ${indexed.totalChunks}`,
+			);
+
+			const hits = store.search("widget", { limit: 3 }).results;
+			assert.ok(hits.length > 0);
+			for (const hit of hits) {
+				assert.ok(hit.snippet.length > 0, "a hit must carry content");
+				assert.ok(hit.snippet.length < 20_000, "a hit must not be a whole document");
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	it("still detects real markdown headings in multi-line content", () => {
+		// The detection regex lacked the `m` flag, so it never matched a heading that
+		// was not on the first line — i.e. essentially never.
+		const store = new ContentStore(":memory:");
+		try {
+			const doc = "intro paragraph\n\n## Second Section\n\nbody about widgets\n";
+			store.index(doc, "probe");
+			const hits = store.search("widgets", { limit: 3 }).results;
+			assert.ok(hits.length > 0);
+			assert.ok(
+				hits.some((hit) => hit.title.includes("Second Section")),
+				`heading should become the chunk title, got ${hits.map((h) => h.title).join(" | ")}`,
+			);
+		} finally {
+			store.close();
+		}
+	});
+
+	it("bounds every indexed chunk regardless of input shape", () => {
+		const store = new ContentStore(":memory:");
+		try {
+			// One enormous line: no blank lines, no newlines to split on.
+			const single = `widget ${"x".repeat(200_000)} widget`;
+			const indexed = store.index(single, "probe");
+			assert.ok(indexed.totalChunks > 1, "an oversized single line must still be split");
+
+			const hits = store.search("widget", { limit: 1 }).results;
+			assert.ok(hits.length > 0);
+			assert.ok(hits[0].snippet.length > 0);
+		} finally {
+			store.close();
+		}
+	});
+
 	it("scopes search to exact source ids", () => {
 		const store = new ContentStore(":memory:");
 		try {

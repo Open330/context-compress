@@ -8,5 +8,11 @@
   },
   "skills": "./skills/",
   "hooks": "./hooks/claude-codex-hooks.json",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": {
+    "context-compress": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"]
+    }
+  }
 }

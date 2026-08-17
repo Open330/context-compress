@@ -27,6 +27,96 @@ function clearConfigEnv(): void {
 	}
 }
 
+describe("config file trust boundary", () => {
+	beforeEach(() => {
+		resetConfig();
+		clearConfigEnv();
+	});
+
+	afterEach(() => {
+		resetConfig();
+		clearConfigEnv();
+		if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+		else process.env.HOME = ORIGINAL_HOME;
+	});
+
+	/** Write both a fake home config and a project config, then load. */
+	function withConfigs(home: unknown | null, project: unknown | null) {
+		const homeDir = mkdtempSync(join(tmpdir(), "cc-home-"));
+		const projectDir = mkdtempSync(join(tmpdir(), "cc-project-"));
+		if (home !== null) {
+			writeFileSync(join(homeDir, ".context-compress.json"), JSON.stringify(home));
+		}
+		if (project !== null) {
+			writeFileSync(join(projectDir, ".context-compress.json"), JSON.stringify(project));
+		}
+		process.env.HOME = homeDir;
+		resetConfig();
+		const cfg = loadConfig(projectDir);
+		return { cfg, cleanup: () => {
+			rmSync(homeDir, { recursive: true, force: true });
+			rmSync(projectDir, { recursive: true, force: true });
+		} };
+	}
+
+	it("ignores user-scope-only keys in a project file", () => {
+		const { cfg, cleanup } = withConfigs(null, {
+			passthroughEnvVars: ["AWS_SECRET_ACCESS_KEY"],
+			dbDir: "/tmp/attacker-chosen",
+			persistDb: true,
+			hardCapBytes: 999_999_999,
+			maxOutputBytes: 12_345,
+		});
+		try {
+			assert.deepStrictEqual(cfg.passthroughEnvVars, []);
+			assert.strictEqual(cfg.dbDir, null);
+			assert.strictEqual(cfg.persistDb, false);
+			assert.notStrictEqual(cfg.hardCapBytes, 999_999_999);
+			assert.strictEqual(cfg.maxOutputBytes, 12_345, "project-safe keys still apply");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("honors user-scope-only keys from the home file", () => {
+		const { cfg, cleanup } = withConfigs({ passthroughEnvVars: ["GH_TOKEN"], persistDb: true }, null);
+		try {
+			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"]);
+			assert.strictEqual(cfg.persistDb, true);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("layers a project file over the home file instead of replacing it", () => {
+		// Returning on the first readable file meant a project file wiped every
+		// home setting, including the user's own passthrough allowlist.
+		const { cfg, cleanup } = withConfigs(
+			{ passthroughEnvVars: ["GH_TOKEN"], searchLimit: 7 },
+			{ maxOutputBytes: 4_096 },
+		);
+		try {
+			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"], "home value survives");
+			assert.strictEqual(cfg.searchLimit, 7, "home value survives");
+			assert.strictEqual(cfg.maxOutputBytes, 4_096, "project value applies");
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("cannot have its home allowlist widened by a project file", () => {
+		const { cfg, cleanup } = withConfigs(
+			{ passthroughEnvVars: ["GH_TOKEN"] },
+			{ passthroughEnvVars: ["GH_TOKEN", "AWS_SECRET_ACCESS_KEY"] },
+		);
+		try {
+			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"]);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
 describe("config", () => {
 	beforeEach(() => {
 		resetConfig();
@@ -108,9 +198,14 @@ describe("config", () => {
 			);
 
 			const cfg = loadConfig(dir);
-			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"]);
+			// Project-scope keys apply...
 			assert.strictEqual(cfg.debug, true);
 			assert.strictEqual(cfg.maxOutputBytes, 200_000);
+			// ...but a project file may not decide which of the user's secrets get
+			// copied into every subprocess: the file travels with the repository, so
+			// an untrusted clone could name AWS_SECRET_ACCESS_KEY and have the agent's
+			// own `npm install` leak it.
+			assert.deepStrictEqual(cfg.passthroughEnvVars, [], "project scope must not grant env access");
 			for (const key of ["blockCurl", "blockWebFetch", "nudgeOnRead", "nudgeOnGrep"]) {
 				assert.strictEqual(Object.hasOwn(cfg, key), false, `${key} is hook-only`);
 			}

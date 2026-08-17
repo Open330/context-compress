@@ -72,23 +72,39 @@ export function extractSnippet(highlighted: string, maxLen: number = DEFAULT_MAX
 		}
 	}
 
-	// Collect windows until maxLen is reached
+	// Collect windows up to maxLen, clipping the one that crosses the limit.
+	//
+	// Dropping an oversized window instead of clipping it returned an EMPTY
+	// snippet: when matches are dense they merge into a single span wider than
+	// maxLen, that span failed the check on the first iteration, and the caller
+	// got a hit with no content at all — worst for the densest, best-ranked hits.
 	const parts: string[] = [];
 	let total = 0;
+	let clipped = false;
 
 	for (const w of merged) {
-		const slice = clean.slice(w.start, w.end);
-		if (total + slice.length > maxLen) break;
+		const remaining = maxLen - total;
+		if (remaining <= 0) {
+			clipped = true;
+			break;
+		}
+		let slice = clean.slice(w.start, w.end);
+		if (slice.length > remaining) {
+			slice = slice.slice(0, remaining);
+			clipped = true;
+		}
 		parts.push(slice);
 		total += slice.length;
 	}
 
 	// Join with ellipsis at boundaries
+	const lastWindow = merged[parts.length - 1];
+	const endsEarly = clipped || (lastWindow !== undefined && lastWindow.end < clean.length);
 	const snippets = parts.map((part, i) => {
 		let s = part;
 		if (i === 0 && merged[0].start > 0) s = `…${s}`;
 		if (i < parts.length - 1) s = `${s}…`;
-		else if (merged[parts.length - 1].end < clean.length) s = `${s}…`;
+		else if (endsEarly) s = `${s}…`;
 		return s;
 	});
 

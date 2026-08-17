@@ -228,7 +228,12 @@ function groupErrorLines(output: string): string {
 	if (grouped.length > 0) {
 		resultLines.push("");
 		resultLines.push(`── Grouped errors/warnings (${groupedCount} → ${errorGroups.size}) ──`);
-		resultLines.push(...grouped);
+		// Append one at a time. `push(...grouped)` passes every element as an
+		// argument, which overflows the call stack past roughly 125k groups and
+		// throws RangeError from inside the child's close listener — the promise
+		// never settles and the uncaughtException handler exits the whole server.
+		// `tsc`/`eslint`/`cargo` on a large monorepo reaches that count.
+		for (const line of grouped) resultLines.push(line);
 	}
 
 	return resultLines.join("\n");

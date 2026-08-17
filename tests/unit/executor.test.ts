@@ -493,6 +493,28 @@ describe("deduplicateLines", () => {
 	});
 });
 
+describe("groupErrorLines scale", () => {
+	it("survives more distinct error groups than the argument limit", () => {
+		// `resultLines.push(...grouped)` passes each element as an argument, which
+		// overflows the call stack past roughly 125k groups. That RangeError was
+		// thrown from inside the child's close listener, so the execute promise never
+		// settled and the server's uncaughtException handler exited the process —
+		// a `tsc`/`eslint` run on a large monorepo could kill the MCP server.
+		const lines = Array.from(
+			{ length: 130_000 },
+			(_, i) => `src/f${i}.ts: error TS2304: cannot find name x${i}`,
+		);
+		// One duplicate, so the "grouping does not reduce output" early return does
+		// not short-circuit before the spread.
+		lines.push(lines[0]);
+
+		const output = groupErrorLines(lines.join("\n"));
+
+		assert.ok(output.includes("Grouped errors/warnings"), "grouping must still apply");
+		assert.ok(output.split("\n").length > 100_000, "every group must be present");
+	});
+});
+
 describe("groupErrorLines", () => {
 	it("groups multiple similar error lines with count", () => {
 		const input = [

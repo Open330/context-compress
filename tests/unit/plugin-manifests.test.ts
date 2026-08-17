@@ -38,21 +38,45 @@ describe("plugin manifests", () => {
 
 		assert.strictEqual(mcp.mcpServers["context-compress"].command, "node");
 		assert.deepStrictEqual(mcp.mcpServers["context-compress"].args, ["./dist/index.js"]);
-		assert.strictEqual(mcp.mcpServers["context-compress"].cwd, ".");
+	});
+
+	it("resolves the Claude plugin MCP server against the plugin root", () => {
+		// A relative path resolves against the session's working directory, not the
+		// plugin directory, so a plugin install used to launch
+		// `node ./dist/index.js` from the user's project and fail with
+		// "Cannot find module". `${CLAUDE_PLUGIN_ROOT}` is the documented mechanism,
+		// and it is only set for plugin-provided servers — which is why this is
+		// declared inline here rather than shared with the project-scope .mcp.json.
+		const manifest = readJson<{
+			mcpServers: Record<string, { type?: string; command: string; args: string[]; cwd?: string }>;
+		}>(".claude-plugin/plugin.json");
+		const server = manifest.mcpServers["context-compress"];
+
+		assert.ok(server, "the Claude plugin must declare its MCP server");
+		assert.strictEqual(server.type, "stdio");
+		assert.strictEqual(server.command, "node");
+		assert.deepStrictEqual(server.args, ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"]);
+		assert.strictEqual(server.cwd, undefined, "cwd is not a supported MCP server field");
+
+		for (const arg of server.args) {
+			assert.doesNotMatch(arg, /^\.\.?\//, "a plugin path must not be session-relative");
+		}
 	});
 
 	it("keeps Claude plugin hooks separate from the Codex manifest", () => {
 		const manifest = readJson<{
 			name: string;
 			hooks: string;
-			mcpServers: string;
+			mcpServers: unknown;
 			skills: string;
 		}>(".claude-plugin/plugin.json");
 
 		assert.strictEqual(manifest.name, "context-compress");
 		assert.strictEqual(manifest.hooks, "./hooks/claude-codex-hooks.json");
-		assert.strictEqual(manifest.mcpServers, "./.mcp.json");
 		assert.strictEqual(manifest.skills, "./skills/");
+		// The server is declared inline (see the plugin-root resolution test) rather
+		// than pointing at the shared .mcp.json, which cannot expand a plugin path.
+		assert.strictEqual(typeof manifest.mcpServers, "object");
 		assert.ok(existsSync(join(root, "hooks/claude-codex-hooks.json")));
 	});
 

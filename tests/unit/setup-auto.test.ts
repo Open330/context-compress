@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { applyAutoConfig, findForeignHookCommands, readSettings } from "../../src/cli/setup.js";
+import {
+	applyAutoConfig,
+	findForeignHookCommands,
+	readSettings,
+	registerMcpServer,
+} from "../../src/cli/setup.js";
 
 const PATHS = {
 	serverEntry: "/abs/path/to/dist/index.js",
@@ -12,19 +17,20 @@ const PATHS = {
 };
 
 describe("applyAutoConfig", () => {
-	it("adds MCP server, hook, and filter-bash env on a clean settings file", () => {
+	it("adds the hook and filter-bash env on a clean settings file", () => {
 		const settings: Record<string, unknown> = {};
 		const changes = applyAutoConfig(settings, PATHS, true);
 
-		// 4 changes: MCP server + hook + FILTER_BASH=1 + BIN path
-		assert.strictEqual(changes.length, 4);
+		// 3 changes: hook + FILTER_BASH=1 + BIN path. MCP registration is NOT one of
+		// them: `mcpServers` is not a settings.json key, so writing it registered
+		// nothing. It goes through `claude mcp add` (see registerMcpServer).
+		assert.strictEqual(changes.length, 3);
 		const s = settings as {
-			mcpServers: Record<string, { command: string; args: string[] }>;
+			mcpServers?: Record<string, unknown>;
 			hooks: { PreToolUse: Array<{ matcher?: string; hooks?: Array<{ command?: string }> }> };
 			env: Record<string, string>;
 		};
-		assert.strictEqual(s.mcpServers["context-compress"].command, "node");
-		assert.deepStrictEqual(s.mcpServers["context-compress"].args, [PATHS.serverEntry]);
+		assert.strictEqual(s.mcpServers, undefined, "must not write an ignored settings key");
 		assert.strictEqual(s.hooks.PreToolUse.length, 1);
 		assert.match(s.hooks.PreToolUse[0].hooks?.[0].command ?? "", /pretooluse\.mjs/);
 		assert.strictEqual(s.env.CONTEXT_COMPRESS_FILTER_BASH, "1");
@@ -57,7 +63,10 @@ describe("applyAutoConfig", () => {
 		assert.strictEqual(s.model, "claude-opus-4-7");
 		assert.strictEqual(s.env.MY_FLAG, "1", "unrelated env vars must survive");
 		assert.ok(s.mcpServers["other-tool"], "unrelated MCP servers must survive");
-		assert.ok(s.mcpServers["context-compress"], "ours must be added");
+		assert.ok(
+			!("context-compress" in s.mcpServers),
+			"ours is registered via `claude mcp add`, not written here",
+		);
 	});
 
 	it("repairs a stale context-compress hook in place", () => {
@@ -180,9 +189,6 @@ describe("applyAutoConfig", () => {
 
 	it("recognizes the exact current hook without changes or duplicates", () => {
 		const settings: Record<string, unknown> = {
-			mcpServers: {
-				"context-compress": { command: "node", args: [PATHS.serverEntry] },
-			},
 			hooks: {
 				PreToolUse: [
 					{
@@ -225,9 +231,6 @@ describe("applyAutoConfig", () => {
 	it("is idempotent when filter-bash env keys are already absent", () => {
 		const settings: Record<string, unknown> = {
 			env: { UNRELATED_FLAG: "preserved" },
-			mcpServers: {
-				"context-compress": { command: "node", args: [PATHS.serverEntry] },
-			},
 			hooks: {
 				PreToolUse: [
 					{
@@ -251,27 +254,112 @@ describe("applyAutoConfig", () => {
 		const settings: Record<string, unknown> = {};
 		applyAutoConfig(settings, devPaths, true);
 		const s = settings as {
-			mcpServers: Record<string, { command: string }>;
 			hooks: { PreToolUse: Array<{ hooks?: Array<{ command?: string }> }> };
 			env: Record<string, string>;
 		};
-		assert.strictEqual(s.mcpServers["context-compress"].command, "tsx");
 		assert.match(s.hooks.PreToolUse[0].hooks?.[0].command ?? "", /^tsx /);
 		assert.match(s.env.CONTEXT_COMPRESS_BIN ?? "", /^tsx /);
 	});
 
-	it("rewrites MCP server entry when the path changes (e.g., after reinstall)", () => {
+	it("cleans up the ineffective MCP entry older versions wrote to settings.json", () => {
+		// Earlier versions wrote `mcpServers` here, where Claude Code never reads it.
+		// Leaving it behind is confusing, so setup removes exactly our entry.
 		const settings: Record<string, unknown> = {
 			mcpServers: {
 				"context-compress": { command: "node", args: ["/old/path/index.js"] },
+				"other-tool": { command: "x", args: [] },
 			},
 		};
 		const changes = applyAutoConfig(settings, PATHS, false);
-		const s = settings as {
-			mcpServers: Record<string, { args: string[] }>;
+		const s = settings as { mcpServers: Record<string, unknown> };
+
+		assert.ok(!("context-compress" in s.mcpServers));
+		assert.ok(s.mcpServers["other-tool"], "someone else's entry must survive");
+		assert.ok(changes.some((c) => c.includes("ineffective settings.json MCP entry")));
+	});
+
+	it("drops an emptied mcpServers object rather than leaving a stub", () => {
+		const settings: Record<string, unknown> = {
+			mcpServers: { "context-compress": { command: "node", args: ["/old/path/index.js"] } },
 		};
-		assert.deepStrictEqual(s.mcpServers["context-compress"].args, [PATHS.serverEntry]);
-		assert.ok(changes.some((c) => c.includes("Registered MCP server")));
+		applyAutoConfig(settings, PATHS, false);
+		assert.strictEqual((settings as { mcpServers?: unknown }).mcpServers, undefined);
+	});
+});
+
+describe("registerMcpServer", () => {
+	type Call = { file: string; args: string[] };
+
+	function runner(
+		responses: Array<{ status: number | null; stdout?: string; stderr?: string }>,
+		calls: Call[],
+	) {
+		let i = 0;
+		return (file: string, args: string[]) => {
+			calls.push({ file, args });
+			const r = responses[Math.min(i++, responses.length - 1)];
+			return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+		};
+	}
+
+	it("registers through `claude mcp add` at user scope", () => {
+		const calls: Call[] = [];
+		const result = registerMcpServer(
+			"/pkg/dist/index.js",
+			runner([{ status: 0, stdout: "other-tool: ok" }, { status: 0 }], calls),
+		);
+
+		assert.strictEqual(result.status, "registered");
+		assert.deepStrictEqual(calls[0].args, ["mcp", "list"]);
+		assert.deepStrictEqual(calls[1].args, [
+			"mcp",
+			"add",
+			"context-compress",
+			"--scope",
+			"user",
+			"--",
+			"node",
+			"/pkg/dist/index.js",
+		]);
+	});
+
+	it("upserts by removing an existing registration first", () => {
+		// `claude mcp add` refuses a name that already exists, so a path change after
+		// a reinstall would otherwise fail.
+		const calls: Call[] = [];
+		const result = registerMcpServer(
+			"/pkg/dist/index.js",
+			runner([{ status: 0, stdout: "context-compress: connected" }, { status: 0 }, { status: 0 }], calls),
+		);
+
+		assert.strictEqual(result.status, "registered");
+		assert.deepStrictEqual(calls[1].args, ["mcp", "remove", "context-compress", "--scope", "user"]);
+		assert.deepStrictEqual(calls[2].args.slice(0, 3), ["mcp", "add", "context-compress"]);
+	});
+
+	it("reports an unavailable CLI with the exact command to run", () => {
+		const calls: Call[] = [];
+		const result = registerMcpServer("/pkg/dist/index.js", runner([{ status: null }], calls));
+
+		assert.strictEqual(result.status, "unavailable");
+		assert.match(result.command, /^claude mcp add context-compress --scope user -- node /);
+		assert.strictEqual(calls.length, 1, "must not attempt to add when the CLI is missing");
+	});
+
+	it("surfaces the failure reason when add fails", () => {
+		const result = registerMcpServer(
+			"/pkg/dist/index.js",
+			runner([{ status: 0, stdout: "" }, { status: 1, stderr: "boom: refused\nsecond line" }], []),
+		);
+
+		assert.strictEqual(result.status, "failed");
+		assert.strictEqual(result.detail, "boom: refused");
+	});
+
+	it("uses tsx for a TypeScript entry point", () => {
+		const calls: Call[] = [];
+		registerMcpServer("/repo/src/index.ts", runner([{ status: 0 }, { status: 0 }], calls));
+		assert.deepStrictEqual(calls[1].args.slice(-2), ["tsx", "/repo/src/index.ts"]);
 	});
 });
 
