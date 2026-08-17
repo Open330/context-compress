@@ -23,7 +23,13 @@ type SearchToolHandler = (args: {
 
 function registerForTest(
 	searchLimit = 3,
-	overrides: { searchMaxBytes?: number; snippet?: string; searchReduceAfter?: number } = {},
+	overrides: {
+		searchMaxBytes?: number;
+		snippet?: string;
+		searchReduceAfter?: number;
+		searchBlockAfter?: number;
+		searchWindowMs?: number;
+	} = {},
 ): {
 	options: SearchToolOptions;
 	handler: SearchToolHandler;
@@ -47,9 +53,9 @@ function registerForTest(
 	const ctx = {
 		config: {
 			searchLimit,
-			searchWindowMs: 60_000,
+			searchWindowMs: overrides.searchWindowMs ?? 60_000,
 			searchReduceAfter: overrides.searchReduceAfter ?? 100,
-			searchBlockAfter: 101,
+			searchBlockAfter: overrides.searchBlockAfter ?? 101,
 			searchMaxBytes: overrides.searchMaxBytes ?? 40_960,
 		},
 		store: {
@@ -102,6 +108,33 @@ describe("search tool limit", () => {
 		const schema = registerForTest().options.inputSchema.queries;
 		assert.strictEqual(schema.safeParse(Array(16).fill("q")).success, true);
 		assert.strictEqual(schema.safeParse(Array(17).fill("q")).success, false);
+	});
+});
+
+describe("search tool throttle", () => {
+	it("recovers after the window instead of latching, and gives actionable advice", async () => {
+		// Blocked attempts used to be counted before the check, so a caller retrying
+		// faster than the window never fell back under the limit. The refusal also
+		// advised batch_execute, which rejects an empty `commands` array.
+		const { handler } = registerForTest(3, { searchBlockAfter: 2, searchWindowMs: 50 });
+
+		await handler({ queries: ["a"], limit: 1 });
+		await handler({ queries: ["b"], limit: 1 });
+		const blocked = await handler({ queries: ["c"], limit: 1 });
+		assert.match(blocked.content[0].text, /Too many search calls/);
+		assert.match(blocked.content[0].text, /Retry in \d+s/, "must say how long to wait");
+		assert.match(blocked.content[0].text, /ONE call/, "must give a remedy that validates");
+
+		// Hammering while blocked must not extend the block.
+		for (let i = 0; i < 5; i++) await handler({ queries: ["d"], limit: 1 });
+
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		const recovered = await handler({ queries: ["e"], limit: 1 });
+		assert.doesNotMatch(
+			recovered.content[0].text,
+			/Too many search calls/,
+			"the throttle must lift once the window has passed",
+		);
 	});
 });
 

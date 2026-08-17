@@ -48,6 +48,21 @@ interface FilterResult {
 	filtered: boolean;
 }
 
+/**
+ * Never hand back an empty response for non-empty input.
+ *
+ * The aggressive filters keep only lines matching a summary shape, so a run whose
+ * output does not match any of them collapsed to "". The caller then cannot tell
+ * success from failure — `npm install` printing "up to date in 431ms" and one
+ * printing an error both rendered as nothing. `git log` already had this net.
+ */
+function withFloor(candidate: string, original: string): FilterResult {
+	if (candidate.trim() === "" && original.trim() !== "") {
+		return { output: original, filtered: false };
+	}
+	return { output: candidate, filtered: true };
+}
+
 /** Detect command type from code string and apply specialized filter */
 export function applyCommandFilter(
 	code: string,
@@ -62,7 +77,7 @@ export function applyCommandFilter(
 	// Git commands
 	if (cmd === "git") return filterGit(fullCmd, stdout, mode);
 
-	// Package managers
+	// Package managers (its own test/install/ls branches route from there)
 	if (cmd === "npm" || cmd === "yarn" || cmd === "pnpm" || cmd === "bun")
 		return filterPackageManager(fullCmd, stdout, mode);
 
@@ -96,15 +111,15 @@ export function applyCommandFilter(
 			// Recursive greps prefix each match with the file path even without -n;
 			// rg is recursive (and path-prefixed) by default.
 			const recursive = cmd !== "grep" || /(^|\s)-[a-zA-Z]*(r|R)/.test(fullCmd);
-			return filterGrep(stdout, recursive);
+			return withFloor(filterGrep(stdout, recursive).output, stdout);
 		}
 	}
 
 	// System tabular commands: df, du, ps — aggressive mode only.
 	if (mode === "aggressive") {
-		if (cmd === "df") return filterDf(stdout);
-		if (cmd === "du") return filterDu(stdout);
-		if (cmd === "ps") return filterPs(stdout);
+		if (cmd === "df") return withFloor(filterDf(stdout).output, stdout);
+		if (cmd === "du") return withFloor(filterDu(stdout).output, stdout);
+		if (cmd === "ps") return withFloor(filterPs(stdout).output, stdout);
 	}
 
 	return { output: stdout, filtered: false };
@@ -410,22 +425,24 @@ export function filterPackageManager(
 				(l) =>
 					/^(added|removed|changed|audited)\s+\d+/.test(l) ||
 					/vulnerabilit(y|ies)/i.test(l) ||
-					/^npm\s+ERR/.test(l),
+					/^(npm|yarn|pnpm)\s+(ERR|error)/i.test(l) ||
+					/^\s*(error|ERR!)\b/i.test(l),
 			);
-			return { output: summaryOnly.join("\n"), filtered: true };
+			return withFloor(summaryOnly.join("\n"), stdout);
 		}
 		return { output: filtered.join("\n"), filtered: true };
 	}
 
-	// npm test: delegate to test filter
-	if (/\btest\b/.test(cmd)) {
+	// npm test / npm t: delegate to the test filter. `t` is npm's documented alias
+	// and previously fell through to the tabular/ls branches instead.
+	if (/\btest\b/.test(cmd) || /^\S+\s+t$/.test(cmd.trim())) {
 		return filterTestOutput(stdout);
 	}
 
 	// npm ls / list / ll — aggressive mode strips tree-drawing chars and
 	// collapses identical version lines.
 	if (mode === "aggressive" && /\b(ls|list|ll)\b/.test(cmd)) {
-		return filterNpmLs(stdout);
+		return withFloor(filterNpmLs(stdout).output, stdout);
 	}
 
 	return { output: stdout, filtered: false };
@@ -471,6 +488,21 @@ function isSummaryLine(line: string): boolean {
 	return SUMMARY_RE.test(line);
 }
 
+/**
+ * Say how many lines were dropped.
+ *
+ * This filter is the most lossy in the codebase and it runs in the *default*
+ * mode, while `execute` tells the model it is receiving stdout. Without a
+ * marker, a `console.log` the caller added specifically to inspect something
+ * vanishes and the caller concludes the statement never ran. Every other lossy
+ * path here already emits one (`balancedGitLog`, `smartTruncate`, `compressLogs`).
+ */
+function withOmissionNote(kept: string[], totalLines: number): string {
+	const omitted = totalLines - kept.filter((line) => line !== "").length;
+	if (omitted <= 0) return kept.join("\n");
+	return `${kept.join("\n")}\n[+${omitted} lines omitted — use execute(intent:…) or search() for the full output]`;
+}
+
 export function filterTestOutput(stdout: string): FilterResult {
 	const lines = stdout.split("\n");
 	const failures: string[] = [];
@@ -496,7 +528,7 @@ export function filterTestOutput(stdout: string): FilterResult {
 
 	// If all pass, return compact summary
 	if (failCount === 0 && summary.length > 0) {
-		return { output: summary.join("\n"), filtered: true };
+		return { output: withOmissionNote(summary, lines.length), filtered: true };
 	}
 
 	// If failures exist, return failures + the rollup summary lines only.
@@ -504,8 +536,10 @@ export function filterTestOutput(stdout: string): FilterResult {
 	// what the agent needs; 200 PASS lines just inflate context).
 	if (failures.length > 0) {
 		const rollup = summary.filter((l) => !/^PASS\s/i.test(l));
-		const result = [...failures, "", ...rollup].join("\n");
-		return { output: result, filtered: true };
+		return {
+			output: withOmissionNote([...failures, "", ...rollup], lines.length),
+			filtered: true,
+		};
 	}
 
 	return { output: stdout, filtered: false };

@@ -52,19 +52,28 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 		},
 		async ({ queries, source, limit }) => {
 			const now = Date.now();
-			searchCalls.push(now);
 			while (searchCalls.length > 0 && searchCalls[0] < now - config.searchWindowMs) {
 				searchCalls.shift();
 			}
 
-			const callCount = searchCalls.length;
-
-			if (callCount > config.searchBlockAfter) {
+			// `>=` because this call is not counted until it is admitted below; the
+			// old code pushed first and compared with `>`, so the threshold is the same.
+			if (searchCalls.length >= config.searchBlockAfter) {
+				// Do NOT record this attempt. Counting blocked calls meant a caller
+				// retrying faster than the window could never fall back under the
+				// limit, so the throttle became permanent for the session.
+				const retryAfterMs = Math.max(0, searchCalls[0] + config.searchWindowMs - now);
 				const msg =
-					"Too many search calls in quick succession. Use batch_execute instead to run commands and search in one call.";
+					`Too many search calls in the last ${config.searchWindowMs / 1000}s. ` +
+					`Retry in ${Math.ceil(retryAfterMs / 1000)}s, or pass all queries in ONE call ` +
+					"— search(queries: [...]) accepts up to 16, and batch_execute takes " +
+					"commands plus queries together when you also need to run something.";
 				tracker.trackCall("search", Buffer.byteLength(msg));
 				return { content: [{ type: "text" as const, text: msg }] };
 			}
+
+			searchCalls.push(now);
+			const callCount = searchCalls.length;
 
 			const effectiveLimit =
 				callCount > config.searchReduceAfter ? 1 : Math.max(1, Math.min(limit, config.searchLimit));

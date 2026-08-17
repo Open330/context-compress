@@ -8,6 +8,16 @@ import type { ToolContext } from "./context.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 
+/**
+ * Upper bound on a requested timeout.
+ *
+ * The executor timer is the only thing that kills a runaway process, so an
+ * unvalidated value pinned a concurrency slot indefinitely: eight calls with
+ * timeout=2147483647 (24.8 days) exhausted MAX_CONCURRENT_EXECUTIONS and made
+ * every later execution in the session fail.
+ */
+const MAX_TIMEOUT_MS = 600_000;
+
 export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, tracker, projectDir, withExecutionLimit, applyIntentFilter } = ctx;
 
@@ -26,7 +36,13 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 						"Code to process FILE_CONTENT. Print summary via console.log/print/echo/IO.puts.",
 					),
 				intent: z.string().optional().describe("What you're looking for in the output."),
-				timeout: z.number().default(30000).describe("Max execution time in ms"),
+				timeout: z
+					.number()
+					.int()
+					.positive()
+					.max(MAX_TIMEOUT_MS)
+					.default(30000)
+					.describe(`Max execution time in ms (1-${MAX_TIMEOUT_MS})`),
 			},
 			// Same trust profile as `execute` — the supplied code is arbitrary, the
 			// only added constraint is that the input path stays inside the project.

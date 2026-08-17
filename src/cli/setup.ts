@@ -274,6 +274,20 @@ function showInstructions(serverEntry: string): void {
 }
 
 export async function setup(args: string[] = []): Promise<void> {
+	// Unknown arguments used to be ignored, so `setup --Auto` printed the runtime
+	// report, configured nothing, and exited 0 with no indication. filter/wrap
+	// already reject unknown options; setup was the unfinished edge of that work.
+	const KNOWN_FLAGS = new Set(["--auto", "--no-filter-bash", "--filter-bash"]);
+	const unknown = args.filter((arg) => !KNOWN_FLAGS.has(arg));
+	if (unknown.length > 0) {
+		console.error(
+			`context-compress setup: unknown option "${unknown[0]}"\n` +
+				`Usage: context-compress setup [--auto] [--no-filter-bash]`,
+		);
+		process.exitCode = 2;
+		return;
+	}
+
 	const opts: SetupOptions = {
 		auto: args.includes("--auto"),
 		filterBash: !args.includes("--no-filter-bash"),

@@ -8,6 +8,8 @@ import { loadConfig } from "../config.js";
 import { SubprocessExecutor } from "../executor.js";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
 import { getVersion } from "../util/version.js";
+import { isForeignHookCommand, isOwnedHookCommand } from "./hook-ownership.js";
+import { resolvePaths } from "./setup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -23,6 +25,10 @@ function readSettings(): Record<string, unknown> | null {
 export async function doctor(): Promise<number> {
 	console.log("\n  context-compress doctor\n");
 	let criticalFails = 0;
+	// Warnings are not failures, but reporting "All checks passed" while a warning
+	// is on screen made the summary contradict the report — and a CI script reading
+	// only the exit code could not tell a configured install from an unconfigured one.
+	let warnings = 0;
 
 	// 1. Runtimes
 	console.log("  Detecting runtimes...");
@@ -74,12 +80,26 @@ export async function doctor(): Promise<number> {
 		const preToolUse = hooks?.PreToolUse as
 			| Array<{ hooks?: Array<{ command?: string }> }>
 			| undefined;
-		if (preToolUse?.some((e) => e.hooks?.some((h) => h.command?.includes("pretooluse.mjs")))) {
+		// Use the same ownership rule as setup and uninstall. Matching only the
+		// `pretooluse.mjs` basename reported PASS when the configured hook belonged
+		// to a different tool, and WARN right after a successful dev-mode setup,
+		// whose hook is `pretooluse.ts`.
+		const ownHookPath = resolvePaths().hookEntry;
+		const commands = (preToolUse ?? []).flatMap((entry) =>
+			(entry.hooks ?? []).map((hook) => hook.command),
+		);
+		if (commands.some((command) => isOwnedHookCommand(command, ownHookPath))) {
 			console.log("  [PASS] PreToolUse hook configured");
 		} else {
+			warnings++;
 			console.log("  [WARN] PreToolUse hook not found — run setup to configure");
+			const foreign = commands.filter((command) => isForeignHookCommand(command, ownHookPath));
+			for (const command of foreign) {
+				console.log(`         (an unrelated pretooluse hook is configured: ${command})`);
+			}
 		}
 	} else {
+		warnings++;
 		console.log("  [WARN] Could not read ~/.claude/settings.json");
 	}
 
@@ -98,6 +118,7 @@ export async function doctor(): Promise<number> {
 			if (hash === expectedHash) {
 				console.log(`  [PASS] Hook integrity: SHA-256 verified (${hash.slice(0, 12)}...)`);
 			} else {
+				warnings++;
 				console.log("  [WARN] Hook integrity: SHA-256 MISMATCH");
 				console.log(`         Expected: ${expectedHash.slice(0, 16)}...`);
 				console.log(`         Got:      ${hash.slice(0, 16)}...`);
@@ -110,6 +131,7 @@ export async function doctor(): Promise<number> {
 			);
 		}
 	} catch {
+		warnings++;
 		console.log(`  [WARN] Hook script not found at ${hookPath}`);
 	}
 
@@ -146,6 +168,10 @@ export async function doctor(): Promise<number> {
 	if (criticalFails > 0) {
 		console.log(`  ${criticalFails} critical issue(s) found.\n`);
 		return 1;
+	}
+	if (warnings > 0) {
+		console.log(`  ${warnings} warning(s) — see above. No critical issues.\n`);
+		return 0;
 	}
 	console.log("  All checks passed.\n");
 	return 0;

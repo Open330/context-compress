@@ -1,13 +1,7 @@
-import {
-	copyFileSync,
-	existsSync,
-	readdirSync,
-	readFileSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { cleanupStaleDbs } from "../store.js";
 import { isOwnedHookCommand, removeOwnedEnv } from "./hook-ownership.js";
 import { resolvePaths } from "./setup.js";
 
@@ -96,11 +90,15 @@ export async function uninstall(): Promise<void> {
 	// 1. Remove our hook, MCP registration, and env keys in one settings write.
 	console.log("  Removing configuration from settings.json...");
 	const settingsPath = resolve(homedir(), ".claude", "settings.json");
+	let failed = false;
 	try {
 		changes.push(...removeFromSettings(settingsPath));
 	} catch (err) {
-		// Fail closed: a half-understood settings file is never rewritten.
-		console.log(
+		// Fail closed: a half-understood settings file is never rewritten. Report it
+		// through the exit code too — printing "Uninstall complete." and exiting 0
+		// while the hook is still installed misleads a dotfiles or CI script.
+		failed = true;
+		console.error(
 			`  Could not modify settings.json (${err instanceof Error ? err.message : String(err)})`,
 		);
 	}
@@ -120,29 +118,16 @@ export async function uninstall(): Promise<void> {
 		// May not exist
 	}
 
-	// 3. Clean stale databases
-	console.log("  Cleaning stale databases...");
-	const dir = tmpdir();
+	// 3. Clean leftover temp directories.
+	// The old predicate looked for `context-compress-*.db` FILES, which nothing has
+	// created since the store moved to private random directories — so this step
+	// always reported nothing while the real leftovers accumulated.
+	console.log("  Cleaning leftover temp directories...");
 	try {
-		const files = readdirSync(dir);
-		let cleaned = 0;
-		for (const file of files) {
-			if (file.startsWith("context-compress-") && file.endsWith(".db")) {
-				for (const suffix of ["", "-wal", "-shm"]) {
-					try {
-						unlinkSync(join(dir, file + suffix));
-					} catch {
-						// Ignore
-					}
-				}
-				cleaned++;
-			}
-		}
-		if (cleaned > 0) {
-			changes.push(`Cleaned ${cleaned} database file(s)`);
-		}
+		const cleaned = cleanupStaleDbs();
+		if (cleaned > 0) changes.push(`Cleaned ${cleaned} leftover temp directory(ies)`);
 	} catch {
-		// Ignore
+		// Best effort: another process may own them.
 	}
 
 	// Summary
@@ -153,6 +138,14 @@ export async function uninstall(): Promise<void> {
 		}
 	} else {
 		console.log("  Nothing to clean up.");
+	}
+
+	if (failed) {
+		console.error(
+			"\n  Uninstall incomplete: settings.json could not be modified, so the hook may still be installed.\n",
+		);
+		process.exitCode = 1;
+		return;
 	}
 
 	console.log("\n  Uninstall complete. Restart Claude Code to apply changes.\n");

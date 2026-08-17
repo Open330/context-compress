@@ -112,6 +112,95 @@ describe("filterTestOutput", () => {
 		assert.ok(r.output.includes("pass 3"));
 	});
 
+	it("states how many lines it dropped", () => {
+		// This filter runs in the DEFAULT mode and drops everything that is not a
+		// summary line, while `execute` tells the model it is receiving stdout. A
+		// console.log the caller added to inspect something disappeared silently, so
+		// the caller concluded the statement never ran.
+		const stdout = [
+			"PASS src/db.test.ts",
+			"  ● Console",
+			"    console.log",
+			"      resolved DB URL = postgres://app@db-staging:5432/app",
+			"ℹ tests 3",
+			"ℹ pass 3",
+			"ℹ fail 0",
+		].join("\n");
+
+		const r = filterTestOutput(stdout);
+
+		assert.ok(!r.output.includes("db-staging"), "non-summary content is still dropped");
+		assert.match(r.output, /\[\+\d+ lines omitted/, "the drop must be stated, not silent");
+		assert.match(r.output, /search\(\)/, "the marker must say how to recover the content");
+	});
+
+	it("adds no marker when nothing was dropped", () => {
+		const stdout = "ℹ tests 3\nℹ pass 3\nℹ fail 0";
+		assert.doesNotMatch(filterTestOutput(stdout).output, /lines omitted/);
+	});
+
+	it("routes a package manager's test script to the test filter", () => {
+		// `npm test` matched the package-manager branch first, so test output was
+		// filtered as though it were an install: install/audit counts kept, test
+		// summaries not. README advertises this exact command as a 99% reduction.
+		const stdout =
+			"PASS src/a.test.ts\n  ✓ test 1 (2ms)\n  ✓ test 2 (1ms)\nℹ tests 2\nℹ pass 2\nℹ fail 0";
+
+		for (const command of ["npm test", "npm t", "npm run test", "yarn test", "pnpm run test", "bun test"]) {
+			const r = applyCommandFilter(command, stdout, "balanced");
+			assert.strictEqual(r.filtered, true, command);
+			assert.ok(!r.output.includes("✓ test 1"), `${command}: per-test lines should collapse`);
+			assert.ok(r.output.includes("pass 2"), `${command}: the rollup must survive`);
+		}
+	});
+
+	it("never returns empty output for non-empty input", () => {
+		// Aggressive filters keep only summary-shaped lines, so a run whose output
+		// matches none of them collapsed to "" — the caller could not tell success
+		// from failure. Reproduced with both of these before the floor was added.
+		const cases: Array<[command: string, stdout: string]> = [
+			["npm install", "up to date in 431ms"],
+			["npm install nope", "npm error code E404\nnpm error 404 Not Found - GET https://x/nope"],
+			["npm ls", "no dependencies"],
+			["df -h", "some unusual df output"],
+			["ps aux", "unexpected ps output"],
+			["du -sh .", "weird du output"],
+			["grep -r needle .", "unusual grep output"],
+		];
+
+		for (const [command, stdout] of cases) {
+			const r = applyCommandFilter(command, stdout, "aggressive");
+			assert.notStrictEqual(r.output.trim(), "", `${command} returned empty output`);
+		}
+	});
+
+	it("keeps npm 10 lowercase error lines in aggressive mode", () => {
+		// The branch already stripped npm 10's lowercase `npm warn`/`npm notice`, but
+		// only kept the npm 9 uppercase `npm ERR`, so errors were dropped.
+		const stdout = [
+			"npm warn deprecated foo@1.0.0",
+			"npm error code ERESOLVE",
+			"npm error ERESOLVE unable to resolve dependency tree",
+			"added 3 packages",
+		].join("\n");
+
+		const r = applyCommandFilter("npm install", stdout, "aggressive");
+
+		assert.ok(r.output.includes("npm error code ERESOLVE"), "errors must survive");
+		assert.ok(!r.output.includes("npm warn deprecated"), "warnings are still noise");
+		assert.ok(r.output.includes("added 3 packages"));
+	});
+
+	it("still treats an install as an install", () => {
+		const r = applyCommandFilter(
+			"npm install",
+			"added 120 packages, and audited 300 packages in 4s\nfound 0 vulnerabilities",
+			"balanced",
+		);
+		assert.ok(r.output.includes("added 120 packages"));
+		assert.ok(!r.output.includes("lines omitted"), "install output must not use the test filter");
+	});
+
 	it("keeps failure lines and summary", () => {
 		const stdout =
 			"PASS src/a.test.ts\nFAIL src/b.test.ts\n  ✗ broken test\n    AssertionError: expected 1 to equal 2\nℹ tests 5\nℹ pass 3\nℹ fail 1";

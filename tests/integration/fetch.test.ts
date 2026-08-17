@@ -1,7 +1,8 @@
 import assert from "node:assert";
+import dns from "node:dns";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig, resetConfig } from "../../src/config.js";
 import { SubprocessExecutor } from "../../src/executor.js";
@@ -114,6 +115,72 @@ describe("integration: fetch conversion workflow", () => {
 			}
 		},
 	);
+
+	it("pins the validated IP and forces the Node runtime when executing the fetch", async () => {
+		// Both guarantees were unprotected: deleting `buildFetchCode(url, resolvedIp)`
+		// and `requireRuntime: "node"` left the whole suite green, because the only
+		// test touching this handler discarded the executor's options. That reopens
+		// DNS rebinding (a second lookup can move) and lets the snippet run under
+		// Bun, whose node:http shim silently ignores connection pinning.
+		const config = loadConfig();
+		const store = new ContentStore(":memory:");
+		const tracker = new SessionTracker();
+		const seen: Array<{ code: string; requireRuntime?: string }> = [];
+		const executor = {
+			execute: async (opts: { code: string; requireRuntime?: string }) => {
+				seen.push({ code: opts.code, requireRuntime: opts.requireRuntime });
+				return {
+					indexableStdout: "# Page\n\nbody text",
+					stdout: "# Page\n\nbody text",
+					stderr: "",
+					exitCode: 0,
+					truncated: false,
+					killed: false,
+				} satisfies ExecResult;
+			},
+		} as unknown as SubprocessExecutor;
+		const ctx: ToolContext = {
+			config,
+			store,
+			tracker,
+			executor,
+			projectDir: process.cwd(),
+			bunDetected: false,
+			dbFallback: false,
+			withExecutionLimit: (fn) => fn(),
+			applyIntentFilter: createIntentFilter({ config, store, tracker }),
+		};
+
+		const lookup = mock.method(dns.promises, "lookup", async () => ({
+			address: "93.184.216.34",
+			family: 4 as const,
+		}));
+		try {
+			await captureFetchHandler(ctx)({ url: "https://example.com/page" });
+
+			assert.strictEqual(seen.length, 1, "the handler must execute the snippet once");
+			const [call] = seen;
+			assert.strictEqual(
+				call.requireRuntime,
+				"node",
+				"the fetch snippet must be pinned to Node — Bun ignores connection pinning",
+			);
+			assert.ok(
+				call.code.includes('"93.184.216.34"'),
+				"the resolved IP must be pinned into the generated snippet",
+			);
+			assert.ok(
+				call.code.includes("createConnection"),
+				"pinning must happen at the connection layer",
+			);
+			// The URL hostname has to survive for TLS SNI and certificate validation.
+			assert.ok(call.code.includes('"https://example.com/page"'));
+			assert.ok(!call.code.includes("https://93.184.216.34"));
+		} finally {
+			lookup.mock.restore();
+			store.close();
+		}
+	});
 
 	it("indexes pre-filter fetch content while previewing compressed stdout", async () => {
 		const config = loadConfig();

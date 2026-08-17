@@ -88,7 +88,42 @@ function gitLogBlob(): string {
 	).join("\n");
 }
 
+/**
+ * A passing test run whose body carries information the caller needs.
+ *
+ * `filterTestOutput` is the most lossy filter here and it runs in the default
+ * balanced mode, but the harness whose stated purpose is survival of
+ * task-critical information had no test-runner case at all — so a 99% reduction
+ * could be reported with no check on what was lost.
+ */
+function testRunnerBlob(): string {
+	const noise = Array.from(
+		{ length: 60 },
+		(_, i) => `PASS src/module${i}.test.ts (${i % 9}.${i % 10}s)`,
+	);
+	return [
+		...noise.slice(0, 30),
+		"  ● Console",
+		"    console.log",
+		"      resolved DB URL = postgres://app@db-staging:5432/app",
+		"        at Object.<anonymous> (src/db.test.ts:14:11)",
+		...noise.slice(30),
+		"Test Suites: 60 passed, 60 total",
+		"Tests:       184 passed, 184 total",
+		"Time:        12.431 s",
+	].join("\n");
+}
+
 export const CORPUS: BenchCase[] = [
+	{
+		name: "passing test run with a console.log the caller needs",
+		command: "npm test",
+		output: testRunnerBlob(),
+		// The rollup counts must survive every mode. That content was *dropped* is
+		// signalled by an omission marker, which only lossy modes emit, so it is
+		// asserted in the filter's own tests rather than as a survival invariant.
+		mustContain: ["184 passed", "60 total"],
+	},
 	{
 		name: "pretty-json (unrecognized cmd)",
 		command: "somecli users --json",

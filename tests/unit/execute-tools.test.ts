@@ -141,6 +141,39 @@ describe("execute status reporting", () => {
 	});
 });
 
+describe("timeout input bounds", () => {
+	function timeoutSchema(kind: "execute" | "execute_file"): {
+		safeParse(value: unknown): { success: boolean };
+	} {
+		let options: { inputSchema: { timeout: { safeParse(v: unknown): { success: boolean } } } } | undefined;
+		const server = {
+			registerTool(_name: unknown, registered: typeof options) {
+				options = registered;
+			},
+		} as unknown as McpServer;
+		if (kind === "execute") registerExecuteTool(server, {} as ToolContext);
+		else registerExecuteFileTool(server, {} as ToolContext);
+		assert.ok(options);
+		return options.inputSchema.timeout;
+	}
+
+	it("rejects values that would pin an execution slot indefinitely", () => {
+		// The executor's timer is the only thing that kills a runaway process, so an
+		// unvalidated timeout let eight calls exhaust MAX_CONCURRENT_EXECUTIONS and
+		// make every later execution in the session fail.
+		for (const kind of ["execute", "execute_file"] as const) {
+			const schema = timeoutSchema(kind);
+			assert.strictEqual(schema.safeParse(2_147_483_647).success, false, `${kind}: 24.8 days`);
+			assert.strictEqual(schema.safeParse(0).success, false, `${kind}: zero`);
+			assert.strictEqual(schema.safeParse(-1).success, false, `${kind}: negative`);
+			assert.strictEqual(schema.safeParse(1.5).success, false, `${kind}: fractional`);
+			assert.strictEqual(schema.safeParse(30_000).success, true, `${kind}: ordinary value`);
+			assert.strictEqual(schema.safeParse(600_000).success, true, `${kind}: the ceiling`);
+			assert.strictEqual(schema.safeParse(600_001).success, false, `${kind}: past the ceiling`);
+		}
+	});
+});
+
 describe("execute_file status reporting", () => {
 	it("leaves a clean success untouched", async () => {
 		const { handler } = register("execute_file", result({ stdout: "ok", indexableStdout: "ok" }));

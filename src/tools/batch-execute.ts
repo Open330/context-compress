@@ -72,6 +72,16 @@ function searchBlockFor(
  * Upper bounds on one request. Without them a single call can pin
  * `commands.length` capped outputs plus every search block in memory at once.
  */
+/**
+ * Upper bound on a requested timeout.
+ *
+ * The executor timer is the only thing that kills a runaway process, so an
+ * unvalidated value pinned a concurrency slot indefinitely: eight calls with
+ * timeout=2147483647 (24.8 days) exhausted MAX_CONCURRENT_EXECUTIONS and made
+ * every later execution in the session fail.
+ */
+const MAX_TIMEOUT_MS = 600_000;
+
 const MAX_BATCH_COMMANDS = 32;
 const MAX_BATCH_QUERIES = 16;
 /** Concurrency also bounds how many command corpora are retained at once. */
@@ -103,7 +113,13 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 					.describe(
 						`Search queries to extract information from indexed output. Use 5-8 comprehensive queries (max ${MAX_BATCH_QUERIES}).`,
 					),
-				timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
+				timeout: z
+					.number()
+					.int()
+					.positive()
+					.max(MAX_TIMEOUT_MS)
+					.default(60000)
+					.describe(`Max execution time in ms (default: 60s, max ${MAX_TIMEOUT_MS})`),
 			},
 			// Runs arbitrary shell commands — same pessimistic hints as `execute`.
 			annotations: {

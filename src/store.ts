@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	rmdirSync,
+	rmSync,
+	statSync,
+	unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -815,38 +824,35 @@ export function cleanupStaleDbs(): number {
 	const dir = tmpdir();
 	let cleaned = 0;
 
+	// These are the prefixes this package actually creates: `mkdtemp` directories,
+	// not `context-compress-<pid>.db` files. The old pattern matched a filename
+	// nothing has produced since the store moved to private random directories,
+	// so this function always returned 0 while leftovers accumulated.
+	const STALE_DIR_PREFIXES = ["context-compress-store-", "context-compress-exec-"];
+	// Only sweep directories that have been untouched for a while, since a live
+	// peer server's ephemeral store is indistinguishable from an abandoned one.
+	const MIN_AGE_MS = 60 * 60 * 1000;
+	const now = Date.now();
+
 	try {
-		const files = readdirSync(dir);
-		const dbPattern = /^context-compress-(\d+)\.db$/;
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			if (!STALE_DIR_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
 
-		for (const file of files) {
-			const match = file.match(dbPattern);
-			if (!match) continue;
-
-			const pid = Number.parseInt(match[1], 10);
-			if (pid === process.pid) continue;
-
-			// Check if process is still alive
+			const path = join(dir, entry.name);
 			try {
-				process.kill(pid, 0);
-				// Process exists — skip
-			} catch {
-				// Process is dead — clean up
-				const basePath = join(dir, file);
-				for (const suffix of ["", "-wal", "-shm"]) {
-					try {
-						unlinkSync(basePath + suffix);
-					} catch {
-						// Ignore
-					}
-				}
+				if (now - statSync(path).mtimeMs < MIN_AGE_MS) continue;
+				rmSync(path, { recursive: true, force: true });
 				cleaned++;
+			} catch (e) {
+				// Another process may own or have just removed it; leave it alone.
+				debug("Stale dir cleanup skipped:", entry.name, e);
 			}
 		}
 	} catch (e) {
 		debug("Stale DB cleanup error:", e);
 	}
 
-	if (cleaned > 0) debug(`Cleaned ${cleaned} stale database(s)`);
+	if (cleaned > 0) debug(`Cleaned ${cleaned} stale store/exec directory(ies)`);
 	return cleaned;
 }

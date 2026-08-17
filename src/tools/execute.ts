@@ -6,6 +6,16 @@ import type { ToolContext } from "./context.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
 
+/**
+ * Upper bound on a requested timeout.
+ *
+ * The executor timer is the only thing that kills a runaway process, so an
+ * unvalidated value pinned a concurrency slot indefinitely: eight calls with
+ * timeout=2147483647 (24.8 days) exhausted MAX_CONCURRENT_EXECUTIONS and made
+ * every later execution in the session fail.
+ */
+const MAX_TIMEOUT_MS = 600_000;
+
 export function registerExecuteTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, tracker, withExecutionLimit, applyIntentFilter, bunDetected } = ctx;
 
@@ -29,7 +39,13 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 					.describe(
 						"What you're looking for in the output. When provided and output is large (>5KB), indexes output into knowledge base and returns section titles + previews — not full content. Use search(queries: [...]) to retrieve specific sections.",
 					),
-				timeout: z.number().default(30000).describe("Max execution time in ms"),
+				timeout: z
+					.number()
+					.int()
+					.positive()
+					.max(MAX_TIMEOUT_MS)
+					.default(30000)
+					.describe(`Max execution time in ms (1-${MAX_TIMEOUT_MS})`),
 			},
 			// Arbitrary caller-supplied code: it may write files, and it may reach
 			// the network. Both hints stay pessimistic so clients gate it correctly.
