@@ -7,3 +7,14 @@ hooks/pretooluse.sha256
 *.db-wal
 *.db-shm
 .DS_Store
+.context/reviews/
+*.lock/
+*.deploy.lock/
+*.dead.*/
+.rpf.*.tmp
+
+# Transient agent-run artifacts: the RPF pointer (.context/rpf.md) is tracked,
+# its recovery snapshots and per-run logs are not.
+.context/rpf.recovery.*
+.context/impl/*.log
+.codex/
