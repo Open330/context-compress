@@ -31,10 +31,10 @@
 ## RPF state
 
 - Status: running
-- Pointer revision: 19
+- Pointer revision: 21
 - Last writer: rpf-claude-20260817T084221Z-a724
-- Total cycles: 3
-- Cycles allocated: 3
+- Total cycles: 4
+- Cycles allocated: 4
 - Last completed cycle: 3
 - Review input revision: 7
 - User instruction epoch: 3
@@ -42,7 +42,7 @@
 - Work ID high-watermark: 37
 - Gap ID high-watermark: 6
 - Pointer publication assurance: cooperative-lock-readback (typed atomic-exchange publication deferred: this pointer predates the `rpf:authority-json` block the pinned bundle requires)
-- Next action: Cycle 3 integrated the entire cycle-2 backlog (15 items). Run a fresh independent Phase-1 review against the new fence at `5365c71` before claiming convergence; the outstanding non-work obligations are the pointer authority-JSON migration and the Go compile check (no Go toolchain on this host).
+- Next action: Cycle 4 Phase 1 is dispatching six conclusion-blind persona reviewers plus adversarial verifiers against base `c05e47a`. Merge only findings that survive their kill gate, then implement, gate, and publish.
 
 This document is the self-sufficient hot control-plane index and the only
 manifest/commit point. Authored intent, live coordination, every nonterminal
@@ -69,7 +69,7 @@ Every `Detail shard` or `Shard ID` cell contains exactly one manifest
 
 | Run ID | Tool | Cycle | Phase | Lease expires (UTC) | Target ref | Integration path | Claimed work | Claimed paths |
 |---|---|---|---|---|---|---|---|---|
-| rpf-claude-20260817T084221Z-a724 | claude | 3 | review | 2026-08-17T10:30:00Z | fix/fetch-pinning-and-destructive-filters | /Users/jiun/workspace-open330/context-compress | - | -
+| rpf-claude-20260817T084221Z-a724 | claude | 4 | review | 2026-08-17T11:15:00Z | fix/fetch-pinning-and-destructive-filters | /Users/jiun/workspace-open330/context-compress | - | -
 
 ## Current understanding
 
@@ -143,6 +143,23 @@ Statuses: `pending`, `active`, `integrated`, `blocked`, `deferred`, `done`.
 lower runs first. `Deps` is comma-separated work IDs or `-`. `Owner` is the
 claiming `Run ID`; clear it and `Claim expires` when the item leaves `active`.
 
+## Reconciliation queue
+
+Record a preserved publication or semantic conflict here after the next safe
+write. `Authority` is `auto`, `agent`, or `user`. An open row blocks only the
+affected scope and convergence. Recovery refs identify the manifest and
+preserved variants.
+
+| ID | Status | Rev | Scope | Base SHA-256 | Current SHA-256 | Candidate SHA-256 | Authority | Resolution / reason | Recovery refs |
+|---|---|---:|---|---|---|---|---|---|---|
+
+## Secret exposure incidents
+
+Never record the value, a reversible derivative, or blocked output.
+
+| ID | Status | Rev | Cycle | Run | Source fence | Source class | Affected channel | Safe response / user notice | Reopen when |
+|---|---|---:|---:|---|---|---|---|---|---|
+
 ## Durable record index
 
 | Record ID | Kind | Rev | Disposition or result | Compact evidence | Shard ID |
@@ -191,6 +208,11 @@ claiming `Run ID`; clear it and `Claim expires` when the item leaves `active`.
 | 19 | 3 | rpf-claude-20260817T084221Z-a724 | Resolve the RPF-007 vs RPF-029 conflict in favour of strict ownership, and report rather than claim an ambiguous hook. | Repairing a stale hook at an arbitrary path and never touching a third party's identically named hook cannot both hold for `/old/path/pretooluse.mjs`. A stale duplicate is visible and user-recoverable; deleting another tool's hook is neither. Setup now names any unrecognized pretooluse hook it left alone. |
 | 19 | 3 | rpf-claude-20260817T084221Z-a724 | Do not claim convergence at the end of cycle 3. | Every cycle-2 work item is integrated and all gates are green, but convergence additionally requires a fresh independent review and result falsification against the current fence, which this cycle did not run: it executed Phase 3/4 on an already-verified backlog. Two coverage gaps (Go compile check, pointer authority migration) also remain explicitly unverified. |
 
+| 20 | 4 | rpf-claude-20260817T084221Z-a724 | Select six applicable bundled persona lenses for cycle 4: security, performance, api-dx, testing, code-quality, ai-llm. | Repository markers make security (SSRF/secret handling), database-backed performance, public MCP/CLI surface, test contracts, and LLM prompt/tool boundaries applicable. frontend/privacy/database/devops/observability lenses have no detected surface or were already exercised in cycles 1-2 without new roots. Reviewers receive the source fence only — no prior findings — so their conclusions stay independent. |
+
+| 21 | 4 | rpf-claude-20260817T084221Z-a724 | Do not migrate this pointer to the pinned bundle's `rpf:authority-json` block, and keep publishing through the runtime lock with verified base digest and readback. | Probed the pinned runtime directly against a canonical fence over the 56 tracked `src/**/*.ts` files at base `c05e47a`. Three blockers, in order of finality: (1) `register_runtime_evidence_provider()` raises `external runtime provider trust anchor is unavailable` unconditionally, so no `RuntimeReceipt` can ever be minted here; (2) `derive_ui_mapping()` detects 10 phantom UI surfaces (60 obligations) from HTML-conversion and `viewport`/`@media`/`router` string literals in a package that ships no UI, and without a receipt every one of them is permanently `unverified-unavailable`; (3) `derive_incident_coverage()` marks `backup-restore-equivalence` applicable, which additionally requires export/import records plus a comparison bound to provider receipts. `capture_authority()` alone could be satisfied, so typed publication is reachable — but `evaluate_cycle_evidence()` convergence is structurally unreachable on this host regardless of how the authority object is written. Writing 20-40 KB of machine authority into a human-read control plane to buy conflict-preserving exchange, while the existing lock path already fails closed on a raced base digest, is not a proportionate trade. Revisit if a host-issued runtime-evidence trust anchor becomes available. |
+| 21 | 4 | rpf-claude-20260817T084221Z-a724 | Add the `Reconciliation queue` and `Secret exposure incidents` managed sections now, without the authority block. | The current bundle's projections parse both, this pointer predates them, and until they exist a publication conflict or a secret incident has nowhere to be recorded. Cheap, useful independently of the migration decision above, and a prerequisite for any future migration. |
+
 ## Verification evidence
 
 | Cycle | Run | Work ID or criterion | Evidence | Result |
@@ -202,6 +224,8 @@ claiming `Run ID`; clear it and `Claim expires` when the item leaves `active`.
 | 3 | rpf-claude-20260817T084221Z-a724 | RPF-017, RPF-024, RPF-025, RPF-029, RPF-030, RPF-031, RPF-033, RPF-035, RPF-036 | Targeted regressions for each item; `npm run typecheck`, `npm run lint` (0 errors, 25 warnings — one below the pre-cycle baseline), `npm test` (415 tests, 414 pass, 1 expected skip, 0 fail), and `npm run build` all passed on the trees published as `f41fe61` and `5365c71`. | pass |
 | 3 | rpf-claude-20260817T084221Z-a724 | cycle-2 backlog | All 15 reclaimed cycle-2 work items reached `integrated`; work queue holds no nonterminal rows. | pass |
 | 3 | rpf-claude-20260817T084221Z-a724 | coverage gap: Go compile check | `tests/unit/runtime.test.ts` compile assertion remains skipped — no Go toolchain on this host. Generated-code correctness is asserted structurally only. | unverified-unavailable |
+| 4 | rpf-claude-20260817T084221Z-a724 | coverage gap: UI runtime verification | Structurally unverifiable on this host: `register_runtime_evidence_provider()` fails closed, so the 60 derived UI obligations can never leave `unverified-unavailable`. The package ships no UI; the obligations come from HTML-conversion string literals. | unverified-unavailable |
+| 4 | rpf-claude-20260817T084221Z-a724 | coverage gap: backup-restore-equivalence | Derived as applicable, but its records require provider receipts that cannot be minted here. | unverified-unavailable |
 | 3 | rpf-claude-20260817T084221Z-a724 | coverage gap: pointer authority JSON | This pointer predates the pinned bundle's `rpf:authority-json` block, so typed `publish_if_exact` publication and `evaluate_cycle_evidence()` reduction were unavailable this cycle. Writes used the runtime's owner-bound lock with verified base digest and readback. | unverified-unavailable |
 | 1 | rpf-codex-20260810T061531Z-9935 | publication | Fast-forward push `3125f91..a0fd3a2` to `origin/fix/fetch-pinning-and-destructive-filters` succeeded; deployment mode remained none. | pass |
 
