@@ -520,21 +520,22 @@ export class SubprocessExecutor {
 					stderr = stderr.replace(/__CM_NET__:\d+\n?/, "");
 				}
 
-				// Preserve the executor-capped corpus before filters discard command
-				// noise, fold repeated lines, or truncate the response. ANSI escapes
-				// are presentation metadata, so keep the searchable copy clean too.
+				// Normalize ANSI exactly once and share the result. Escapes are
+				// presentation metadata, so the searchable copy wants them gone, and
+				// command filters need them gone to detect markers (PASS/FAIL, ✓/✗)
+				// that real output wraps in color. This used to be two full scans of
+				// the same capped buffer — up to the hard cap twice per execution.
 				const indexableStdout = stripAnsi(stdout);
 
-				if (capped) {
-					stdout += `\n[output capped at ${formatBytes(hardCap)} — process killed]`;
-				}
+				// The searchable corpus stays marker-free; the response carries the
+				// cap notice. Neither marker contains ANSI, so appending after the
+				// strip is equivalent to the previous strip-after-append order.
+				stdout = capped
+					? `${indexableStdout}\n[output capped at ${formatBytes(hardCap)} — process killed]`
+					: indexableStdout;
 				if (timedOut) {
 					stderr += `\n[killed: timed out after ${formatDuration(timeout)}]`;
 				}
-
-				// Strip ANSI codes first so command-specific filters can detect markers
-				// (PASS/FAIL, ✓/✗, etc.) that real-world output wraps in color escapes.
-				stdout = stripAnsi(stdout);
 
 				// Apply command-specific filter for shell commands (before generic pipeline)
 				let commandFiltered = false;

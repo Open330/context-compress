@@ -20,6 +20,18 @@ export type RequestedMode = FilterMode | "auto";
 
 export const DEFAULT_MODE: FilterMode = "balanced";
 
+/** Every mode a caller may request, for validation and error messages. */
+export const REQUESTED_MODES: readonly RequestedMode[] = [
+	"conservative",
+	"balanced",
+	"aggressive",
+	"auto",
+];
+
+export function isRequestedMode(input: string | undefined): input is RequestedMode {
+	return input !== undefined && (REQUESTED_MODES as readonly string[]).includes(input);
+}
+
 export function parseMode(input: string | undefined): FilterMode {
 	if (input === "aggressive" || input === "conservative") return input;
 	return "balanced";

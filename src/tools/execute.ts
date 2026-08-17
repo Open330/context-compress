@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
-import { formatExecStatusFooter } from "../util/exec-status.js";
+import { withExecStatus } from "../util/exec-status.js";
 import type { ToolContext } from "./context.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
@@ -80,14 +80,9 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 				if (filtered !== indexableOutput) output = filtered;
 			}
 
-			// Append the exit/killed/truncated footer last so it survives the intent
-			// filter: without it, exit 7 with no output is indistinguishable from a
-			// successful empty run.
-			const footer = formatExecStatusFooter(result);
-			if (footer !== null) {
-				if (output.trim() === "") output = "(no output)";
-				output += footer;
-			}
+			// Applied last so it survives the intent filter: without it, exit 7 with
+			// no output is indistinguishable from a successful empty run.
+			output = withExecStatus(output, result);
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute", responseBytes);

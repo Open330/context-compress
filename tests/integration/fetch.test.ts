@@ -68,6 +68,7 @@ describe("integration: fetch conversion workflow", () => {
 			const runtimes = await detectRuntimes();
 			if (!runtimes.has("javascript")) {
 				t.skip("javascript runtime not detected");
+				return;
 			}
 
 			const executor = new SubprocessExecutor(runtimes, config);

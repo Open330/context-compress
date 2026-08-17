@@ -63,6 +63,7 @@ describe("integration: batch execute flow", () => {
 			const runtimes = await detectRuntimes();
 			if (!runtimes.has("shell")) {
 				t.skip("shell runtime not detected");
+				return;
 			}
 
 			const executor = new SubprocessExecutor(runtimes, config);

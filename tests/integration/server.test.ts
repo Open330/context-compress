@@ -46,6 +46,7 @@ describe("integration: tool-chain components", () => {
 			try {
 				if (!runtimes.has("javascript")) {
 					t.skip("javascript runtime not detected");
+					return;
 				}
 
 				const exec = await executor.execute({
@@ -74,6 +75,7 @@ describe("integration: tool-chain components", () => {
 			try {
 				if (!runtimes.has("python")) {
 					t.skip("python runtime not detected");
+					return;
 				}
 
 				const exec = await executor.execute({
@@ -119,6 +121,7 @@ Run smoke checks after deployment.
 			try {
 				if (!runtimes.has("shell")) {
 					t.skip("shell runtime not detected");
+					return;
 				}
 
 				const exec = await executor.execute({

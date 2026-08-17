@@ -96,6 +96,42 @@ describe("runtime detection and plugins", () => {
 		}
 	});
 
+	it("go plugin never calls ReadFile through a blank-imported os", () => {
+		const plugin = ALL_PLUGINS.find((p) => p.language === "go");
+		assert.ok(plugin?.wrapWithFileContent);
+
+		// `import _ "os"` imports for side effects only and binds no callable name,
+		// so treating `_` as a qualifier generated invalid `_.ReadFile(...)`.
+		const cases = [
+			'package main\n\nimport _ "os"\n\nfunc main() { println(FILE_CONTENT) }\n',
+			'package main\n\nimport (\n\t"fmt"\n\t_ "os"\n)\n\nfunc main() { fmt.Print(FILE_CONTENT) }\n',
+		];
+
+		for (const code of cases) {
+			const generated = plugin.wrapWithFileContent(code, "/tmp/input.txt");
+			assert.doesNotMatch(generated, /\b_\.ReadFile/, "blank identifier is not callable");
+			assert.match(generated, /import __ccOs "os"/, "a usable os binding must be added");
+			assert.match(generated, /__ccOs\.ReadFile\(FILE_CONTENT_PATH\)/);
+			assert.ok(generated.includes('_ "os"'), "the original blank import must be preserved");
+			assert.ok(
+				generated.indexOf("__ccOs.ReadFile") < generated.indexOf("func main"),
+				"variables should precede declarations",
+			);
+		}
+	});
+
+	it("go plugin prefers a real os alias over a blank import of the same package", () => {
+		const plugin = ALL_PLUGINS.find((p) => p.language === "go");
+		assert.ok(plugin?.wrapWithFileContent);
+
+		const generated = plugin.wrapWithFileContent(
+			'package main\n\nimport _ "os"\nimport stdos "os"\n\nfunc main() { println(stdos.Args[0]) }\n',
+			"/tmp/input.txt",
+		);
+		assert.match(generated, /stdos\.ReadFile\(FILE_CONTENT_PATH\)/);
+		assert.doesNotMatch(generated, /__ccOs/, "no extra import is needed when one is usable");
+	});
+
 	it("go plugin preserves CRLF in package-form generated code", () => {
 		const plugin = ALL_PLUGINS.find((p) => p.language === "go");
 		assert.ok(plugin?.wrapWithFileContent);

@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
-import { formatExecStatusFooter } from "../util/exec-status.js";
+import { withExecStatus } from "../util/exec-status.js";
 import { isWithinProject } from "../util/path.js";
 import type { ToolContext } from "./context.js";
 
@@ -92,11 +92,7 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 			}
 
 			// See execute.ts: a nonzero exit with no output must not read as success.
-			const footer = formatExecStatusFooter(result);
-			if (footer !== null) {
-				if (output.trim() === "") output = "(no output)";
-				output += footer;
-			}
+			output = withExecStatus(output, result);
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute_file", responseBytes);

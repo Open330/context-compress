@@ -5,7 +5,9 @@ import {
 	applyCommandFilter,
 	DEFAULT_MODE,
 	type FilterMode,
+	isRequestedMode,
 	parseRequestedMode,
+	REQUESTED_MODES,
 	type RequestedMode,
 } from "../filters.js";
 import { applyFormatFilter } from "../format-filter.js";
@@ -90,14 +92,99 @@ export async function compressOutputAsync(
 	};
 }
 
-/** Resolve mode from CLI args, env, or default — in that priority order. */
-function resolveMode(args: string[]): RequestedMode {
+const MODE_LIST = REQUESTED_MODES.join("|");
+const FILTER_USAGE = `Usage: context-compress filter [--cmd '<original command>'] [--mode <${MODE_LIST}>]`;
+const WRAP_USAGE = `Usage: context-compress wrap [--stream] [--mode <${MODE_LIST}>] <command...>`;
+
+/** Report a usage problem on stderr and yield the conventional exit code. */
+function usageError(message: string, usage: string): number {
+	process.stderr.write(`context-compress: ${message}\n${usage}\n`);
+	return 2;
+}
+
+type ModeResolution = { ok: true; mode: RequestedMode } | { ok: false; value: string | undefined };
+
+/**
+ * Resolve mode from CLI args, env, or default — in that priority order.
+ *
+ * An explicit `--mode` is validated: silently substituting balanced for a
+ * misspelled mode meant the caller got compression they never asked for. An
+ * invalid environment value is ambient rather than requested, so it warns and
+ * falls back instead of failing every wrapped command.
+ */
+function resolveMode(args: string[]): ModeResolution {
 	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--mode" && i + 1 < args.length) {
-			return parseRequestedMode(args[i + 1]);
+		if (args[i] !== "--mode") continue;
+		const value = args[i + 1];
+		// A following flag means the value is missing, not that the flag is a mode.
+		if (value === undefined || value.startsWith("-") || !isRequestedMode(value)) {
+			return { ok: false, value };
 		}
+		return { ok: true, mode: value };
 	}
-	return parseRequestedMode(process.env.CONTEXT_COMPRESS_MODE);
+
+	const fromEnv = process.env.CONTEXT_COMPRESS_MODE;
+	if (fromEnv !== undefined && fromEnv !== "" && !isRequestedMode(fromEnv)) {
+		process.stderr.write(
+			`context-compress: ignoring invalid CONTEXT_COMPRESS_MODE="${fromEnv}" (using ${DEFAULT_MODE})\n`,
+		);
+	}
+	return { ok: true, mode: parseRequestedMode(fromEnv) };
+}
+
+function modeError(value: string | undefined, usage: string): number {
+	return usageError(
+		value === undefined || value.startsWith("-")
+			? `--mode requires a value (${MODE_LIST})`
+			: `invalid --mode "${value}" (expected ${MODE_LIST})`,
+		usage,
+	);
+}
+
+/**
+ * Split `wrap` arguments into our own options and the child command line.
+ *
+ * Options are recognized only before the command begins: everything from the
+ * first operand (or `--`) onward belongs to the child, flags included. An
+ * unrecognized leading option is reported rather than joined into the command,
+ * which is how `wrap --moode x ls` used to reach the shell verbatim.
+ */
+function parseWrapArgs(
+	args: string[],
+): { stream: boolean; cmdLine: string } | { unknownOption: string } {
+	let stream = false;
+	let commandStarted = false;
+	const operands: string[] = [];
+
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (commandStarted) {
+			operands.push(arg);
+			continue;
+		}
+		if (arg === "--") {
+			commandStarted = true;
+			operands.push(arg);
+			continue;
+		}
+		if (arg === "--stream") {
+			stream = true;
+			continue;
+		}
+		if (arg === "--mode") {
+			// Value already validated by resolveMode; skip it here.
+			i++;
+			continue;
+		}
+		if (arg.startsWith("-") && arg !== "-") return { unknownOption: arg };
+		commandStarted = true;
+		operands.push(arg);
+	}
+
+	const separatorIndex = operands.indexOf("--");
+	const cmdLine =
+		separatorIndex >= 0 ? operands.slice(separatorIndex + 1).join(" ") : operands.join(" ");
+	return { stream, cmdLine };
 }
 
 /** Read stdin to a string. */
@@ -113,14 +200,28 @@ async function readStdin(): Promise<string> {
  * Reads stdin, applies the pipeline, writes to stdout. Exits 0.
  */
 export async function runFilter(args: string[]): Promise<number> {
+	const resolved = resolveMode(args);
+	if (!resolved.ok) return modeError(resolved.value, FILTER_USAGE);
+
 	let cmd: string | undefined;
 	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--cmd" && i + 1 < args.length) {
+		const arg = args[i];
+		if (arg === "--cmd") {
+			// The value is an arbitrary command string, so it may begin with a dash.
+			if (i + 1 >= args.length) return usageError("--cmd requires a value", FILTER_USAGE);
 			cmd = args[i + 1];
 			i++;
+			continue;
 		}
+		if (arg === "--mode") {
+			i++;
+			continue;
+		}
+		// Previously ignored, which hid typos like `--modee aggressive`.
+		return usageError(`unexpected argument "${arg}"`, FILTER_USAGE);
 	}
-	const mode = resolveMode(args);
+
+	const mode = resolved.mode;
 	const input = await readStdin();
 	const { output: compressed } = await compressOutputAsync(input, cmd, mode);
 	process.stdout.write(compressed);
@@ -150,33 +251,19 @@ export async function runWrap(
 	/** Override the configured hard cap; intended for embedded callers and deterministic tests. */
 	options: { captureCapBytes?: number } = {},
 ): Promise<number> {
-	if (args.length === 0) {
-		process.stderr.write("Usage: context-compress wrap [--stream] [--mode <m>] <command...>\n");
-		return 2;
-	}
+	if (args.length === 0) return usageError("a command is required", WRAP_USAGE);
 
-	let stream = false;
-	const remaining: string[] = [];
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i];
-		if (a === "--stream") {
-			stream = true;
-		} else if (a === "--mode" && i + 1 < args.length) {
-			// Consumed by resolveMode below; skip the value here.
-			i++;
-		} else {
-			remaining.push(a);
-		}
-	}
+	const resolved = resolveMode(args);
+	if (!resolved.ok) return modeError(resolved.value, WRAP_USAGE);
+	const mode = resolved.mode;
 
-	const mode = resolveMode(args);
-	const sepIdx = remaining.indexOf("--");
-	const cmdLine = sepIdx >= 0 ? remaining.slice(sepIdx + 1).join(" ") : remaining.join(" ");
-
-	if (!cmdLine.trim()) {
-		process.stderr.write("Usage: context-compress wrap [--stream] [--mode <m>] <command...>\n");
-		return 2;
+	const parsed = parseWrapArgs(args);
+	if ("unknownOption" in parsed) {
+		return usageError(`unknown option "${parsed.unknownOption}"`, WRAP_USAGE);
 	}
+	const { stream, cmdLine } = parsed;
+
+	if (!cmdLine.trim()) return usageError("a command is required", WRAP_USAGE);
 
 	return await new Promise<number>((resolve) => {
 		const proc = spawn(cmdLine, {

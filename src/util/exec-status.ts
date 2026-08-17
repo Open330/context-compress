@@ -32,3 +32,13 @@ export function formatExecStatusFooter(result: ExecResult): string | null {
 	if (result.truncated) parts.push("output truncated at the executor cap");
 	return `\n\n[${parts.join(" · ")}]`;
 }
+
+/**
+ * Attach the status footer to a tool response. An empty body becomes an explicit
+ * "(no output)" so a failed run never renders as a blank success.
+ */
+export function withExecStatus(output: string, result: ExecResult): string {
+	const footer = formatExecStatusFooter(result);
+	if (footer === null) return output;
+	return `${output.trim() === "" ? "(no output)" : output}${footer}`;
+}

@@ -47,6 +47,53 @@ describe("context-compress CLI dispatch", () => {
 		});
 	}
 
+	it("starts an MCP server on stdio with no arguments and answers initialize", () => {
+		// The no-argument form is the published MCP entry point — every plugin
+		// manifest and setup path depends on it — but nothing covered it, so a
+		// dispatch change could have broken startup with all tests green.
+		const request = `${JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: {
+				protocolVersion: "2025-06-18",
+				capabilities: {},
+				clientInfo: { name: "rpf-contract-test", version: "0" },
+			},
+		})}\n`;
+
+		const result = spawnSync(process.execPath, ["--import", "tsx", cliPath], {
+			cwd: root,
+			encoding: "utf-8",
+			timeout: 20_000,
+			input: request,
+			// Deterministic offline: no auto mode, no network, isolated config home.
+			env: {
+				...process.env,
+				HOME: join(root, "node_modules/.cache/cc-mcp-contract-home"),
+				CONTEXT_COMPRESS_MODE: "conservative",
+			},
+		});
+
+		assert.strictEqual(result.error, undefined);
+		assert.strictEqual(result.signal, null, "server must exit on stdin close, not be killed");
+		assert.strictEqual(result.status, 0, `exited ${result.status}: ${result.stderr}`);
+
+		const responses = result.stdout
+			.split("\n")
+			.filter((line) => line.trim().startsWith("{"))
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const initialize = responses.find((message) => message.id === 1);
+		assert.ok(initialize, `no JSON-RPC response for initialize in: ${result.stdout}`);
+		assert.strictEqual(initialize.jsonrpc, "2.0");
+		assert.strictEqual(initialize.error, undefined);
+
+		const payload = initialize.result as { protocolVersion?: string; serverInfo?: { name?: string } };
+		assert.ok(payload, "initialize must return a result");
+		assert.ok(payload.protocolVersion, "initialize must negotiate a protocol version");
+		assert.ok(payload.serverInfo?.name, "initialize must identify the server");
+	});
+
 	it("reports an unknown command without starting the MCP server", () => {
 		const result = runCli(["frobnicate"]);
 

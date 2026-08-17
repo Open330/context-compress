@@ -3,7 +3,16 @@ import type { LanguagePlugin } from "../plugin.js";
 interface GoPackageHeader {
 	insertAfter: number;
 	osQualifier?: string;
+	/** `import _ "os"` is present: side-effect only, so it binds no callable name. */
+	osBlankImported?: boolean;
 }
+
+/**
+ * Alias used when `os` is already blank-imported. Importing the path again under
+ * an unused name is always legal, and it avoids assuming anything about how the
+ * caller's own `os` bindings are spelled.
+ */
+const OS_ALIAS = "__ccOs";
 
 function lineEnd(code: string, from: number): number {
 	const newline = code.indexOf("\n", from);
@@ -81,12 +90,36 @@ function importDeclarationEnd(code: string, importStart: number): number {
 	return lineEnd(code, declarationEnd);
 }
 
+/**
+ * How `os` is bound by one import declaration:
+ * `"os"` for a plain import, an alias, `""` for a dot import, `"_"` for a blank
+ * (side-effect) import, or `undefined` when the declaration does not import os.
+ */
 function osQualifier(importDeclaration: string): string | undefined {
 	const body = importDeclaration.replace(/^[ \t]*import\b/, "");
 	const match = /(?:^|[\r\n;(])[ \t]*(?:([._A-Za-z][A-Za-z0-9_]*)[ \t]+)?["`]os["`]/.exec(body);
 	if (!match) return undefined;
 	if (match[1] === ".") return "";
 	return match[1] ?? "os";
+}
+
+/**
+ * How the generated code should read the file, given how `os` is already bound.
+ *
+ * `import` is empty when a usable binding exists; otherwise one is added. A dot
+ * import makes ReadFile unqualified, and a blank import needs an aliased import
+ * because `_` binds no callable name.
+ */
+function osAccess(header: GoPackageHeader, newline: string): { import: string; readFile: string } {
+	if (header.osQualifier === "") return { import: "", readFile: "ReadFile" };
+	if (header.osQualifier !== undefined) {
+		return { import: "", readFile: `${header.osQualifier}.ReadFile` };
+	}
+	const alias = header.osBlankImported ? OS_ALIAS : "";
+	return {
+		import: `import ${alias ? `${alias} ` : ""}"os"${newline}${newline}`,
+		readFile: `${alias || "os"}.ReadFile`,
+	};
 }
 
 function packageHeader(code: string): GoPackageHeader | undefined {
@@ -96,6 +129,7 @@ function packageHeader(code: string): GoPackageHeader | undefined {
 	let cursor = packageDeclaration.index + packageDeclaration[0].length;
 	let insertAfter = cursor;
 	let qualifier: string | undefined;
+	let blankImported = false;
 	while (cursor < code.length) {
 		const importStart = skipWhitespaceAndComments(code, cursor);
 		if (
@@ -105,12 +139,16 @@ function packageHeader(code: string): GoPackageHeader | undefined {
 			break;
 		}
 		const importEnd = importDeclarationEnd(code, importStart);
-		qualifier ??= osQualifier(code.slice(importStart, importEnd));
+		const found = osQualifier(code.slice(importStart, importEnd));
+		// A blank import is not a usable qualifier, so keep scanning for a real
+		// one: `import _ "os"` followed by `import osx "os"` should use osx.
+		if (found === "_") blankImported = true;
+		else qualifier ??= found;
 		insertAfter = importEnd;
 		cursor = importEnd;
 	}
 
-	return { insertAfter, osQualifier: qualifier };
+	return { insertAfter, osQualifier: qualifier, osBlankImported: blankImported };
 }
 
 export const goPlugin: LanguagePlugin = {
@@ -139,13 +177,9 @@ export const goPlugin: LanguagePlugin = {
 		const header = packageHeader(code);
 		if (header) {
 			const newline = code.includes("\r\n") ? "\r\n" : "\n";
-			const readFile = header.osQualifier
-				? `${header.osQualifier}.ReadFile`
-				: header.osQualifier === ""
-					? "ReadFile"
-					: "os.ReadFile";
-			const osImport =
-				header.osQualifier === undefined ? `import "os"${newline}${newline}` : newline;
+			const access = osAccess(header, newline);
+			const readFile = access.readFile;
+			const osImport = access.import || newline;
 			const variables = [
 				`var FILE_CONTENT_PATH = ${escaped}`,
 				"var FILE_CONTENT = func() string {",

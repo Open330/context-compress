@@ -11,6 +11,7 @@ import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { type Config, loadConfig, resetConfig } from "../../src/config.js";
 import { SubprocessExecutor, deduplicateLines, groupErrorLines } from "../../src/executor.js";
 import { detectRuntimes } from "../../src/runtime/index.js";
@@ -80,6 +81,7 @@ describe("SubprocessExecutor", () => {
 			const { executor, runtimes } = await createExecutor();
 			if (!runtimes.has("javascript")) {
 				t.skip("javascript runtime not detected");
+				return;
 			}
 
 			const result = await executor.execute({
@@ -100,6 +102,7 @@ describe("SubprocessExecutor", () => {
 			const { executor, runtimes } = await createExecutor();
 			if (!runtimes.has("python")) {
 				t.skip("python runtime not detected");
+				return;
 			}
 
 			const result = await executor.execute({
@@ -120,6 +123,7 @@ describe("SubprocessExecutor", () => {
 			const { executor, runtimes } = await createExecutor();
 			if (!runtimes.has("shell")) {
 				t.skip("shell runtime not detected");
+				return;
 			}
 
 			const result = await executor.execute({
@@ -278,6 +282,127 @@ describe("SubprocessExecutor", () => {
 	);
 
 	it(
+		"kills a timed-out command, its descendants, and reports the kill",
+		{ timeout: 20_000 },
+		async (t) => {
+			if (process.platform === "win32") {
+				t.skip("POSIX process-group semantics");
+				return;
+			}
+			const { executor, runtimes } = await createExecutor();
+			if (!runtimes.has("shell")) {
+				t.skip("shell runtime not detected");
+				return;
+			}
+
+			// The grandchild is detached from the direct child and outlives it, which
+			// is exactly what spawn's own `timeout` option failed to kill.
+			const started = Date.now();
+			const result = await executor.execute({
+				language: "shell",
+				code: "sleep 30 & echo grandchild=$!; sleep 30",
+				timeout: 1_500,
+			});
+			const elapsed = Date.now() - started;
+
+			assert.ok(elapsed < 10_000, `must finish near the timeout, took ${elapsed}ms`);
+			assert.strictEqual(result.killed, true);
+			assert.strictEqual(result.exitCode, 1, "a killed process must never look successful");
+			assert.match(result.stderr, /\[killed: timed out after/);
+
+			const pid = Number(/grandchild=(\d+)/.exec(result.indexableStdout)?.[1]);
+			assert.ok(Number.isInteger(pid) && pid > 0, `no grandchild pid in ${result.indexableStdout}`);
+			assert.strictEqual(
+				await waitForProcessExit(pid, 5_000),
+				true,
+				`grandchild ${pid} survived the timeout kill`,
+			);
+		},
+	);
+
+	it(
+		"caps runaway output, kills the process, and marks the response",
+		{ timeout: 20_000 },
+		async (t) => {
+			const { executor, runtimes } = await createExecutor({ hardCapBytes: 4_096 });
+			if (!runtimes.has("shell")) {
+				t.skip("shell runtime not detected");
+				return;
+			}
+
+			const result = await executor.execute({
+				language: "shell",
+				code: "yes rpfcapprobe",
+				timeout: 15_000,
+			});
+
+			assert.strictEqual(result.killed, true);
+			assert.match(result.stdout, /\[output capped at [\d.]+KB — process killed\]/);
+			assert.ok(
+				!result.indexableStdout.includes("output capped at"),
+				"the searchable corpus stays marker-free",
+			);
+			assert.ok(
+				Buffer.byteLength(result.indexableStdout) <= 4_096,
+				`retained corpus stays within the hard cap (${Buffer.byteLength(result.indexableStdout)})`,
+			);
+		},
+	);
+
+	it(
+		"truncates a response past maxOutputBytes while keeping the full corpus searchable",
+		{ timeout: 20_000 },
+		async (t) => {
+			const { executor, runtimes } = await createExecutor({ maxOutputBytes: 2_048 });
+			if (!runtimes.has("shell")) {
+				t.skip("shell runtime not detected");
+				return;
+			}
+
+			const result = await executor.execute({
+				language: "shell",
+				code: "for i in $(seq 1 400); do echo \"rpftruncline $i unique-$i\"; done",
+				timeout: 15_000,
+			});
+
+			assert.strictEqual(result.truncated, true);
+			assert.strictEqual(result.killed, false, "truncation is not a kill");
+			assert.strictEqual(result.exitCode, 0);
+			assert.match(result.stdout, /truncated — showing first \d+ \+ last \d+ lines/);
+			assert.ok(
+				result.indexableStdout.includes("unique-400"),
+				"the searchable corpus keeps content the response dropped",
+			);
+		},
+	);
+
+	it("normalizes ANSI once per execution", async (t) => {
+		const { executor, runtimes } = await createExecutor();
+		if (!runtimes.has("shell")) {
+			t.skip("shell runtime not detected");
+			return;
+		}
+
+		const result = await executor.execute({
+			language: "shell",
+			code: "printf 'plain \\033[31mred\\033[0m done\\n'",
+			timeout: 10_000,
+		});
+		// One shared normalization feeds both outputs, so neither may contain ESC.
+		assert.ok(!result.indexableStdout.includes(""), "searchable copy keeps escapes out");
+		assert.ok(!result.stdout.includes(""), "response keeps escapes out");
+		assert.match(result.indexableStdout, /plain red done/);
+
+		// Guard against re-introducing the second full scan of the capped buffer.
+		const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../src/executor.ts"), "utf-8");
+		assert.strictEqual(
+			source.split("stripAnsi(stdout)").length - 1,
+			1,
+			"executor must strip ANSI from the captured stdout exactly once",
+		);
+	});
+
+	it(
 		"returns an error for invalid language",
 		{ timeout: 10_000 },
 		async () => {
@@ -303,6 +428,7 @@ describe("SubprocessExecutor", () => {
 			const { executor, runtimes } = await createExecutor();
 			if (!runtimes.has("shell")) {
 				t.skip("shell runtime not detected");
+				return;
 			}
 
 			const result = await executor.execute({
