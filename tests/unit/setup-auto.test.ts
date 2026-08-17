@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { applyAutoConfig, readSettings } from "../../src/cli/setup.js";
+import { applyAutoConfig, findForeignHookCommands, readSettings } from "../../src/cli/setup.js";
 
 const PATHS = {
 	serverEntry: "/abs/path/to/dist/index.js",
@@ -61,12 +61,18 @@ describe("applyAutoConfig", () => {
 	});
 
 	it("repairs a stale context-compress hook in place", () => {
+		// A previous install of *this* package, at a different path.
 		const settings: Record<string, unknown> = {
 			hooks: {
 				PreToolUse: [
 					{
 						matcher: "Bash",
-						hooks: [{ type: "command", command: "node /old/path/pretooluse.mjs" }],
+						hooks: [
+							{
+								type: "command",
+								command: "node /usr/local/lib/node_modules/context-compress/hooks/pretooluse.mjs",
+							},
+						],
 					},
 				],
 			},
@@ -86,6 +92,64 @@ describe("applyAutoConfig", () => {
 			hooks: [{ type: "command", command: `node ${PATHS.hookEntry}` }],
 		});
 		assert.ok(changes.some((change) => change.includes("Updated PreToolUse hook")));
+	});
+
+	it("never claims a pretooluse hook it cannot prove is its own", () => {
+		// `/old/path/pretooluse.mjs` is indistinguishable from another tool's hook.
+		// Overwriting it destroyed third-party configuration, so it is preserved and
+		// reported; leaving a stale duplicate behind is the recoverable failure.
+		const foreign = {
+			matcher: "Bash",
+			hooks: [{ type: "command", command: "node /old/path/pretooluse.mjs" }],
+		};
+		const settings: Record<string, unknown> = { hooks: { PreToolUse: [foreign] } };
+
+		const reported = findForeignHookCommands(settings, PATHS.hookEntry);
+		applyAutoConfig(settings, PATHS, true);
+
+		const s = settings as {
+			hooks: { PreToolUse: Array<{ hooks?: Array<{ command?: string }> }> };
+		};
+		assert.deepStrictEqual(reported, ["node /old/path/pretooluse.mjs"]);
+		assert.strictEqual(s.hooks.PreToolUse.length, 2, "ours is appended beside theirs");
+		assert.strictEqual(
+			s.hooks.PreToolUse[0].hooks?.[0].command,
+			"node /old/path/pretooluse.mjs",
+			"the unrecognized hook must be byte-identical afterwards",
+		);
+	});
+
+	it("quotes generated command paths that contain spaces", () => {
+		const spaced = {
+			serverEntry: "/Users/me/My Apps/context-compress/dist/index.js",
+			hookEntry: "/Users/me/My Apps/context-compress/hooks/pretooluse.mjs",
+			binPath: "/Users/me/My Apps/context-compress/dist/cli/index.js",
+		};
+		const settings: Record<string, unknown> = {};
+		applyAutoConfig(settings, spaced, true);
+		const s = settings as {
+			hooks: { PreToolUse: Array<{ hooks?: Array<{ command?: string }> }> };
+			env: Record<string, string>;
+		};
+
+		// Unquoted, the shell sees "node /Users/me/My" and the hook never runs.
+		assert.strictEqual(
+			s.hooks.PreToolUse[0].hooks?.[0].command,
+			`node '${spaced.hookEntry}'`,
+		);
+		assert.strictEqual(s.env.CONTEXT_COMPRESS_BIN, `node '${spaced.binPath}'`);
+	});
+
+	it("still recognizes its own quoted hook as current", () => {
+		const spaced = {
+			serverEntry: "/Users/me/My Apps/context-compress/dist/index.js",
+			hookEntry: "/Users/me/My Apps/context-compress/hooks/pretooluse.mjs",
+			binPath: "/Users/me/My Apps/context-compress/dist/cli/index.js",
+		};
+		const settings: Record<string, unknown> = {};
+		applyAutoConfig(settings, spaced, true);
+		const second = applyAutoConfig(settings, spaced, true);
+		assert.deepStrictEqual(second, [], "a quoted hook must not be reinstalled every run");
 	});
 
 	it("preserves an unrelated pretooluse command and appends the owned hook", () => {

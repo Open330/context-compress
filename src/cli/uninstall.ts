@@ -1,51 +1,108 @@
-import { readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	readdirSync,
+	readFileSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { isOwnedHookCommand, removeOwnedEnv } from "./hook-ownership.js";
+import { resolvePaths } from "./setup.js";
+
+interface HookEntry {
+	matcher?: string;
+	hooks?: Array<{ command?: string; type?: string }>;
+}
+
+interface Settings {
+	hooks?: Record<string, HookEntry[]>;
+	mcpServers?: Record<string, unknown>;
+	env?: Record<string, string>;
+	[key: string]: unknown;
+}
+
+/**
+ * Delete our hooks from every PreToolUse entry, in place.
+ *
+ * An entry is dropped only once it holds no hooks at all, so a hook we share an
+ * entry with survives. Returns how many hooks were removed.
+ */
+function removeOwnedHooks(settings: Settings, ownHookPath: string): number {
+	const entries = settings.hooks?.PreToolUse;
+	if (!Array.isArray(entries)) return 0;
+
+	let removed = 0;
+	for (const entry of entries) {
+		if (!Array.isArray(entry.hooks)) continue;
+		const kept = entry.hooks.filter((hook) => !isOwnedHookCommand(hook.command, ownHookPath));
+		removed += entry.hooks.length - kept.length;
+		entry.hooks = kept;
+	}
+	if (removed === 0 || !settings.hooks) return removed;
+
+	const surviving = entries.filter((entry) => (entry.hooks?.length ?? 0) > 0);
+	if (surviving.length > 0) {
+		settings.hooks.PreToolUse = surviving;
+		return removed;
+	}
+	delete settings.hooks.PreToolUse;
+	if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+	return removed;
+}
+
+/**
+ * Remove only what setup wrote: our hook, our MCP registration, and our env keys.
+ *
+ * The previous implementation dropped every PreToolUse *entry* whose command
+ * merely mentioned `pretooluse.mjs`, which deleted an unrelated tool's hook and
+ * any sibling hooks sharing that entry. Removal is now per-hook and
+ * ownership-checked, and an entry survives unless it has no hooks left.
+ *
+ * Exported for tests.
+ */
+export function removeFromSettings(settingsPath: string): string[] {
+	const changes: string[] = [];
+	if (!existsSync(settingsPath)) return changes;
+
+	const raw = readFileSync(settingsPath, "utf-8");
+	// Throws on malformed JSON rather than rewriting a file we cannot parse.
+	const settings = JSON.parse(raw) as Settings;
+	const ownHookPath = resolvePaths().hookEntry;
+
+	const removedHooks = removeOwnedHooks(settings, ownHookPath);
+	if (removedHooks > 0) changes.push(`Removed ${removedHooks} PreToolUse hook(s)`);
+
+	if (settings.mcpServers && "context-compress" in settings.mcpServers) {
+		delete settings.mcpServers["context-compress"];
+		changes.push("Removed context-compress MCP server");
+	}
+
+	// Symmetry with setup --auto, which writes both of these keys.
+	removeOwnedEnv(settings.env, changes);
+
+	if (changes.length > 0) {
+		copyFileSync(settingsPath, `${settingsPath}.bak`);
+		writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
+	}
+	return changes;
+}
 
 export async function uninstall(): Promise<void> {
 	console.log("\n  context-compress uninstall\n");
 	const changes: string[] = [];
 
-	// 1. Remove hooks from settings.json
-	console.log("  Removing hooks from settings.json...");
+	// 1. Remove our hook, MCP registration, and env keys in one settings write.
+	console.log("  Removing configuration from settings.json...");
 	const settingsPath = resolve(homedir(), ".claude", "settings.json");
 	try {
-		const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const hooks = settings.hooks as Record<string, unknown[]> | undefined;
-		if (hooks?.PreToolUse && Array.isArray(hooks.PreToolUse)) {
-			const before = hooks.PreToolUse.length;
-			hooks.PreToolUse = (hooks.PreToolUse as Array<Record<string, unknown>>).filter((entry) => {
-				const entryHooks = entry.hooks as Array<{ command?: string }> | undefined;
-				return !entryHooks?.some(
-					(h) => h.command?.includes("context-compress") || h.command?.includes("pretooluse.mjs"),
-				);
-			});
-			if (hooks.PreToolUse.length === 0) {
-				delete hooks.PreToolUse;
-			}
-			if (hooks.PreToolUse === undefined || hooks.PreToolUse.length < before) {
-				settings.hooks = hooks;
-				writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
-				changes.push("Removed PreToolUse hooks from settings.json");
-			}
-		}
-	} catch {
-		console.log("  Could not modify settings.json (may not exist)");
-	}
-
-	// 2. Remove MCP server registration
-	console.log("  Removing MCP server registration...");
-	try {
-		const mcpPath = resolve(homedir(), ".claude", "settings.json");
-		const settings = JSON.parse(readFileSync(mcpPath, "utf-8"));
-		const mcpServers = settings.mcpServers as Record<string, unknown> | undefined;
-		if (mcpServers && "context-compress" in mcpServers) {
-			delete mcpServers["context-compress"];
-			writeFileSync(mcpPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
-			changes.push("Removed context-compress MCP server from settings");
-		}
-	} catch {
-		// May not exist
+		changes.push(...removeFromSettings(settingsPath));
+	} catch (err) {
+		// Fail closed: a half-understood settings file is never rewritten.
+		console.log(
+			`  Could not modify settings.json (${err instanceof Error ? err.message : String(err)})`,
+		);
 	}
 
 	// Also check project-level .mcp.json

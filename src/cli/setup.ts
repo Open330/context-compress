@@ -3,6 +3,13 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
+import {
+	buildRunnerCommand,
+	isForeignHookCommand,
+	isOwnedHookCommand,
+	removeOwnedEnv,
+	shellQuotePath,
+} from "./hook-ownership.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -30,17 +37,10 @@ interface ClaudeSettings {
 
 const PRE_TOOL_USE_MATCHER = "Bash|Read|Grep|WebFetch|Task";
 
-/** Match the exact command shape emitted by prior context-compress setup runs. */
-function isOwnedHookCommand(command: string | undefined): boolean {
-	return (
-		typeof command === "string" &&
-		/^(?:node .+[\\/]pretooluse\.mjs|tsx .+[\\/]pretooluse\.ts)$/.test(command)
-	);
-}
-
 function configurePreToolUseHook(
 	hookEntries: ClaudeHookEntry[],
 	hookCmd: string,
+	ownHookPath: string,
 ): "Installed" | "Updated" | undefined {
 	const currentHook = hookEntries.some(
 		(entry) =>
@@ -49,10 +49,14 @@ function configurePreToolUseHook(
 	);
 	if (currentHook) return undefined;
 
+	// Only a hook this package wrote may be rewritten in place; an unrelated
+	// tool's identically named pretooluse hook must be left alone.
 	const staleEntry = hookEntries.find((entry) =>
-		entry.hooks?.some((hook) => isOwnedHookCommand(hook.command)),
+		entry.hooks?.some((hook) => isOwnedHookCommand(hook.command, ownHookPath)),
 	);
-	const staleHook = staleEntry?.hooks?.find((hook) => isOwnedHookCommand(hook.command));
+	const staleHook = staleEntry?.hooks?.find((hook) =>
+		isOwnedHookCommand(hook.command, ownHookPath),
+	);
 	if (staleEntry && staleHook) {
 		staleEntry.matcher = PRE_TOOL_USE_MATCHER;
 		staleHook.type = "command";
@@ -72,7 +76,7 @@ function configurePreToolUseHook(
  *   - Installed npm package: dist/cli/setup.js → ../index.js, ../../hooks/pretooluse.mjs
  *   - Dev (tsx): src/cli/setup.ts → ../index.js (built) or fall back to src/index.ts
  */
-function resolvePaths(): { serverEntry: string; hookEntry: string; binPath: string } {
+export function resolvePaths(): { serverEntry: string; hookEntry: string; binPath: string } {
 	const distServer = resolve(__dirname, "..", "index.js");
 	const distHook = resolve(__dirname, "..", "..", "hooks", "pretooluse.mjs");
 	const distCli = resolve(__dirname, "index.js");
@@ -87,18 +91,6 @@ function resolvePaths(): { serverEntry: string; hookEntry: string; binPath: stri
 
 function isBuiltJs(p: string): boolean {
 	return p.endsWith(".js") || p.endsWith(".mjs");
-}
-
-function removeFilterBashEnv(env: Record<string, string> | undefined, changes: string[]): void {
-	if (!env) return;
-	if (Object.hasOwn(env, "CONTEXT_COMPRESS_FILTER_BASH")) {
-		delete env.CONTEXT_COMPRESS_FILTER_BASH;
-		changes.push("Removed CONTEXT_COMPRESS_FILTER_BASH");
-	}
-	if (Object.hasOwn(env, "CONTEXT_COMPRESS_BIN")) {
-		delete env.CONTEXT_COMPRESS_BIN;
-		changes.push("Removed CONTEXT_COMPRESS_BIN");
-	}
 }
 
 /** Exported for tests. Throws on malformed JSON instead of returning {} (fail closed). */
@@ -126,6 +118,19 @@ function writeSettings(path: string, settings: ClaudeSettings): void {
 	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 }
 
+/**
+ * PreToolUse hook commands that look like a pretooluse hook but are not ours.
+ *
+ * Reported, never touched. Exported for tests and for the setup summary.
+ */
+export function findForeignHookCommands(settings: ClaudeSettings, ownHookPath: string): string[] {
+	return (settings.hooks?.PreToolUse ?? []).flatMap((entry) =>
+		(entry.hooks ?? [])
+			.map((hook) => hook.command)
+			.filter((command): command is string => isForeignHookCommand(command, ownHookPath)),
+	);
+}
+
 /** Add or replace context-compress entries in settings.json. Returns list of changes made. */
 export function applyAutoConfig(
 	settings: ClaudeSettings,
@@ -151,9 +156,9 @@ export function applyAutoConfig(
 	// 2. PreToolUse hook
 	settings.hooks ??= {};
 	settings.hooks.PreToolUse ??= [];
-	const hookCmd = isBuiltJs(paths.hookEntry) ? `node ${paths.hookEntry}` : `tsx ${paths.hookEntry}`;
+	const hookCmd = buildRunnerCommand(isBuiltJs(paths.hookEntry) ? "node" : "tsx", paths.hookEntry);
 	const hookEntries = settings.hooks.PreToolUse;
-	const hookChange = configurePreToolUseHook(hookEntries, hookCmd);
+	const hookChange = configurePreToolUseHook(hookEntries, hookCmd, paths.hookEntry);
 	if (hookChange) changes.push(`${hookChange} PreToolUse hook (${hookCmd})`);
 
 	// 3. Bash filter mode (opt-in, but on by default with --auto)
@@ -164,13 +169,13 @@ export function applyAutoConfig(
 			changes.push("Enabled CONTEXT_COMPRESS_FILTER_BASH=1 (transparent Bash compression)");
 		}
 		// Pin CONTEXT_COMPRESS_BIN so the hook knows where to find the wrap command.
-		const binCmd = isBuiltJs(paths.binPath) ? `node ${paths.binPath}` : `tsx ${paths.binPath}`;
+		const binCmd = buildRunnerCommand(isBuiltJs(paths.binPath) ? "node" : "tsx", paths.binPath);
 		if (settings.env.CONTEXT_COMPRESS_BIN !== binCmd) {
 			settings.env.CONTEXT_COMPRESS_BIN = binCmd;
 			changes.push(`Set CONTEXT_COMPRESS_BIN to ${binCmd}`);
 		}
 	} else {
-		removeFilterBashEnv(settings.env, changes);
+		removeOwnedEnv(settings.env, changes);
 	}
 
 	return changes;
@@ -203,7 +208,7 @@ async function showRuntimeReport(): Promise<void> {
 
 function showInstructions(serverEntry: string): void {
 	console.log("  To add to Claude Code, run:");
-	console.log(`    claude mcp add context-compress -- node ${serverEntry}\n`);
+	console.log(`    claude mcp add context-compress -- node ${shellQuotePath(serverEntry)}\n`);
 	console.log("  Or use --auto to do everything automatically:");
 	console.log("    context-compress setup --auto\n");
 }
@@ -237,7 +242,13 @@ export async function setup(args: string[] = []): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+	const foreign = findForeignHookCommands(settings, paths.hookEntry);
 	const changes = applyAutoConfig(settings, paths, opts.filterBash);
+
+	for (const command of foreign) {
+		console.log(`\n  Note: left an unrecognized PreToolUse hook untouched: ${command}`);
+		console.log("        If that was an older context-compress install, remove it manually.");
+	}
 
 	if (changes.length === 0) {
 		console.log("  Already configured. No changes made.\n");
