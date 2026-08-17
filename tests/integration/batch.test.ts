@@ -179,6 +179,218 @@ describe("integration: batch execute flow", () => {
 		}
 	});
 
+	it("bounds pathological command and query counts in the input schema", () => {
+		let options: {
+			inputSchema: {
+				commands: { safeParse(value: unknown): { success: boolean } };
+				queries: { safeParse(value: unknown): { success: boolean } };
+			};
+		} | undefined;
+		const server = {
+			registerTool(_name: unknown, registered: typeof options) {
+				options = registered;
+			},
+		} as unknown as McpServer;
+		registerBatchExecuteTool(server, {} as ToolContext);
+		assert.ok(options);
+
+		const command = { label: "l", command: "c" };
+		assert.strictEqual(options.inputSchema.commands.safeParse([]).success, false);
+		assert.strictEqual(
+			options.inputSchema.commands.safeParse(Array(32).fill(command)).success,
+			true,
+		);
+		assert.strictEqual(
+			options.inputSchema.commands.safeParse(Array(33).fill(command)).success,
+			false,
+		);
+		assert.strictEqual(options.inputSchema.queries.safeParse(Array(16).fill("q")).success, true);
+		assert.strictEqual(options.inputSchema.queries.safeParse(Array(17).fill("q")).success, false);
+	});
+
+	it("indexes each command as it settles instead of after the whole batch", async () => {
+		// The second command blocks until the first corpus has been indexed. If
+		// indexing only ran after every command settled — the shape that pinned
+		// every capped output in memory at once — this deadlocks.
+		const config = loadConfig();
+		const store = new ContentStore(":memory:");
+		const tracker = new SessionTracker();
+		let releaseSecond: () => void = () => {};
+		const firstIndexed = new Promise<void>((resolve) => {
+			releaseSecond = resolve;
+		});
+		const indexOrder: string[] = [];
+		const spiedStore = {
+			index(content: string, label: string) {
+				const result = store.index(content, label);
+				if (content.includes("firstcorpus")) {
+					indexOrder.push("first");
+					releaseSecond();
+				} else {
+					indexOrder.push("second");
+				}
+				return result;
+			},
+			search: store.search.bind(store),
+			getDistinctiveTerms: store.getDistinctiveTerms.bind(store),
+		} as unknown as ContentStore;
+
+		const executor = {
+			execute: async ({ code }: { code: string }) => {
+				if (code === "second") {
+					await Promise.race([
+						firstIndexed,
+						new Promise((_, reject) =>
+							setTimeout(
+								() => reject(new Error("first corpus was not indexed before the batch settled")),
+								3_000,
+							),
+						),
+					]);
+				}
+				return {
+					indexableStdout: code === "second" ? "secondcorpus body" : "firstcorpus body",
+					stdout: `${code} summary`,
+					stderr: "",
+					exitCode: 0,
+					truncated: false,
+					killed: false,
+				} satisfies ExecResult;
+			},
+		} as unknown as SubprocessExecutor;
+
+		const ctx: ToolContext = {
+			config,
+			store: spiedStore,
+			tracker,
+			executor,
+			projectDir: process.cwd(),
+			bunDetected: false,
+			dbFallback: false,
+			withExecutionLimit: (fn) => fn(),
+			applyIntentFilter: createIntentFilter({ config, store, tracker }),
+		};
+
+		try {
+			const response = await captureBatchHandler(ctx)({
+				commands: [
+					{ label: "Alpha", command: "first" },
+					{ label: "Beta", command: "second" },
+				],
+				queries: ["firstcorpus"],
+				timeout: 1_000,
+			});
+			assert.deepStrictEqual(indexOrder, ["first", "second"]);
+			// Response order stays positional even though Beta finished last.
+			const text = response.content[0].text;
+			assert.ok(
+				text.indexOf("**Alpha**") < text.indexOf("**Beta**"),
+				"inventory must stay in request order",
+			);
+		} finally {
+			store.close();
+		}
+	});
+
+	it("does not return an earlier batch's output as a current-batch result", async () => {
+		const config = loadConfig();
+		const store = new ContentStore(":memory:");
+		const tracker = new SessionTracker();
+		const executor = {
+			execute: async ({ code }: { code: string }) =>
+				({
+					indexableStdout: code,
+					stdout: code,
+					stderr: "",
+					exitCode: 0,
+					truncated: false,
+					killed: false,
+				}) satisfies ExecResult,
+		} as unknown as SubprocessExecutor;
+		const ctx: ToolContext = {
+			config,
+			store,
+			tracker,
+			executor,
+			projectDir: process.cwd(),
+			bunDetected: false,
+			dbFallback: false,
+			withExecutionLimit: (fn) => fn(),
+			applyIntentFilter: createIntentFilter({ config, store, tracker }),
+		};
+
+		try {
+			const handler = captureBatchHandler(ctx);
+			await handler({
+				commands: [{ label: "First call", command: "rpffirstcallsentinel" }],
+				queries: ["rpffirstcallsentinel"],
+				timeout: 1_000,
+			});
+			const second = await handler({
+				commands: [{ label: "Second call", command: "rpfsecondcallsentinel" }],
+				queries: ["rpffirstcallsentinel"],
+				timeout: 1_000,
+			});
+			const text = second.content[0].text;
+
+			// The first call's sentinel is still indexed and still reachable, but it
+			// must never be presented as output of this batch.
+			assert.ok(store.search("rpffirstcallsentinel").results.length > 0);
+			if (text.includes("rpffirstcallsentinel---") || /--- \[batch_execute\]/.test(text)) {
+				assert.match(
+					text,
+					/no match in this batch/,
+					"a store-wide fallback hit must be labelled as such",
+				);
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	it("keeps the whole batch response inside batchMaxBytes", async () => {
+		const config = { ...loadConfig(), batchMaxBytes: 1_024 };
+		const store = new ContentStore(":memory:");
+		const tracker = new SessionTracker();
+		const executor = {
+			execute: async () =>
+				({
+					indexableStdout: `budgetprobe ${"z".repeat(4_096)}`,
+					stdout: "summary",
+					stderr: "",
+					exitCode: 0,
+					truncated: false,
+					killed: false,
+				}) satisfies ExecResult,
+		} as unknown as SubprocessExecutor;
+		const ctx: ToolContext = {
+			config,
+			store,
+			tracker,
+			executor,
+			projectDir: process.cwd(),
+			bunDetected: false,
+			dbFallback: false,
+			withExecutionLimit: (fn) => fn(),
+			applyIntentFilter: createIntentFilter({ config, store, tracker }),
+		};
+
+		try {
+			const response = await captureBatchHandler(ctx)({
+				commands: Array.from({ length: 6 }, (_, i) => ({
+					label: `Command ${i}`,
+					command: `c${i}`,
+				})),
+				queries: Array.from({ length: 8 }, () => "budgetprobe"),
+				timeout: 1_000,
+			});
+			const bytes = Buffer.byteLength(response.content[0].text, "utf8");
+			assert.ok(bytes <= 1_024, `response was ${bytes} bytes, budget is 1024`);
+		} finally {
+			store.close();
+		}
+	});
+
 	it("keeps mixed results and indexes stderr diagnostics for nonzero exits", async () => {
 		const config = loadConfig();
 		const store = new ContentStore(":memory:");

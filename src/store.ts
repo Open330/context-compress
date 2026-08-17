@@ -4,7 +4,14 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { debug } from "./logger.js";
 import { extractSnippet } from "./snippet.js";
-import type { Chunk, IndexResult, SearchHit, SearchResult, StoreStats } from "./types.js";
+import type {
+	Chunk,
+	IndexResult,
+	SearchHit,
+	SearchOptions,
+	SearchResult,
+	StoreStats,
+} from "./types.js";
 
 const MAX_VOCABULARY = 10_000;
 
@@ -312,7 +319,7 @@ export class ContentStore {
 	/**
 	 * Three-layer search: Porter → Trigram (lazy) → Fuzzy correction.
 	 */
-	search(query: string, options?: { source?: string; limit?: number }): SearchResult {
+	search(query: string, options?: SearchOptions): SearchResult {
 		const limit = options?.limit ?? 3;
 		const sanitized = sanitizeQuery(query);
 
@@ -321,8 +328,15 @@ export class ContentStore {
 			return { query, results: [] };
 		}
 
+		// An explicitly empty id scope selects no sources; without this the
+		// `IN ()` branch below would be dropped and the caller would silently
+		// get store-wide results instead of none.
+		if (options?.sourceIds?.length === 0) {
+			return { query, results: [] };
+		}
+
 		// Layer 1: Porter stemming search
-		let hits = this.porterSearch(sanitized, options?.source, limit);
+		let hits = this.porterSearch(sanitized, options, limit);
 
 		if (hits.length > 0) {
 			return { query, results: hits };
@@ -330,7 +344,7 @@ export class ContentStore {
 
 		// Layer 2: Trigram search (lazy table creation)
 		this.ensureTrigramTable();
-		hits = this.trigramSearch(sanitized, options?.source, limit);
+		hits = this.trigramSearch(sanitized, options, limit);
 
 		if (hits.length > 0) {
 			return { query, results: hits };
@@ -341,7 +355,7 @@ export class ContentStore {
 		if (corrected && corrected !== query) {
 			const correctedSanitized = sanitizeQuery(corrected);
 			if (correctedSanitized) {
-				hits = this.porterSearch(correctedSanitized, options?.source, limit);
+				hits = this.porterSearch(correctedSanitized, options, limit);
 				if (hits.length > 0) {
 					return { query, results: hits, corrected };
 				}
@@ -354,12 +368,20 @@ export class ContentStore {
 	private ftsSearch(
 		table: "chunks" | "chunks_trigram",
 		sanitized: string,
-		source: string | undefined,
+		filters: SearchOptions | undefined,
 		limit: number,
 	): SearchHit[] {
+		const source = filters?.source;
+		const sourceIds = filters?.sourceIds;
 		const sourceFilter = source ? "AND sources.label LIKE '%' || ? || '%'" : "";
+		// Exact id scoping for callers that must see only what they just indexed;
+		// the label LIKE filter above matches every past call with the same label.
+		const idFilter = sourceIds?.length
+			? `AND ${table}.source_id IN (${sourceIds.map(() => "?").join(",")})`
+			: "";
 		const params: (string | number)[] = [sanitized];
 		if (source) params.push(source);
+		if (sourceIds?.length) params.push(...sourceIds);
 		params.push(limit);
 
 		const sql = `
@@ -372,7 +394,7 @@ export class ContentStore {
 				highlight(${table}, 1, char(2), char(3)) AS highlighted
 			FROM ${table}
 			JOIN sources ON sources.id = ${table}.source_id
-			WHERE ${table} MATCH ? ${sourceFilter}
+			WHERE ${table} MATCH ? ${sourceFilter} ${idFilter}
 			ORDER BY rank
 			LIMIT ?
 		`;
@@ -398,12 +420,20 @@ export class ContentStore {
 		}
 	}
 
-	private porterSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
-		return this.ftsSearch("chunks", sanitized, source, limit);
+	private porterSearch(
+		sanitized: string,
+		filters: SearchOptions | undefined,
+		limit: number,
+	): SearchHit[] {
+		return this.ftsSearch("chunks", sanitized, filters, limit);
 	}
 
-	private trigramSearch(sanitized: string, source: string | undefined, limit: number): SearchHit[] {
-		return this.ftsSearch("chunks_trigram", sanitized, source, limit);
+	private trigramSearch(
+		sanitized: string,
+		filters: SearchOptions | undefined,
+		limit: number,
+	): SearchHit[] {
+		return this.ftsSearch("chunks_trigram", sanitized, filters, limit);
 	}
 
 	/**

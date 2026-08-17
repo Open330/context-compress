@@ -1,15 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ExecResult, SearchResult } from "../types.js";
+import { assembleBudgetedResponse, byteLength } from "../util/byte-budget.js";
+import { getExecutionStatus, isCleanSuccess } from "../util/exec-status.js";
 import { limitConcurrency } from "../utils.js";
 import type { ToolContext } from "./context.js";
-
-function getExecutionStatus(result: ExecResult): string {
-	if (result.killed) return "killed";
-	if (result.exitCode === 0) return "completed";
-	if (result.exitCode === null) return "unknown";
-	return "failed";
-}
 
 function formatCommandResult(
 	label: string,
@@ -29,7 +24,7 @@ function formatCommandResult(
 	const stderr = result.stderr ? `\n\n### STDERR\n\n${result.stderr}` : "";
 	const corpus = `## ${label}\n\n${output}\n\n${diagnostics}${stderr}`;
 
-	if (result.exitCode === 0 && !result.killed && !result.truncated) {
+	if (isCleanSuccess(result)) {
 		return { corpus, inventory: `- **${label}**: ${lineCount} lines` };
 	}
 
@@ -43,15 +38,44 @@ function formatCommandResult(
 	};
 }
 
-function formatSearchBlock(query: string, result: SearchResult): string {
+function formatSearchBlock(query: string, result: SearchResult, scope: string): string {
 	let block = `## ${query}\n\n`;
 	if (result.results.length === 0) return `${block}No results found.\n`;
 
 	for (const hit of result.results) {
 		block += `--- [${hit.source}] ---\n### ${hit.title}\n\n${hit.snippet}\n\n`;
 	}
+	// State the scope explicitly: a store-wide fallback hit did not come from the
+	// commands in this call, and a caller cannot tell that from the text alone.
+	if (scope === "store") block += "_(no match in this batch; matched earlier indexed output)_\n\n";
 	return block;
 }
+
+/**
+ * Search this call's own output first, then fall back to the whole store.
+ *
+ * Scoping by source id matters: the old `source: "batch_execute"` filter is a
+ * label substring match, so it also returned output indexed by every earlier
+ * batch in the same session.
+ */
+function searchBlockFor(
+	store: ToolContext["store"],
+	query: string,
+	indexedSourceIds: number[],
+): string {
+	const scoped = store.search(query, { sourceIds: indexedSourceIds, limit: 5 });
+	if (scoped.results.length > 0) return formatSearchBlock(query, scoped, "batch");
+	return formatSearchBlock(query, store.search(query, { limit: 5 }), "store");
+}
+
+/**
+ * Upper bounds on one request. Without them a single call can pin
+ * `commands.length` capped outputs plus every search block in memory at once.
+ */
+const MAX_BATCH_COMMANDS = 32;
+const MAX_BATCH_QUERIES = 16;
+/** Concurrency also bounds how many command corpora are retained at once. */
+const BATCH_CONCURRENCY = 4;
 
 export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): void {
 	const { executor, store, tracker, config, withExecutionLimit } = ctx;
@@ -70,11 +94,14 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 							command: z.string().describe("Shell command to execute"),
 						}),
 					)
-					.describe("Commands to execute as a batch."),
+					.min(1)
+					.max(MAX_BATCH_COMMANDS)
+					.describe(`Commands to execute as a batch (1-${MAX_BATCH_COMMANDS}).`),
 				queries: z
 					.array(z.string())
+					.max(MAX_BATCH_QUERIES)
 					.describe(
-						"Search queries to extract information from indexed output. Use 5-8 comprehensive queries.",
+						`Search queries to extract information from indexed output. Use 5-8 comprehensive queries (max ${MAX_BATCH_QUERIES}).`,
 					),
 				timeout: z.number().default(60000).describe("Max execution time in ms (default: 60s)"),
 			},
@@ -87,7 +114,12 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 			},
 		},
 		async ({ commands, queries, timeout }) => {
-			const commandResults = await limitConcurrency(
+			// Index inside the task so a finished command's corpus is released as soon
+			// as it is searchable. Collecting every ExecResult first pinned
+			// `commands.length` capped outputs at once (+165 MiB RSS for 32 x 2 MiB);
+			// peak retention is now bounded by BATCH_CONCURRENCY instead. Results stay
+			// positional, so response order is unchanged.
+			const settledEntries = await limitConcurrency(
 				commands.map((cmd) => async () => {
 					const result = await withExecutionLimit(() =>
 						executor.execute({
@@ -96,25 +128,24 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 							timeout,
 						}),
 					);
-					return { label: cmd.label, result };
+					const { corpus, inventory: inventoryEntry } = formatCommandResult(cmd.label, result);
+					const indexed = store.index(corpus, "batch_execute");
+					tracker.trackIndexed(Buffer.byteLength(corpus));
+					return { sourceId: indexed.sourceId, inventory: inventoryEntry };
 				}),
-				4,
+				BATCH_CONCURRENCY,
 			);
 
 			const inventory: string[] = [];
 			const indexedSourceIds: number[] = [];
 
-			for (let i = 0; i < commandResults.length; i++) {
-				const settled = commandResults[i];
+			for (let i = 0; i < settledEntries.length; i++) {
+				const settled = settledEntries[i];
 				const label = commands[i].label;
 
 				if (settled.status === "fulfilled") {
-					const { result } = settled.value;
-					const { corpus, inventory: inventoryEntry } = formatCommandResult(label, result);
-					const indexed = store.index(corpus, "batch_execute");
-					indexedSourceIds.push(indexed.sourceId);
-					tracker.trackIndexed(Buffer.byteLength(corpus));
-					inventory.push(inventoryEntry);
+					indexedSourceIds.push(settled.value.sourceId);
+					inventory.push(settled.value.inventory);
 				} else {
 					const errorOutput = `## ${label}\n\n(error: ${settled.reason})`;
 					const indexed = store.index(errorOutput, "batch_execute");
@@ -124,34 +155,24 @@ export function registerBatchExecuteTool(server: McpServer, ctx: ToolContext): v
 				}
 			}
 
-			const searchResults: string[] = [];
-			let totalBytes = 0;
-
-			for (const query of queries) {
-				if (totalBytes > config.batchMaxBytes) break;
-
-				let result = store.search(query, { source: "batch_execute", limit: 5 });
-				if (result.results.length === 0) {
-					result = store.search(query, { limit: 5 });
-				}
-
-				const block = formatSearchBlock(query, result);
-
-				searchResults.push(block);
-				totalBytes += Buffer.byteLength(block);
-			}
-
 			const terms = [
 				...new Set(indexedSourceIds.flatMap((sourceId) => store.getDistinctiveTerms(sourceId))),
 			].slice(0, 40);
 
-			let output = `**Inventory** (${commands.length} commands):\n${inventory.join("\n")}\n\n`;
-			output += searchResults.join("\n---\n\n");
-			if (terms.length > 0) {
-				output += `\n\nSearchable terms: ${terms.join(", ")}`;
-			}
+			// The configured cap covers the whole response, not just the query blocks:
+			// the inventory, separators, omission note, and terms footer are all
+			// reserved so the caller never receives more than batchMaxBytes.
+			const budget = config.batchMaxBytes;
+			const output = assembleBudgetedResponse({
+				blocks: queries.map((query) => searchBlockFor(store, query, indexedSourceIds)),
+				limit: budget,
+				header: `**Inventory** (${commands.length} commands):\n${inventory.join("\n")}\n\n`,
+				footer: terms.length > 0 ? `\n\nSearchable terms: ${terms.join(", ")}` : "",
+				omissionNote: (omitted) =>
+					`\n\n_(${omitted} of ${queries.length} query blocks omitted: ${budget}-byte response budget)_`,
+			});
 
-			tracker.trackCall("batch_execute", Buffer.byteLength(output));
+			tracker.trackCall("batch_execute", byteLength(output));
 
 			return { content: [{ type: "text" as const, text: output }] };
 		},

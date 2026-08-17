@@ -1,6 +1,22 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { SearchResult } from "../types.js";
+import { assembleBudgetedResponse, byteLength } from "../util/byte-budget.js";
 import type { ToolContext } from "./context.js";
+
+/** Bounds one request; without it a single call can ask for unbounded work. */
+const MAX_SEARCH_QUERIES = 16;
+
+function formatQueryBlock(query: string, result: SearchResult): string {
+	let block = `## ${query}\n`;
+	if (result.corrected) block += `(corrected to: "${result.corrected}")\n`;
+
+	if (result.results.length === 0) return `${block}No results found.\n`;
+	for (const hit of result.results) {
+		block += `\n--- [${hit.source}] ---\n### ${hit.title}\n\n${hit.snippet}\n`;
+	}
+	return block;
+}
 
 export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 	const { store, tracker, config } = ctx;
@@ -16,7 +32,10 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 			inputSchema: {
 				queries: z
 					.array(z.string())
-					.describe("Array of search queries. Batch ALL questions in one call."),
+					.max(MAX_SEARCH_QUERIES)
+					.describe(
+						`Array of search queries. Batch ALL questions in one call (max ${MAX_SEARCH_QUERIES}).`,
+					),
 				source: z
 					.string()
 					.optional()
@@ -50,39 +69,22 @@ export function registerSearchTool(server: McpServer, ctx: ToolContext): void {
 			const effectiveLimit =
 				callCount > config.searchReduceAfter ? 1 : Math.max(1, Math.min(limit, config.searchLimit));
 
-			const allResults: string[] = [];
-			let totalBytes = 0;
-
-			for (const query of queries) {
-				if (totalBytes > config.searchMaxBytes) break;
-
-				const result = store.search(query, { source, limit: effectiveLimit });
-
-				let block = `## ${query}\n`;
-				if (result.corrected) {
-					block += `(corrected to: "${result.corrected}")\n`;
-				}
-
-				if (result.results.length === 0) {
-					block += "No results found.\n";
-				} else {
-					for (const hit of result.results) {
-						block += `\n--- [${hit.source}] ---\n### ${hit.title}\n\n${hit.snippet}\n`;
-					}
-				}
-
-				allResults.push(block);
-				totalBytes += Buffer.byteLength(block);
-			}
-
-			if (callCount > config.searchReduceAfter) {
-				allResults.push(
-					`\n⚠ Search rate limited (${callCount} calls in ${config.searchWindowMs / 1000}s). Results reduced to 1 per query.`,
-				);
-			}
-
-			const output = allResults.join("\n---\n\n");
-			tracker.trackCall("search", Buffer.byteLength(output));
+			// searchMaxBytes caps the whole response, including the rate-limit notice
+			// and the separators between blocks.
+			const budget = config.searchMaxBytes;
+			const output = assembleBudgetedResponse({
+				blocks: queries.map((query) =>
+					formatQueryBlock(query, store.search(query, { source, limit: effectiveLimit })),
+				),
+				limit: budget,
+				trailing:
+					callCount > config.searchReduceAfter
+						? `\n⚠ Search rate limited (${callCount} calls in ${config.searchWindowMs / 1000}s). Results reduced to 1 per query.`
+						: "",
+				omissionNote: (omitted) =>
+					`\n\n_(${omitted} of ${queries.length} query blocks omitted: ${budget}-byte response budget)_`,
+			});
+			tracker.trackCall("search", byteLength(output));
 
 			return { content: [{ type: "text" as const, text: output }] };
 		},

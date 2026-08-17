@@ -34,7 +34,11 @@ const NON_GLOBAL_IPV4_RANGES: IpRange[] = [
 const NON_GLOBAL_IPV6_RANGES: IpRange[] = [
 	{ bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], prefixLength: 96 },
 	{ bytes: [0x01, 0x00, 0, 0, 0, 0, 0, 0], prefixLength: 64 },
-	{ bytes: [0x00, 0x64, 0xff, 0x9b, 0x00, 0x01], prefixLength: 48 },
+	// Whole 64:ff9b::/32 NAT64 allocation. The well-known /96 translation prefix
+	// is decided earlier by its embedded IPv4 address; everything else here —
+	// 64:ff9b:1::/48 local-use plus the unassigned remainder — is rejected, since
+	// a NAT64 gateway may translate it to an address we never got to inspect.
+	{ bytes: [0x00, 0x64, 0xff, 0x9b], prefixLength: 32 },
 	{ bytes: [0x20, 0x01, 0x00, 0x02, 0, 0], prefixLength: 48 },
 	{ bytes: [0x20, 0x01, 0x00, 0x10], prefixLength: 28 },
 	{ bytes: [0x20, 0x01, 0x00, 0x20], prefixLength: 28 },
@@ -46,6 +50,18 @@ const NON_GLOBAL_IPV6_RANGES: IpRange[] = [
 	{ bytes: [0xfe, 0xc0], prefixLength: 10 },
 	{ bytes: [0xff], prefixLength: 8 },
 ];
+
+/**
+ * RFC 6052 well-known NAT64 prefix. An address in `64:ff9b::/96` is not a
+ * destination in its own right: a NAT64 gateway forwards it to the IPv4 address
+ * embedded in the low 32 bits, so `64:ff9b::7f00:1` reaches 127.0.0.1. The
+ * range therefore has to be translated and re-checked, not merely allowed.
+ * `64:ff9b:1::/48` (RFC 8215, local-use) is rejected wholesale above.
+ */
+const NAT64_WELL_KNOWN_PREFIX: IpRange = {
+	bytes: [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0],
+	prefixLength: 96,
+};
 
 function matchesRange(address: number[], range: IpRange): boolean {
 	const completeBytes = Math.floor(range.prefixLength / 8);
@@ -133,7 +149,10 @@ function isNonGlobalIp(ip: IpLiteral): boolean {
 		ip.bytes.slice(0, 10).every((byte) => byte === 0) &&
 		ip.bytes[10] === 0xff &&
 		ip.bytes[11] === 0xff;
-	if (isIpv4Mapped) {
+	// Both forms carry an IPv4 destination in their low 32 bits, so the IPv4
+	// rules decide them; checking only the IPv6 ranges lets 64:ff9b::7f00:1
+	// through as "global".
+	if (isIpv4Mapped || matchesRange(ip.bytes, NAT64_WELL_KNOWN_PREFIX)) {
 		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(12), range));
 	}
 

@@ -66,6 +66,18 @@ export interface IndexResult {
 	codeChunks: number;
 }
 
+export interface SearchOptions {
+	/** Substring-matched against a source label. Matches every past call with that label. */
+	source?: string;
+	limit?: number;
+	/**
+	 * Exact source ids to search. Use this instead of `source` when a caller must
+	 * see only the content it indexed itself — a label filter cannot distinguish
+	 * two invocations of the same tool. An empty array matches nothing.
+	 */
+	sourceIds?: readonly number[];
+}
+
 export interface SearchResult {
 	query: string;
 	results: SearchHit[];

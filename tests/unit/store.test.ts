@@ -167,6 +167,45 @@ more filler content
 		}
 	});
 
+	it("scopes search to exact source ids", () => {
+		const store = new ContentStore(":memory:");
+		try {
+			const first = store.index("rpfscopedsentinel alpha body", "batch_execute");
+			const second = store.index("rpfotherscoped beta body", "batch_execute");
+
+			// Both share a label, so the label filter cannot separate them.
+			assert.ok(store.search("rpfscopedsentinel", { source: "batch_execute" }).results.length > 0);
+
+			assert.strictEqual(
+				store.search("rpfscopedsentinel", { sourceIds: [second.sourceId] }).results.length,
+				0,
+				"an id scope must exclude other sources with the same label",
+			);
+			assert.ok(store.search("rpfscopedsentinel", { sourceIds: [first.sourceId] }).results.length > 0);
+			assert.ok(
+				store.search("rpfscopedsentinel", { sourceIds: [first.sourceId, second.sourceId] }).results
+					.length > 0,
+			);
+		} finally {
+			store.close();
+		}
+	});
+
+	it("treats an empty source-id scope as matching nothing", () => {
+		const store = new ContentStore(":memory:");
+		try {
+			store.index("rpfemptyscopesentinel body", "batch_execute");
+			assert.ok(store.search("rpfemptyscopesentinel").results.length > 0);
+			assert.strictEqual(
+				store.search("rpfemptyscopesentinel", { sourceIds: [] }).results.length,
+				0,
+				"an empty scope must not silently widen to the whole store",
+			);
+		} finally {
+			store.close();
+		}
+	});
+
 	it("getStats reports source and chunk totals after indexing", () => {
 		const store = new ContentStore(":memory:");
 		try {
