@@ -149,6 +149,34 @@ const defaultRunner: CommandRunner = (file, args) => {
  * cannot race Claude Code's own writes to it. Re-registering upserts, because
  * `add` refuses a name that already exists.
  */
+/**
+ * Remove the MCP registration through the same supported path setup uses.
+ *
+ * Registration moved to `claude mcp add --scope user` (~/.claude.json), but
+ * uninstall kept stripping only the inert settings.json key, so an uninstalled
+ * package went on being launched by Claude Code every session.
+ */
+export function unregisterMcpServer(run: CommandRunner = defaultRunner): {
+	status: "removed" | "absent" | "unavailable" | "failed";
+	detail: string;
+} {
+	const listed = run("claude", ["mcp", "list"]);
+	if (listed.status === null) {
+		return { status: "unavailable", detail: "the `claude` CLI is not on PATH" };
+	}
+	if (!listed.stdout.includes("context-compress")) {
+		return { status: "absent", detail: "no user-scope registration found" };
+	}
+	const removed = run("claude", ["mcp", "remove", "context-compress", "--scope", "user"]);
+	if (removed.status !== 0) {
+		return {
+			status: "failed",
+			detail: (removed.stderr || removed.stdout).trim().split("\n")[0] || "unknown error",
+		};
+	}
+	return { status: "removed", detail: "claude mcp remove context-compress --scope user" };
+}
+
 export function registerMcpServer(
 	serverEntry: string,
 	run: CommandRunner = defaultRunner,
@@ -235,7 +263,7 @@ export function applyAutoConfig(
 			changes.push(`Set CONTEXT_COMPRESS_BIN to ${binCmd}`);
 		}
 	} else {
-		removeOwnedEnv(settings.env, changes);
+		if (removeOwnedEnv(settings.env, changes)) delete settings.env;
 	}
 
 	return changes;

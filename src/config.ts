@@ -127,6 +127,11 @@ const USER_SCOPE_ONLY_KEYS = [
 	"persistDb",
 	"dbDir",
 	"hardCapBytes",
+	// `maxOutputBytes` belongs here too: the sanity clamp below raises
+	// `hardCapBytes` UP to it, so leaving it project-settable handed the memory
+	// guard straight back — a repo could restore a 900MB stream cap and the
+	// clamp printed a line that made it look intentional.
+	"maxOutputBytes",
 ] as const satisfies readonly (keyof z.infer<typeof ConfigSchema>)[];
 
 function readConfigFile(path: string, scope: "project" | "user"): Partial<Config> {
@@ -284,11 +289,17 @@ export function loadConfig(projectDir?: string): Config {
 		);
 		merged.maxOutputBytes = 1024;
 	}
-	if (merged.hardCapBytes < merged.maxOutputBytes) {
+	// Clamp the RESPONSE budget down to the capture cap, never the capture cap up.
+	// `hardCapBytes` is the memory guard: a per-execution stream past ~512MB makes
+	// Buffer.concat().toString() throw RangeError synchronously inside the child's
+	// close listener, which the server's uncaughtException handler turns into
+	// process.exit(1). Raising it to satisfy a larger maxOutputBytes inverted the
+	// safety relationship — the guard must bound the budget, not follow it.
+	if (merged.maxOutputBytes > merged.hardCapBytes) {
 		console.error(
-			`[context-compress] Config: hardCapBytes clamped from ${merged.hardCapBytes} to ${merged.maxOutputBytes}`,
+			`[context-compress] Config: maxOutputBytes clamped from ${merged.maxOutputBytes} to ${merged.hardCapBytes} (the capture cap)`,
 		);
-		merged.hardCapBytes = merged.maxOutputBytes;
+		merged.maxOutputBytes = merged.hardCapBytes;
 	}
 	if (merged.intentSearchThreshold < 0) {
 		console.error(

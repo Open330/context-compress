@@ -112,13 +112,24 @@ export function isForeignHookCommand(command: string | undefined, ownHookPath?: 
 /** Environment keys `setup --auto` writes, and therefore the only ones it may remove. */
 export const OWNED_ENV_KEYS = ["CONTEXT_COMPRESS_FILTER_BASH", "CONTEXT_COMPRESS_BIN"] as const;
 
-/** Remove only setup-owned env keys, leaving every unrelated variable in place. */
-export function removeOwnedEnv(env: Record<string, string> | undefined, changes: string[]): void {
-	if (!env) return;
+/**
+ * Remove only setup-owned env keys, leaving every unrelated variable in place.
+ *
+ * Returns true when the object is now empty, so the caller can drop the key
+ * rather than leave a `"env": {}` stub in a settings file that never had one —
+ * uninstall must be the exact inverse of setup, and the same rule already
+ * applies to an emptied `mcpServers`.
+ */
+export function removeOwnedEnv(
+	env: Record<string, string> | undefined,
+	changes: string[],
+): boolean {
+	if (!env) return false;
 	for (const key of OWNED_ENV_KEYS) {
 		if (Object.hasOwn(env, key)) {
 			delete env[key];
 			changes.push(`Removed ${key}`);
 		}
 	}
+	return Object.keys(env).length === 0;
 }

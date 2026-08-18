@@ -1,6 +1,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import { loadConfig, resolveProjectDir } from "../config.js";
-import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
+import {
+	deduplicateLines,
+	groupErrorLines,
+	smartTruncate,
+	stripAnsi,
+	stripProgressLines,
+} from "../executor.js";
 import {
 	applyCommandFilter,
 	DEFAULT_MODE,
@@ -41,6 +47,8 @@ export function compressOutput(
 	stdout: string,
 	originalCmd?: string,
 	mode: FilterMode = DEFAULT_MODE,
+	/** Overrides the configured cap; intended for tests and embedded callers. */
+	maxOutputBytes?: number,
 ): string {
 	let out = stripAnsi(stdout);
 	if (mode === "conservative") return out;
@@ -67,6 +75,16 @@ export function compressOutput(
 		out = stripProgressLines(out);
 		out = deduplicateLines(out);
 		out = groupErrorLines(out);
+	}
+
+	// Final response cap, matching the executor's last stage. Without it this
+	// pipeline reproduced every compression stage except the one that bounds the
+	// result, so a wrapped build returned megabytes where the same command
+	// through `execute` returned maxOutputBytes with a truncation marker — and
+	// the hook's auto-wrap is the path most callers actually get.
+	const maxOutput = maxOutputBytes ?? loadConfig(resolveProjectDir()).maxOutputBytes;
+	if (Buffer.byteLength(out) > maxOutput) {
+		out = smartTruncate(out, maxOutput);
 	}
 	return out;
 }
@@ -151,10 +169,12 @@ function modeError(value: string | undefined, usage: string): number {
  */
 function parseWrapArgs(
 	args: string[],
-): { stream: boolean; cmdLine: string } | { unknownOption: string } {
+): { stream: boolean; cmdLine: string; ownArgs: string[] } | { unknownOption: string } {
 	let stream = false;
 	let commandStarted = false;
 	const operands: string[] = [];
+	/** Only the options before the command — what mode resolution may look at. */
+	const ownArgs: string[] = [];
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -169,10 +189,12 @@ function parseWrapArgs(
 		}
 		if (arg === "--stream") {
 			stream = true;
+			ownArgs.push(arg);
 			continue;
 		}
 		if (arg === "--mode") {
-			// Value already validated by resolveMode; skip it here.
+			ownArgs.push(arg);
+			if (i + 1 < args.length) ownArgs.push(args[i + 1]);
 			i++;
 			continue;
 		}
@@ -184,7 +206,7 @@ function parseWrapArgs(
 	const separatorIndex = operands.indexOf("--");
 	const cmdLine =
 		separatorIndex >= 0 ? operands.slice(separatorIndex + 1).join(" ") : operands.join(" ");
-	return { stream, cmdLine };
+	return { stream, cmdLine, ownArgs };
 }
 
 /** Read stdin to a string. */
@@ -253,15 +275,19 @@ export async function runWrap(
 ): Promise<number> {
 	if (args.length === 0) return usageError("a command is required", WRAP_USAGE);
 
-	const resolved = resolveMode(args);
-	if (!resolved.ok) return modeError(resolved.value, WRAP_USAGE);
-	const mode = resolved.mode;
-
+	// Split the arguments FIRST, then resolve the mode from our own slice only.
+	// Scanning the raw array made `wrap webpack --mode production` fail with
+	// "invalid --mode", stealing a flag that belongs to the child — the exact
+	// thing parseWrapArgs's contract says cannot happen, `--` included.
 	const parsed = parseWrapArgs(args);
 	if ("unknownOption" in parsed) {
 		return usageError(`unknown option "${parsed.unknownOption}"`, WRAP_USAGE);
 	}
-	const { stream, cmdLine } = parsed;
+	const { stream, cmdLine, ownArgs } = parsed;
+
+	const resolved = resolveMode(ownArgs);
+	if (!resolved.ok) return modeError(resolved.value, WRAP_USAGE);
+	const mode = resolved.mode;
 
 	if (!cmdLine.trim()) return usageError("a command is required", WRAP_USAGE);
 

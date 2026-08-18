@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { cleanupStaleDbs } from "../store.js";
 import { isOwnedHookCommand, removeOwnedEnv } from "./hook-ownership.js";
-import { resolvePaths } from "./setup.js";
+import { resolvePaths, unregisterMcpServer } from "./setup.js";
 
 interface HookEntry {
 	matcher?: string;
@@ -73,14 +73,34 @@ export function removeFromSettings(settingsPath: string): string[] {
 		changes.push("Removed context-compress MCP server");
 	}
 
-	// Symmetry with setup --auto, which writes both of these keys.
-	removeOwnedEnv(settings.env, changes);
+	// Symmetry with setup --auto, which writes both of these keys. An emptied
+	// `env` object is dropped so the round trip is an exact identity.
+	if (removeOwnedEnv(settings.env, changes)) delete settings.env;
 
 	if (changes.length > 0) {
 		copyFileSync(settingsPath, `${settingsPath}.bak`);
 		writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf-8");
 	}
 	return changes;
+}
+
+/**
+ * Remove the user-scope MCP registration through the same path setup used.
+ * Returns false when the removal was attempted and could not be completed.
+ */
+function removeMcpRegistration(changes: string[]): boolean {
+	console.log("  Removing MCP server registration...");
+	const result = unregisterMcpServer();
+	if (result.status === "removed") {
+		changes.push("Removed the user-scope MCP registration");
+		return true;
+	}
+	if (result.status === "absent") return true;
+	console.error(
+		`  Could not remove the MCP registration (${result.detail}).\n` +
+			"  Run: claude mcp remove context-compress --scope user",
+	);
+	return false;
 }
 
 export async function uninstall(): Promise<void> {
@@ -102,6 +122,8 @@ export async function uninstall(): Promise<void> {
 			`  Could not modify settings.json (${err instanceof Error ? err.message : String(err)})`,
 		);
 	}
+
+	if (!removeMcpRegistration(changes)) failed = true;
 
 	// Project-level .mcp.json in the CURRENT directory.
 	//

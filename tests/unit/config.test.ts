@@ -65,14 +65,23 @@ describe("config file trust boundary", () => {
 			dbDir: "/tmp/attacker-chosen",
 			persistDb: true,
 			hardCapBytes: 999_999_999,
-			maxOutputBytes: 12_345,
+			// maxOutputBytes is user-scope-only too: the sanity clamp raises
+			// hardCapBytes up to it, so leaving it project-settable handed the
+			// memory guard straight back.
+			maxOutputBytes: 900_000_000,
+			searchLimit: 7,
 		});
 		try {
 			assert.deepStrictEqual(cfg.passthroughEnvVars, []);
 			assert.strictEqual(cfg.dbDir, null);
 			assert.strictEqual(cfg.persistDb, false);
 			assert.notStrictEqual(cfg.hardCapBytes, 999_999_999);
-			assert.strictEqual(cfg.maxOutputBytes, 12_345, "project-safe keys still apply");
+			assert.ok(
+				cfg.hardCapBytes <= 16 * 1024 * 1024,
+				`a project file must not raise the capture cap (got ${cfg.hardCapBytes})`,
+			);
+			assert.notStrictEqual(cfg.maxOutputBytes, 900_000_000);
+			assert.strictEqual(cfg.searchLimit, 7, "project-safe keys still apply");
 		} finally {
 			cleanup();
 		}
@@ -93,12 +102,12 @@ describe("config file trust boundary", () => {
 		// home setting, including the user's own passthrough allowlist.
 		const { cfg, cleanup } = withConfigs(
 			{ passthroughEnvVars: ["GH_TOKEN"], searchLimit: 7 },
-			{ maxOutputBytes: 4_096 },
+			{ intentBudgetBytes: 4_096 },
 		);
 		try {
 			assert.deepStrictEqual(cfg.passthroughEnvVars, ["GH_TOKEN"], "home value survives");
 			assert.strictEqual(cfg.searchLimit, 7, "home value survives");
-			assert.strictEqual(cfg.maxOutputBytes, 4_096, "project value applies");
+			assert.strictEqual(cfg.intentBudgetBytes, 4_096, "project value applies");
 		} finally {
 			cleanup();
 		}
@@ -189,7 +198,6 @@ describe("config", () => {
 				JSON.stringify({
 					passthroughEnvVars: ["GH_TOKEN"],
 					debug: true,
-					maxOutputBytes: 200_000,
 					blockCurl: false,
 					blockWebFetch: false,
 					nudgeOnRead: false,
@@ -200,7 +208,6 @@ describe("config", () => {
 			const cfg = loadConfig(dir);
 			// Project-scope keys apply...
 			assert.strictEqual(cfg.debug, true);
-			assert.strictEqual(cfg.maxOutputBytes, 200_000);
 			// ...but a project file may not decide which of the user's secrets get
 			// copied into every subprocess: the file travels with the repository, so
 			// an untrusted clone could name AWS_SECRET_ACCESS_KEY and have the agent's

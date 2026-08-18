@@ -36,6 +36,7 @@ function register(
 	} as unknown as McpServer;
 
 	const ctx = {
+		config: { maxOutputBytes: 102_400 },
 		executor: {
 			execute: async () => exec,
 			executeFile: async () => exec,
@@ -125,6 +126,7 @@ describe("execute status reporting", () => {
 			},
 		} as unknown as McpServer;
 		const ctx = {
+			config: { maxOutputBytes: 102_400 },
 			executor: { execute: async () => result({ exitCode: 9, indexableStdout: "raw corpus" }) },
 			tracker: { trackCall() {}, trackSandboxed() {} },
 			projectDir: process.cwd(),

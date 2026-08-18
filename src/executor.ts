@@ -247,8 +247,13 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	const lines = output.split("\n");
 	const headRatio = 0.6;
-	const headTarget = Math.floor(maxBytes * headRatio);
-	const tailTarget = maxBytes - headTarget;
+	// Reserve room for the separator so the RESULT fits maxBytes. Budgeting only
+	// the retained lines pushed the response past the cap by the marker's length,
+	// which made a byte budget that is supposed to be a guarantee approximate.
+	const SEPARATOR_RESERVE = 160;
+	const budget = Math.max(0, maxBytes - SEPARATOR_RESERVE);
+	const headTarget = Math.floor(budget * headRatio);
+	const tailTarget = budget - headTarget;
 
 	// Collect head lines
 	let headBytes = 0;
@@ -277,10 +282,21 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
 
-	return headLines.join("\n") + separator + tailLines.join("\n");
+	const result = headLines.join("\n") + separator + tailLines.join("\n");
+	// The reserve is a generous estimate; clamp in case the separator ran long.
+	return Buffer.byteLength(result) <= maxBytes
+		? result
+		: `${headLines.join("\n")}\n... [truncated] ...`;
 }
 
-export { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines };
+export { deduplicateLines, groupErrorLines, smartTruncate, stripAnsi, stripProgressLines };
+
+/**
+ * Grace period after a child exits for its stdio pipes to flush before the
+ * result is settled anyway. Long enough for ordinary buffered output, short
+ * enough that a leaked descendant holding the pipe cannot stall a tool call.
+ */
+const STREAM_DRAIN_MS = 250;
 
 export class SubprocessExecutor {
 	private runtimes: RuntimeMap;
@@ -509,8 +525,14 @@ export class SubprocessExecutor {
 				}
 			});
 
-			proc.on("close", (code) => {
+			// `close` fires only after the child exits AND every holder of its stdio
+			// pipes closes them, so one escaped grandchild (a build daemon, a test
+			// worker) kept the promise pending forever: the temp dir stayed on disk,
+			// the concurrency slot was never released, and the MCP request never got
+			// a response. Settle on `exit` after a bounded drain instead.
+			const settle = (code: number | null): void => {
 				clearTimeout(timer);
+				clearTimeout(drainTimer);
 				this.activeProcesses.delete(proc);
 				if (resolved) return;
 				resolved = true;
@@ -538,6 +560,14 @@ export class SubprocessExecutor {
 				stdout = capped
 					? `${indexableStdout}\n[output capped at ${formatBytes(hardCap)} — process killed]`
 					: indexableStdout;
+				// stderr went into the response raw: no ANSI strip, no dedup, and it
+				// was never counted against maxOutputBytes. A failing build's 60k
+				// coloured warnings arrived verbatim on the tool whose premise is
+				// that raw data stays out of context. Normalize it the same way.
+				stderr = stripAnsi(stderr);
+				if (stderr.length > 10_000) {
+					stderr = groupErrorLines(deduplicateLines(stripProgressLines(stderr)));
+				}
 				if (timedOut) {
 					stderr += `\n[killed: timed out after ${formatDuration(timeout)}]`;
 				}
@@ -583,6 +613,16 @@ export class SubprocessExecutor {
 					killed,
 					networkBytes,
 				});
+			};
+
+			// `exit` means the process is gone; give its pipes a short grace period to
+			// flush, then settle regardless of who still holds them.
+			let drainTimer: NodeJS.Timeout = setTimeout(() => {}, 0);
+			clearTimeout(drainTimer);
+			proc.on("close", (code) => settle(code));
+			proc.on("exit", (code) => {
+				drainTimer = setTimeout(() => settle(code), STREAM_DRAIN_MS);
+				drainTimer.unref?.();
 			});
 		});
 	}

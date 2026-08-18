@@ -24,20 +24,29 @@ let md = html
   .replace(/<footer[^>]*>[\\s\\S]*?<\\/footer>/gi, "");
 
 // Convert headings
-md = md.replace(/<h1[^>]*>(.*?)<\\/h1>/gi, "# $1\\n");
-md = md.replace(/<h2[^>]*>(.*?)<\\/h2>/gi, "## $1\\n");
-md = md.replace(/<h3[^>]*>(.*?)<\\/h3>/gi, "### $1\\n");
-md = md.replace(/<h4[^>]*>(.*?)<\\/h4>/gi, "#### $1\\n");
+// The \`s\` flag matters: pretty-printed HTML puts the text on its own line, and
+// without it these never matched, so every heading silently lost its marker.
+// That in turn changed how ContentStore chunks the page — headings become
+// breadcrumb titles, so search results lost their hierarchy.
+md = md.replace(/<h1[^>]*>([\\s\\S]*?)<\\/h1>/gi, (_, t) => "# " + t.trim() + "\\n");
+md = md.replace(/<h2[^>]*>([\\s\\S]*?)<\\/h2>/gi, (_, t) => "## " + t.trim() + "\\n");
+md = md.replace(/<h3[^>]*>([\\s\\S]*?)<\\/h3>/gi, (_, t) => "### " + t.trim() + "\\n");
+md = md.replace(/<h4[^>]*>([\\s\\S]*?)<\\/h4>/gi, (_, t) => "#### " + t.trim() + "\\n");
 
 // Convert code blocks
-md = md.replace(/<pre[^>]*><code[^>]*>(.*?)<\\/code><\\/pre>/gis, "\`\`\`\\n$1\\n\`\`\`\\n");
-md = md.replace(/<code[^>]*>(.*?)<\\/code>/gi, "\`$1\`");
+// \`<pre>\` without an inner \`<code>\` is still a code block.
+md = md.replace(/<pre[^>]*>\\s*<code[^>]*>([\\s\\S]*?)<\\/code>\\s*<\\/pre>/gi, (_, t) => "\`\`\`\\n" + t.trim() + "\\n\`\`\`\\n");
+md = md.replace(/<pre[^>]*>([\\s\\S]*?)<\\/pre>/gi, (_, t) => "\`\`\`\\n" + t.trim() + "\\n\`\`\`\\n");
+md = md.replace(/<code[^>]*>([\\s\\S]*?)<\\/code>/gi, (_, t) => "\`" + t.trim() + "\`");
 
 // Convert links
-md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\\/a>/gi, "[$2]($1)");
+md = md.replace(
+  /<a[^>]*href=(?:"([^"]*)"|'([^']*)'|([^\\s>]+))[^>]*>([\\s\\S]*?)<\\/a>/gi,
+  (_, dq, sq, bare, text) => "[" + text.trim() + "](" + (dq ?? sq ?? bare) + ")",
+);
 
 // Convert lists
-md = md.replace(/<li[^>]*>(.*?)<\\/li>/gi, "- $1\\n");
+md = md.replace(/<li[^>]*>([\\s\\S]*?)<\\/li>/gi, (_, t) => "- " + t.trim() + "\\n");
 
 // Convert paragraphs
 md = md.replace(/<p[^>]*>(.*?)<\\/p>/gis, "$1\\n\\n");

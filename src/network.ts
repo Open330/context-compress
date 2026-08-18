@@ -62,6 +62,15 @@ const SIX_TO_FOUR_PREFIX: IpRange = { bytes: [0x20, 0x02], prefixLength: 16 };
  * a resolver would actually reach.
  */
 const TEREDO_PREFIX: IpRange = { bytes: [0x20, 0x01, 0x00, 0x00], prefixLength: 32 };
+/**
+ * RFC 2765 IPv4-translated: `::ffff:0:0/96` also carries the destination in its
+ * low 32 bits. The IPv4-*mapped* test requires bytes 0-9 to be zero, so this
+ * form (0xff,0xff at bytes 8-9) matched neither that branch nor any IPv6 range.
+ */
+const IPV4_TRANSLATED_PREFIX: IpRange = {
+	bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0],
+	prefixLength: 96,
+};
 
 /**
  * RFC 6052 well-known NAT64 prefix. An address in `64:ff9b::/96` is not a
@@ -164,7 +173,11 @@ function isNonGlobalIp(ip: IpLiteral): boolean {
 	// Both forms carry an IPv4 destination in their low 32 bits, so the IPv4
 	// rules decide them; checking only the IPv6 ranges lets 64:ff9b::7f00:1
 	// through as "global".
-	if (isIpv4Mapped || matchesRange(ip.bytes, NAT64_WELL_KNOWN_PREFIX)) {
+	if (
+		isIpv4Mapped ||
+		matchesRange(ip.bytes, NAT64_WELL_KNOWN_PREFIX) ||
+		matchesRange(ip.bytes, IPV4_TRANSLATED_PREFIX)
+	) {
 		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(12), range));
 	}
 	// Transition formats that tunnel to an embedded IPv4 destination: check the

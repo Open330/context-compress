@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
+import { truncateToBytes } from "../util/byte-budget.js";
 import { withExecStatus } from "../util/exec-status.js";
 import { isWithinProject } from "../util/path.js";
 import type { ToolContext } from "./context.js";
@@ -109,6 +110,11 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 
 			// See execute.ts: a nonzero exit with no output must not read as success.
 			output = withExecStatus(output, result);
+
+			// stderr is appended above and is not covered by the executor's stdout
+			// cap, so bound the COMBINED response — the configured cap is a promise
+			// about what reaches the caller, not about one stream.
+			output = truncateToBytes(output, ctx.config.maxOutputBytes);
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute_file", responseBytes);

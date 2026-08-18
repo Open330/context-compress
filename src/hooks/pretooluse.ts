@@ -231,12 +231,17 @@ function respond(output: Record<string, unknown>): void {
  * `&&`, `||`, `;`, or a subshell) and compares its basename, so a path-qualified
  * or quoted invocation is recognized too.
  */
-function isFetchCommand(command: string): boolean {
+/** Does one command segment start with a download tool, seeing past wrappers? */
+function segmentInvokesFetchTool(segment: string): boolean {
 	const FETCH_TOOLS = /^(curl|wget\d*|aria2c|httpie|http|xh)$/i;
-	// Wrappers that run the command that follows them. Skipping these catches
-	// `xargs curl` and `sudo curl` without scanning arbitrary words, which would
-	// flag `man curl` and `echo curl`.
+	// Wrappers that run the command that follows them, and shell keywords that
+	// introduce one. Skipping these catches `timeout 10 curl`, `nice -n 10 curl`,
+	// `sudo -u nobody curl`, and `for u in a b; do curl $u; done` without scanning
+	// arbitrary words, which would flag `man curl` and `echo curl`.
 	const RUNNERS = /^(xargs|env|sudo|doas|nohup|time|command|nice|stdbuf|timeout)$/i;
+	const KEYWORDS = /^(do|then|else|elif|if|while|until|for|done|fi|exec|then;|\{)$/i;
+	// A wrapper's own operands: `timeout 10`, `nice -n 10`, `sudo -u nobody`.
+	const OPERAND = /^(\d+[smhd]?|[A-Za-z_][\w.-]*)$/;
 
 	const basenameOf = (word: string): string =>
 		word
@@ -244,20 +249,28 @@ function isFetchCommand(command: string): boolean {
 			.split(/[\\/]/)
 			.pop() ?? "";
 
-	// Split on command separators, then walk the leading words of each segment,
-	// skipping environment assignments (`FOO=1 curl …`), wrappers, and their flags.
-	for (const segment of command.split(/\||&&|\|\||;|\n|\$\(|`|\(/)) {
-		const words = segment.trim().split(/\s+/).filter(Boolean);
-		for (const word of words) {
-			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue; // env assignment
-			if (word.startsWith("-")) continue; // a wrapper's own flag
-			const basename = basenameOf(word);
-			if (FETCH_TOOLS.test(basename)) return true;
-			if (RUNNERS.test(basename)) continue; // keep looking past the wrapper
-			break; // an ordinary command: stop before its arguments
+	// Walk the leading words, skipping environment assignments (`FOO=1 curl …`),
+	// wrappers, and their flags and operands.
+	let sawWrapper = false;
+	for (const word of segment.trim().split(/\s+/).filter(Boolean)) {
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue; // env assignment
+		if (word.startsWith("-")) continue; // a flag belonging to a wrapper
+		const basename = basenameOf(word);
+		if (FETCH_TOOLS.test(basename)) return true;
+		if (RUNNERS.test(basename)) {
+			sawWrapper = true;
+			continue;
 		}
+		if (KEYWORDS.test(basename)) continue; // shell keyword introduces a command
+		// After a wrapper, skip its plain operands (`timeout 10`, `sudo -u nobody`).
+		if (sawWrapper && OPERAND.test(basename)) continue;
+		break; // an ordinary command: stop before its arguments
 	}
 	return false;
+}
+
+function isFetchCommand(command: string): boolean {
+	return command.split(/\||&&|\|\||;|\n|\$\(|`|\(/).some(segmentInvokesFetchTool);
 }
 
 // ─── Bash: redirect data-fetching commands ───
@@ -267,8 +280,10 @@ if (tool === "Bash") {
 	// curl/wget → deny and redirect.
 	//
 	// Match the command *basename* at any command position, not a bare token: the
-	// old pattern let `/usr/bin/curl`, `"curl"`, `$CURL`, and `wget2` straight
-	// through. This is a redirection nudge, not a security boundary — SECURITY.md
+	// old pattern let `/usr/bin/curl`, `"curl"`, and `wget2` straight through.
+	// Deliberately NOT covered: variable indirection (`CURL=curl; $CURL …`),
+	// intra-word quoting (`c"u"rl`), and backslash line continuations — resolving
+	// those needs a shell parser. This is a redirection nudge, not a security boundary — SECURITY.md
 	// documents that outbound networking is unrestricted, and a determined caller
 	// can still reach the network (for example through /dev/tcp). Its job is to
 	// catch the ordinary spellings an agent actually produces.

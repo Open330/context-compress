@@ -56,11 +56,16 @@ interface FilterResult {
  * success from failure — `npm install` printing "up to date in 431ms" and one
  * printing an error both rendered as nothing. `git log` already had this net.
  */
-function withFloor(candidate: string, original: string): FilterResult {
-	if (candidate.trim() === "" && original.trim() !== "") {
+function withFloor(result: FilterResult, original: string): FilterResult {
+	if (result.output.trim() === "" && original.trim() !== "") {
 		return { output: original, filtered: false };
 	}
-	return { output: candidate, filtered: true };
+	// Preserve the inner flag. Forcing `filtered: true` made filters that
+	// deliberately declined (filterPs on an unknown header, filterDu under 25
+	// lines) report success, which set commandFiltered and skipped
+	// applyFormatFilter entirely — a 3759-byte JSON payload stayed 3759 bytes
+	// where the format fallback would have made it 228.
+	return result;
 }
 
 /** Detect command type from code string and apply specialized filter */
@@ -111,15 +116,15 @@ export function applyCommandFilter(
 			// Recursive greps prefix each match with the file path even without -n;
 			// rg is recursive (and path-prefixed) by default.
 			const recursive = cmd !== "grep" || /(^|\s)-[a-zA-Z]*(r|R)/.test(fullCmd);
-			return withFloor(filterGrep(stdout, recursive).output, stdout);
+			return withFloor(filterGrep(stdout, recursive), stdout);
 		}
 	}
 
 	// System tabular commands: df, du, ps — aggressive mode only.
 	if (mode === "aggressive") {
-		if (cmd === "df") return withFloor(filterDf(stdout).output, stdout);
-		if (cmd === "du") return withFloor(filterDu(stdout).output, stdout);
-		if (cmd === "ps") return withFloor(filterPs(stdout).output, stdout);
+		if (cmd === "df") return withFloor(filterDf(stdout), stdout);
+		if (cmd === "du") return withFloor(filterDu(stdout), stdout);
+		if (cmd === "ps") return withFloor(filterPs(stdout), stdout);
 	}
 
 	return { output: stdout, filtered: false };
@@ -428,7 +433,7 @@ export function filterPackageManager(
 					/^(npm|yarn|pnpm)\s+(ERR|error)/i.test(l) ||
 					/^\s*(error|ERR!)\b/i.test(l),
 			);
-			return withFloor(summaryOnly.join("\n"), stdout);
+			return withFloor({ output: summaryOnly.join("\n"), filtered: true }, stdout);
 		}
 		return { output: filtered.join("\n"), filtered: true };
 	}
@@ -442,7 +447,7 @@ export function filterPackageManager(
 	// npm ls / list / ll — aggressive mode strips tree-drawing chars and
 	// collapses identical version lines.
 	if (mode === "aggressive" && /\b(ls|list|ll)\b/.test(cmd)) {
-		return withFloor(filterNpmLs(stdout).output, stdout);
+		return withFloor(filterNpmLs(stdout), stdout);
 	}
 
 	return { output: stdout, filtered: false };
@@ -497,8 +502,14 @@ function isSummaryLine(line: string): boolean {
  * vanishes and the caller concludes the statement never ran. Every other lossy
  * path here already emits one (`balancedGitLog`, `smartTruncate`, `compressLogs`).
  */
-function withOmissionNote(kept: string[], totalLines: number): string {
-	const omitted = totalLines - kept.filter((line) => line !== "").length;
+function withOmissionNote(kept: string[], sourceLines: string[]): string {
+	// Count lines genuinely absent from the kept set. Comparing raw counts made a
+	// trailing newline — present in essentially all output — look like a dropped
+	// line, so `Tests: 184 passed\n` reported "+1 lines omitted".
+	const keptSet = new Set(kept.map((line) => line.trim()).filter(Boolean));
+	const omitted = sourceLines.filter(
+		(line) => line.trim() !== "" && !keptSet.has(line.trim()),
+	).length;
 	if (omitted <= 0) return kept.join("\n");
 	return `${kept.join("\n")}\n[+${omitted} lines omitted — use execute(intent:…) or search() for the full output]`;
 }
@@ -528,7 +539,7 @@ export function filterTestOutput(stdout: string): FilterResult {
 
 	// If all pass, return compact summary
 	if (failCount === 0 && summary.length > 0) {
-		return { output: withOmissionNote(summary, lines.length), filtered: true };
+		return { output: withOmissionNote(summary, lines), filtered: true };
 	}
 
 	// If failures exist, return failures + the rollup summary lines only.
@@ -537,7 +548,7 @@ export function filterTestOutput(stdout: string): FilterResult {
 	if (failures.length > 0) {
 		const rollup = summary.filter((l) => !/^PASS\s/i.test(l));
 		return {
-			output: withOmissionNote([...failures, "", ...rollup], lines.length),
+			output: withOmissionNote([...failures, "", ...rollup], lines),
 			filtered: true,
 		};
 	}
