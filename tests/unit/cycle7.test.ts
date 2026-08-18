@@ -155,3 +155,57 @@ describe("IPv4-translated IPv6 is classified", () => {
 		assert.strictEqual(isPrivateHost("::ffff:0:808:808"), false, "8.8.8.8 stays reachable");
 	});
 });
+
+describe("truncation keeps content when no whole line fits", () => {
+	it("byte-slices a single line longer than the budget", async () => {
+		// smartTruncate admits whole lines, so when the only line exceeded both the
+		// head and tail targets it returned the separator and nothing else —
+		// measured 20,000 bytes of input coming back as 73 bytes of marker.
+		// Minified JS/CSS and single-line JSON hit this.
+		const { SubprocessExecutor } = await import("../../src/executor.js");
+		const { detectRuntimes } = await import("../../src/runtime/index.js");
+		const runtimes = await detectRuntimes();
+		if (!runtimes.has("shell")) return;
+
+		const executor = new SubprocessExecutor(runtimes, { ...loadConfig(), maxOutputBytes: 4_096 });
+		try {
+			const r = await executor.execute({
+				language: "shell",
+				code: `awk 'BEGIN{s="";for(i=0;i<20000;i++) s=s "x"; printf "%s", s}'`,
+				timeout: 30_000,
+			});
+			const bytes = Buffer.byteLength(r.stdout);
+			assert.ok(bytes > 1_000, `only ${bytes} bytes survived — content was dropped`);
+			assert.ok(bytes <= 4_096, `budget exceeded: ${bytes}`);
+			assert.match(r.stdout, /truncated/, "truncation must still be stated");
+			assert.ok(r.stdout.startsWith("x"), "the head of the content must be kept");
+		} finally {
+			executor.shutdown();
+		}
+	});
+});
+
+describe("retention prunes in one statement per batch", () => {
+	it("keeps steady-state indexing cheap once the limit is reached", async () => {
+		// Each DELETE filters on an UNINDEXED column, so it is a full virtual-table
+		// scan; issuing one per source made the scan count the thing that grew.
+		// Deferring WHEN to prune does not help — batching the STATEMENT does.
+		const { ContentStore } = await import("../../src/store.js");
+		const store = new ContentStore({ dbPath: ":memory:", maxIndexedSources: 100 });
+		try {
+			const body = Array.from({ length: 30 }, (_, i) => `line ${i} of payload text`).join("\n");
+			for (let i = 0; i < 160; i++) store.index(`${body}\nseed-${i}`, `seed-${i}`);
+
+			const started = Date.now();
+			for (let i = 0; i < 40; i++) store.index(`${body}\nsteady-${i}`, `steady-${i}`);
+			const perIndex = (Date.now() - started) / 40;
+
+			assert.ok(perIndex < 25, `steady-state index averaged ${perIndex.toFixed(1)}ms`);
+			const sources = store.getStats().totalSources;
+			assert.ok(sources <= 120, `retention overshoot too large: ${sources}`);
+			assert.ok(sources >= 100, `retention pruned below the limit: ${sources}`);
+		} finally {
+			store.close();
+		}
+	});
+});

@@ -27,6 +27,8 @@ import { detectInjectionPatterns } from "./utils.js";
 const MAX_VOCABULARY = 10_000;
 /** Prune only once the overshoot reaches this, to amortize the FTS5 scans. */
 const PRUNE_BATCH = 25;
+/** Bytes of chunk text tokenized per getDistinctiveTerms call. */
+const TERM_SAMPLE_BYTES = 256 * 1024;
 
 const STOPWORDS = new Set([
 	"the",
@@ -433,19 +435,24 @@ export class ContentStore {
 			.all(this.maxSources) as Array<{ id: number }>;
 		if (excess.length < batch) return;
 
-		const deleteChunks = this.db.prepare("DELETE FROM chunks WHERE source_id = ?");
+		// One statement for the whole batch. `source_id` is UNINDEXED, so each
+		// DELETE is a full virtual-table scan — issuing one per source made the
+		// scan count the thing that grew. Measured: 25 individual DELETEs 369.7ms
+		// vs a single `IN (...)` 39.6ms. Deferring *when* to prune does not help,
+		// because the work per source is unchanged; batching the statement does.
+		const ids = excess.map((row) => row.id);
+		const placeholders = ids.map(() => "?").join(",");
+		const deleteChunks = this.db.prepare(`DELETE FROM chunks WHERE source_id IN (${placeholders})`);
 		const deleteTrigram = this.trigramTableExists()
-			? this.db.prepare("DELETE FROM chunks_trigram WHERE source_id = ?")
+			? this.db.prepare(`DELETE FROM chunks_trigram WHERE source_id IN (${placeholders})`)
 			: null;
-		const deleteSource = this.db.prepare("DELETE FROM sources WHERE id = ?");
+		const deleteSource = this.db.prepare(`DELETE FROM sources WHERE id IN (${placeholders})`);
 		this.db.transaction(() => {
-			for (const { id } of excess) {
-				deleteChunks.run(id);
-				deleteTrigram?.run(id);
-				deleteSource.run(id);
-				this.distinctiveTermsCache.delete(id);
-			}
+			deleteChunks.run(...ids);
+			deleteTrigram?.run(...ids);
+			deleteSource.run(...ids);
 		})();
+		for (const id of ids) this.distinctiveTermsCache.delete(id);
 		this.pruneVocabulary();
 		debug(`Pruned ${excess.length} source(s) past the ${this.maxSources} retention limit`);
 	}
@@ -705,12 +712,23 @@ export class ContentStore {
 		const stmt = this.db.prepare(`SELECT content FROM chunks${filter} LIMIT 500`);
 		const rows = (sourceId ? stmt.all(sourceId) : stmt.all()) as Array<{ content: string }>;
 
+		// Bound the tokenization work. 500 rows x MAX_CHUNK_CHARS is up to 4MB of
+		// regex splitting per call, and batch_execute makes one call per command.
+		// Distinctive terms are a discovery hint, so a sample is enough.
+		let sampled = 0;
+		const sample: string[] = [];
+		for (const row of rows) {
+			if (sampled >= TERM_SAMPLE_BYTES) break;
+			sample.push(row.content);
+			sampled += row.content.length;
+		}
+
 		// Count document frequency per word
 		const docFreq = new Map<string, number>();
 
-		for (const row of rows) {
+		for (const content of sample) {
 			const words = new Set(
-				row.content
+				content
 					.split(WORD_SPLIT_RE)
 					.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()))
 					.map((w) => w.toLowerCase()),

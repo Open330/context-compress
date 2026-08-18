@@ -242,6 +242,15 @@ function groupErrorLines(output: string): string {
 /**
  * Smart truncation: keep 60% head + 40% tail, snapping to line boundaries.
  */
+/** Byte-truncate without splitting a multi-byte character. */
+function sliceUtf8(text: string, maxBytes: number): string {
+	const buffer = Buffer.from(text, "utf8");
+	if (buffer.length <= maxBytes) return text;
+	let cut = maxBytes;
+	while (cut > 0 && (buffer[cut] & 0xc0) === 0x80) cut--;
+	return buffer.subarray(0, cut).toString("utf8");
+}
+
 function smartTruncate(output: string, maxBytes: number): string {
 	if (Buffer.byteLength(output) <= maxBytes) return output;
 
@@ -282,11 +291,22 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
 
+	// Nothing fit: the content is one line longer than the whole budget (minified
+	// JS/CSS, a single-line JSON blob, `tr -d '\n'` output). Admitting only whole
+	// lines returned the separator and nothing else — 20,000 bytes of input came
+	// back as 73 bytes of marker. Fall back to a byte slice so the caller still
+	// sees the head of the content.
+	if (headEnd === 0 && tailStart >= lines.length) {
+		const marker = "\n... [truncated] ...";
+		const room = Math.max(0, maxBytes - Buffer.byteLength(marker));
+		return sliceUtf8(output, room) + marker;
+	}
+
 	const result = headLines.join("\n") + separator + tailLines.join("\n");
 	// The reserve is a generous estimate; clamp in case the separator ran long.
-	return Buffer.byteLength(result) <= maxBytes
-		? result
-		: `${headLines.join("\n")}\n... [truncated] ...`;
+	if (Buffer.byteLength(result) <= maxBytes) return result;
+	const marker = "\n... [truncated] ...";
+	return sliceUtf8(result, Math.max(0, maxBytes - Buffer.byteLength(marker))) + marker;
 }
 
 export { deduplicateLines, groupErrorLines, smartTruncate, stripAnsi, stripProgressLines };

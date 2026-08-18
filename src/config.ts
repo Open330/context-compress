@@ -46,11 +46,12 @@ const DEFAULTS: Config = {
 	intentSearchThreshold: 5_000,
 	intentBudgetBytes: 1_800,
 	maxOutputBytes: 102_400,
-	// Measured peak RSS is ~9-10x the captured bytes (19MB -> 259MB, 38MB -> 446MB)
-	// because the post-capture pipeline holds several full copies, and
-	// batch_execute runs four of these at once. 100MB extrapolated to ~1GB per
-	// call and ~4GB per batch; 16MB keeps the worst case near 600MB and is still
-	// far above any output a caller can usefully read.
+	// Measured peak RSS is 9-13x the captured bytes (16MB captured -> 292MB on
+	// error-shaped output) because the post-capture pipeline holds several full
+	// copies. Peak tracks roughly 12 x concurrency x cap, and the binding limit is
+	// MAX_CONCURRENT_EXECUTIONS (8), not BATCH_CONCURRENCY (4): measured 736MB at
+	// 4 and 898MB at 8. The old 100MB cap extrapolated to ~4.8GB. 16MB keeps the
+	// worst case under ~0.9GB and is far above any output a caller can read.
 	hardCapBytes: 16 * 1024 * 1024,
 	searchMaxBytes: 40_960,
 	batchMaxBytes: 81_920,
