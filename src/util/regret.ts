@@ -118,6 +118,13 @@ export function observeAndAdjust(
 	const isFastRerun = rec.lastSeen > 0 && now - rec.lastSeen <= window;
 	if (isFastRerun && rec.lastMode === "aggressive") {
 		rec.regrets++;
+	} else if (rec.regrets > 0 && rec.lastSeen > 0 && now - rec.lastSeen > window) {
+		// Decay on a run that was NOT a fast re-run. Without this, `regrets` only
+		// ever grew: once a fingerprint crossed the threshold it was pinned to
+		// balanced forever, and because the post-adjustment mode was stored below,
+		// `lastMode` could never be "aggressive" again either — so the counter
+		// froze and there was no path back. The docstring claimed it could recover.
+		rec.regrets--;
 	}
 	rec.observations++;
 
@@ -125,7 +132,9 @@ export function observeAndAdjust(
 	const shouldAdjust = chosenMode === "aggressive" && rec.regrets >= REGRET_MIN_COUNT;
 	const mode = shouldAdjust ? downgrade(chosenMode) : chosenMode;
 
-	rec.lastMode = mode;
+	// Record what was actually CHOSEN, not the adjusted result. Storing the
+	// downgraded mode meant the fast-re-run signal could never fire again.
+	rec.lastMode = chosenMode;
 	rec.lastSeen = now;
 	map[fingerprint] = rec;
 	save(path, map);

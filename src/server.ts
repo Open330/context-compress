@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Config } from "./config.js";
+import { resolveProjectDir } from "./config.js";
 import { SubprocessExecutor } from "./executor.js";
 import { configureLogger, debug } from "./logger.js";
 import { detectRuntimes, hasBun } from "./runtime/index.js";
@@ -19,7 +20,7 @@ import { registerStatsTool } from "./tools/stats.js";
 import { createIntentFilter } from "./util/intent-filter.js";
 import { getVersion } from "./util/version.js";
 
-const projectDir = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+const projectDir = resolveProjectDir();
 
 const MAX_CONCURRENT_EXECUTIONS = 8;
 const EXECUTION_LIMIT_ERROR = "Error: too many concurrent executions. Try again shortly.";
@@ -42,7 +43,11 @@ export async function createServer(config: Config) {
 	let store: ContentStore;
 	let dbFallback = false;
 	try {
-		store = new ContentStore({ persistDb: config.persistDb, dbDir: config.dbDir });
+		store = new ContentStore({
+			persistDb: config.persistDb,
+			dbDir: config.dbDir,
+			maxIndexedSources: config.maxIndexedSources,
+		});
 	} catch (e) {
 		debug("Failed to create DB, falling back to in-memory:", e);
 		store = new ContentStore(":memory:");
@@ -86,19 +91,35 @@ export async function createServer(config: Config) {
 			/* ignore */
 		}
 	};
-	process.on("SIGINT", shutdown);
-	process.on("SIGTERM", shutdown);
-	process.on("beforeExit", shutdown);
-	process.on("uncaughtException", (err) => {
-		debug("Uncaught exception:", err);
+	// Registered listeners are tracked so shutdown() can remove them. Leaving them
+	// installed meant an embedding process — notably the test runner, which calls
+	// createServer twice per file — inherited handlers that call process.exit(1),
+	// so one async fault truncated the whole run with no diagnostic.
+	const onFatal = (label: string) => (err: unknown) => {
+		debug(`${label}:`, err);
 		shutdown();
 		process.exit(1);
-	});
-	process.on("unhandledRejection", (err) => {
-		debug("Unhandled rejection:", err);
-		shutdown();
-		process.exit(1);
-	});
+	};
+	const listeners: Array<
+		[
+			NodeJS.Signals | "beforeExit" | "uncaughtException" | "unhandledRejection",
+			(...args: never[]) => void,
+		]
+	> = [
+		["SIGINT", shutdown],
+		["SIGTERM", shutdown],
+		["beforeExit", shutdown],
+		["uncaughtException", onFatal("Uncaught exception")],
+		["unhandledRejection", onFatal("Unhandled rejection")],
+	];
+	for (const [event, handler] of listeners) {
+		process.on(event, handler as (...args: unknown[]) => void);
+	}
+	const removeProcessListeners = (): void => {
+		for (const [event, handler] of listeners) {
+			process.off(event, handler as (...args: unknown[]) => void);
+		}
+	};
 
 	const server = new McpServer({
 		name: "context-compress",
@@ -129,7 +150,15 @@ export async function createServer(config: Config) {
 	return {
 		/** Exposed so tests can attach an in-memory transport instead of stdio. */
 		server,
-		shutdown,
+		/**
+		 * Release every resource AND the process-level listeners. An embedder that
+		 * creates a server per test would otherwise accumulate handlers that call
+		 * process.exit(1) on any later async fault.
+		 */
+		shutdown() {
+			removeProcessListeners();
+			shutdown();
+		},
 		async start() {
 			const transport = new StdioServerTransport();
 			await server.connect(transport);

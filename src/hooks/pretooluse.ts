@@ -224,12 +224,55 @@ function respond(output: Record<string, unknown>): void {
 	process.exit(0);
 }
 
+/**
+ * Does this shell command invoke a download tool?
+ *
+ * Checks the first word of every command position (start of line, after a pipe,
+ * `&&`, `||`, `;`, or a subshell) and compares its basename, so a path-qualified
+ * or quoted invocation is recognized too.
+ */
+function isFetchCommand(command: string): boolean {
+	const FETCH_TOOLS = /^(curl|wget\d*|aria2c|httpie|http|xh)$/i;
+	// Wrappers that run the command that follows them. Skipping these catches
+	// `xargs curl` and `sudo curl` without scanning arbitrary words, which would
+	// flag `man curl` and `echo curl`.
+	const RUNNERS = /^(xargs|env|sudo|doas|nohup|time|command|nice|stdbuf|timeout)$/i;
+
+	const basenameOf = (word: string): string =>
+		word
+			.replace(/^["']|["']$/g, "")
+			.split(/[\\/]/)
+			.pop() ?? "";
+
+	// Split on command separators, then walk the leading words of each segment,
+	// skipping environment assignments (`FOO=1 curl …`), wrappers, and their flags.
+	for (const segment of command.split(/\||&&|\|\||;|\n|\$\(|`|\(/)) {
+		const words = segment.trim().split(/\s+/).filter(Boolean);
+		for (const word of words) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue; // env assignment
+			if (word.startsWith("-")) continue; // a wrapper's own flag
+			const basename = basenameOf(word);
+			if (FETCH_TOOLS.test(basename)) return true;
+			if (RUNNERS.test(basename)) continue; // keep looking past the wrapper
+			break; // an ordinary command: stop before its arguments
+		}
+	}
+	return false;
+}
+
 // ─── Bash: redirect data-fetching commands ───
 if (tool === "Bash") {
 	const command = String(toolInput.command ?? "");
 
-	// curl/wget → deny and redirect
-	if (blockCurl && /(^|\s|&&|\||;)(curl|wget)\s/i.test(command)) {
+	// curl/wget → deny and redirect.
+	//
+	// Match the command *basename* at any command position, not a bare token: the
+	// old pattern let `/usr/bin/curl`, `"curl"`, `$CURL`, and `wget2` straight
+	// through. This is a redirection nudge, not a security boundary — SECURITY.md
+	// documents that outbound networking is unrestricted, and a determined caller
+	// can still reach the network (for example through /dev/tcp). Its job is to
+	// catch the ordinary spellings an agent actually produces.
+	if (blockCurl && isFetchCommand(command)) {
 		respond({
 			permissionDecision: "deny",
 			permissionDecisionReason: `${TOOL_PREFIX}: curl/wget blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url, source) to fetch URLs, or mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox. Set CONTEXT_COMPRESS_BLOCK_CURL=0 to disable this.`,
@@ -296,6 +339,20 @@ if (tool === "Task" || tool === "Agent") {
 	const subagentType = String(toolInput.subagent_type ?? "");
 	const prompt = String(toolInput.prompt ?? "");
 
+	// Opt-out, matching every other behaviour in this hook.
+	if (process.env.CONTEXT_COMPRESS_ROUTE_SUBAGENTS === "0") {
+		process.exit(0);
+	}
+
+	// Agents whose tool set does not include the MCP tools must not be told that
+	// Read and Bash are forbidden and to call mcp__context-compress__* instead —
+	// that leaves them with no way to do their job at all. Only the general
+	// catch-all agents get the routing block.
+	const ROUTABLE_SUBAGENTS = new Set(["", "general-purpose", "Bash", "claude", "Explore", "Task"]);
+	if (!ROUTABLE_SUBAGENTS.has(subagentType)) {
+		process.exit(0);
+	}
+
 	const ROUTING_BLOCK = `
 
 ---
@@ -336,7 +393,17 @@ The parent agent context window is precious. Your full response gets injected in
 			? { ...toolInput, prompt: prompt + ROUTING_BLOCK, subagent_type: "general-purpose" }
 			: { ...toolInput, prompt: prompt + ROUTING_BLOCK };
 
-	respond({ updatedInput });
+	// Tell the PARENT what was appended. Rewriting a subagent's prompt without
+	// disclosure meant a caller who asked for a full per-file writeup got four
+	// bullets back and read that as "there was not much to report", rather than
+	// "my instruction was capped in transit".
+	const disclosure =
+		`${TOOL_PREFIX}: appended MCP routing guidance to this subagent prompt, including a 500-word` +
+		" response cap and a request to write artifacts to files rather than return them inline." +
+		(subagentType === "Bash" ? ' Also changed subagent_type "Bash" to "general-purpose".' : "") +
+		" Set CONTEXT_COMPRESS_ROUTE_SUBAGENTS=0 to disable.";
+
+	respond({ updatedInput, additionalContext: disclosure });
 }
 
 // Unknown tool — pass through

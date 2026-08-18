@@ -61,6 +61,8 @@ export interface ExecResult {
 
 export interface IndexResult {
 	sourceId: number;
+	/** Injection patterns detected in the indexed content, if any. */
+	injectionWarnings?: string[];
 	label: string;
 	totalChunks: number;
 	codeChunks: number;
@@ -89,6 +91,12 @@ export interface SearchHit {
 	snippet: string;
 	source: string;
 	score: number;
+	/**
+	 * Prompt-injection patterns detected in this hit's source at index time.
+	 * Stored with the source so every path that replays indexed content into the
+	 * model's context can label it — detection used to run on one path only.
+	 */
+	injectionWarnings?: string[];
 }
 
 export interface StoreStats {

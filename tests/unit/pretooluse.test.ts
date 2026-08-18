@@ -451,3 +451,62 @@ describe("pretooluse hook", () => {
 		assert.ok(!cmd.includes("--mode"), `should not include --mode, got: ${cmd}`);
 	});
 });
+
+describe("fetch-command detection (RPF-062)", () => {
+	it("catches path-qualified, quoted, and prefixed invocations", () => {
+		// The old token-boundary pattern let every one of these through.
+		const denied = [
+			"/usr/bin/curl https://x/",
+			'"curl" https://x/',
+			"FOO=1 curl https://x/",
+			"echo hi && /opt/homebrew/bin/curl https://x/",
+			"wget2 https://x/",
+			"aria2c https://x/",
+			"ls | xargs curl",
+		];
+		for (const command of denied) {
+			const out = runHook({ tool_name: "Bash", tool_input: { command } }, { CONTEXT_COMPRESS_BLOCK_CURL: "1" });
+			assert.match(out, /"deny"/, `should be denied: ${command}`);
+		}
+	});
+
+	it("does not fire on words that merely contain a tool name", () => {
+		for (const command of ["echo curling the data", "ls curl-results/", "git log --oneline"]) {
+			const out = runHook({ tool_name: "Bash", tool_input: { command } }, { CONTEXT_COMPRESS_BLOCK_CURL: "1" });
+			assert.doesNotMatch(out, /"deny"/, `should be allowed: ${command}`);
+		}
+	});
+});
+
+describe("subagent prompt rewrite (RPF-055)", () => {
+	it("discloses the rewrite to the parent agent", () => {
+		// The parent never saw that a 500-word cap had been appended, so a short
+		// answer read as the subagent's judgement rather than an injected limit.
+		const out = runHook({
+			tool_name: "Task",
+			tool_input: { subagent_type: "general-purpose", prompt: "Audit every file under src/auth" },
+		});
+		assert.match(out, /updatedInput/);
+		assert.match(out, /additionalContext/);
+		assert.match(out, /500-word/);
+		assert.match(out, /CONTEXT_COMPRESS_ROUTE_SUBAGENTS=0/);
+	});
+
+	it("leaves a subagent that cannot call the MCP tools alone", () => {
+		// Telling a Read/Edit-only agent that Read is FORBIDDEN and to use
+		// mcp__context-compress__* leaves it with no way to do its job.
+		const out = runHook({
+			tool_name: "Task",
+			tool_input: { subagent_type: "statusline-setup", prompt: "set up my status line" },
+		});
+		assert.doesNotMatch(out, /FORBIDDEN/);
+	});
+
+	it("can be turned off", () => {
+		const out = runHook(
+			{ tool_name: "Task", tool_input: { subagent_type: "general-purpose", prompt: "go" } },
+			{ CONTEXT_COMPRESS_ROUTE_SUBAGENTS: "0" },
+		);
+		assert.doesNotMatch(out, /FORBIDDEN/);
+	});
+});

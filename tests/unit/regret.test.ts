@@ -70,3 +70,33 @@ describe("observeAndAdjust", () => {
 		assert.ok(!summary.some((s) => s.fingerprint === "good cmd"), "no-regret fps are omitted");
 	});
 });
+
+describe("regret recovery", () => {
+	it("decays and lifts the downgrade once fast re-runs stop", () => {
+		// `regrets` was monotonic and the post-adjustment mode was stored, so a
+		// fingerprint that once tripped the threshold was pinned to balanced for
+		// good — and its counter froze, contradicting the module's own docstring.
+		const fp = "npm test";
+		const window = 60_000;
+		let now = 1_000_000;
+
+		// Three fast re-runs trip the downgrade.
+		for (let i = 0; i < 4; i++) {
+			const r = observeAndAdjust(fp, "aggressive", { path, now, windowMs: window });
+			if (i === 3) assert.strictEqual(r.mode, "balanced", "should be downgraded by now");
+			now += 1_000;
+		}
+
+		// Slow, healthy runs afterwards: the regret signal should wear off.
+		let recovered = false;
+		for (let i = 0; i < 8; i++) {
+			now += window * 2;
+			const r = observeAndAdjust(fp, "aggressive", { path, now, windowMs: window });
+			if (r.mode === "aggressive") {
+				recovered = true;
+				break;
+			}
+		}
+		assert.ok(recovered, "aggressive must become reachable again after the pattern stops");
+	});
+});

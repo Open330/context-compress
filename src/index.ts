@@ -1,8 +1,8 @@
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveProjectDir } from "./config.js";
 import { debug } from "./logger.js";
 import { createServer } from "./server.js";
 
-const config = loadConfig(process.env.CLAUDE_PROJECT_DIR);
+const config = loadConfig(resolveProjectDir());
 debug("Starting context-compress server");
 debug("Config:", JSON.stringify(config, null, 2));
 

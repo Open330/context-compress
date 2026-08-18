@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { resolveProjectDir } from "./config.js";
 import { debug } from "./logger.js";
 import { extractSnippet } from "./snippet.js";
 import type {
@@ -21,6 +22,7 @@ import type {
 	SearchResult,
 	StoreStats,
 } from "./types.js";
+import { detectInjectionPatterns } from "./utils.js";
 
 const MAX_VOCABULARY = 10_000;
 
@@ -189,6 +191,8 @@ function levenshtein(a: string, b: string, maxDist?: number): number {
 
 export class ContentStore {
 	private db: Database.Database;
+	/** 0 disables pruning. */
+	private maxSources = 0;
 	private ephemeralDir: string | null = null;
 	private hasTrigramTable = false;
 	private closed = false;
@@ -204,14 +208,17 @@ export class ContentStore {
 	// only the store-wide entry is invalidated.
 	private distinctiveTermsCache = new Map<number | "_all", string[]>();
 
-	constructor(options?: string | { dbPath?: string; persistDb?: boolean; dbDir?: string | null }) {
+	constructor(
+		options?:
+			| string
+			| { dbPath?: string; persistDb?: boolean; dbDir?: string | null; maxIndexedSources?: number },
+	) {
 		let path: string;
 		if (typeof options === "string") {
 			// Backward-compatible: accept a plain DB path string
 			path = options;
 		} else if (options?.persistDb || options?.dbDir) {
-			const dir =
-				options.dbDir ?? join(process.env.CLAUDE_PROJECT_DIR ?? process.cwd(), ".context-compress");
+			const dir = options.dbDir ?? join(resolveProjectDir(), ".context-compress");
 			mkdirSync(dir, { recursive: true });
 			path = join(dir, "store.db");
 			debug("Using persistent DB at", path);
@@ -224,6 +231,9 @@ export class ContentStore {
 				chmodSync(this.ephemeralDir, 0o700);
 				path = join(this.ephemeralDir, "store.db");
 			}
+		}
+		if (typeof options === "object" && options?.maxIndexedSources !== undefined) {
+			this.maxSources = options.maxIndexedSources;
 		}
 		this.db = new Database(path);
 		this.db.pragma("journal_mode = WAL");
@@ -238,7 +248,8 @@ export class ContentStore {
 				label TEXT NOT NULL,
 				chunk_count INTEGER NOT NULL DEFAULT 0,
 				code_chunk_count INTEGER NOT NULL DEFAULT 0,
-				indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+				indexed_at TEXT NOT NULL DEFAULT (datetime('now')),
+				injection_warnings TEXT NOT NULL DEFAULT ''
 			);
 
 			CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
@@ -254,6 +265,13 @@ export class ContentStore {
 			);
 		`);
 
+		// Older databases predate the column; adding it is idempotent-by-catch.
+		try {
+			this.db.exec("ALTER TABLE sources ADD COLUMN injection_warnings TEXT NOT NULL DEFAULT ''");
+		} catch {
+			// Already present.
+		}
+
 		this.hasTrigramTable =
 			this.db
 				.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_trigram'")
@@ -261,7 +279,7 @@ export class ContentStore {
 
 		// Cache prepared statements
 		this.insertSourceStmt = this.db.prepare(
-			"INSERT INTO sources (label, chunk_count, code_chunk_count) VALUES (?, ?, ?)",
+			"INSERT INTO sources (label, chunk_count, code_chunk_count, injection_warnings) VALUES (?, ?, ?, ?)",
 		);
 		this.insertChunkStmt = this.db.prepare(
 			"INSERT INTO chunks (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
@@ -318,6 +336,11 @@ export class ContentStore {
 		const isMarkdown =
 			HEADING_RE.test(content) || FENCE_BLOCK_RE.test(content) || HORIZONTAL_RULE_RE.test(content);
 		const chunks = boundChunkSize(isMarkdown ? chunkMarkdown(content) : chunkPlainText(content));
+		// Detect ONCE, here, so every replay path inherits the result. Running it
+		// only in fetch_and_index meant search, batch_execute, and the intent filter
+		// all replayed flagged content unlabelled, and `index` and command output
+		// were never scanned at all.
+		const injectionWarnings = detectInjectionPatterns(content);
 
 		const insertSource = this.insertSourceStmt;
 		const insertChunk = this.insertChunkStmt;
@@ -330,7 +353,7 @@ export class ContentStore {
 		let codeChunks = 0;
 
 		const tx = this.db.transaction(() => {
-			const sourceInfo = insertSource.run(label, chunks.length, 0);
+			const sourceInfo = insertSource.run(label, chunks.length, 0, injectionWarnings.join(", "));
 			const sourceId = sourceInfo.lastInsertRowid as number;
 
 			for (const chunk of chunks) {
@@ -353,6 +376,8 @@ export class ContentStore {
 
 		const sourceId = tx() as number;
 
+		this.pruneOldSources();
+
 		// Only the store-wide entry changes: indexing appends a NEW source, so an
 		// existing per-source result stays correct. Clearing everything meant
 		// batch_execute re-scanned for every command it had already looked up.
@@ -363,7 +388,39 @@ export class ContentStore {
 			label,
 			totalChunks: chunks.length,
 			codeChunks,
+			injectionWarnings: injectionWarnings.length > 0 ? injectionWarnings : undefined,
 		};
+	}
+
+	/**
+	 * Drop the oldest sources past the retention limit.
+	 *
+	 * Nothing ever deleted from this store, so a persistent project database
+	 * accumulated the full uncompressed output of every command in every session
+	 * forever — and both getDistinctiveTerms and the trigram table get slower as
+	 * it grows. Retention is opt-out (0) rather than absent.
+	 */
+	private pruneOldSources(): void {
+		if (this.maxSources <= 0) return;
+		const excess = this.db
+			.prepare("SELECT id FROM sources ORDER BY id DESC LIMIT -1 OFFSET ?")
+			.all(this.maxSources) as Array<{ id: number }>;
+		if (excess.length === 0) return;
+
+		const deleteChunks = this.db.prepare("DELETE FROM chunks WHERE source_id = ?");
+		const deleteTrigram = this.hasTrigramTable
+			? this.db.prepare("DELETE FROM chunks_trigram WHERE source_id = ?")
+			: null;
+		const deleteSource = this.db.prepare("DELETE FROM sources WHERE id = ?");
+		this.db.transaction(() => {
+			for (const { id } of excess) {
+				deleteChunks.run(id);
+				deleteTrigram?.run(id);
+				deleteSource.run(id);
+				this.distinctiveTermsCache.delete(id);
+			}
+		})();
+		debug(`Pruned ${excess.length} source(s) past the ${this.maxSources} retention limit`);
 	}
 
 	/**
@@ -440,6 +497,7 @@ export class ContentStore {
 				${table}.content,
 				${table}.content_type,
 				sources.label,
+				sources.injection_warnings,
 				bm25(${table}, 2.0, 1.0) AS rank,
 				highlight(${table}, 1, char(2), char(3)) AS highlighted
 			FROM ${table}
@@ -454,6 +512,7 @@ export class ContentStore {
 				title: string;
 				content: string;
 				label: string;
+				injection_warnings: string;
 				rank: number;
 				highlighted: string;
 			}>;
@@ -463,6 +522,9 @@ export class ContentStore {
 				snippet: extractSnippet(row.highlighted),
 				source: row.label,
 				score: Math.abs(row.rank),
+				injectionWarnings: row.injection_warnings
+					? row.injection_warnings.split(", ").filter(Boolean)
+					: undefined,
 			}));
 		} catch (e) {
 			debug(`FTS search error (${table}):`, e);

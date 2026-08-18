@@ -36,6 +36,8 @@ export interface Config {
 	persistDb: boolean;
 	/** Custom directory for the persistent DB (default: null, uses .context-compress/ in project dir) */
 	dbDir: string | null;
+	/** Max indexed sources retained; the oldest are pruned past this. 0 disables pruning. */
+	maxIndexedSources: number;
 }
 
 const DEFAULTS: Config = {
@@ -44,7 +46,12 @@ const DEFAULTS: Config = {
 	intentSearchThreshold: 5_000,
 	intentBudgetBytes: 1_800,
 	maxOutputBytes: 102_400,
-	hardCapBytes: 100 * 1024 * 1024,
+	// Measured peak RSS is ~9-10x the captured bytes (19MB -> 259MB, 38MB -> 446MB)
+	// because the post-capture pipeline holds several full copies, and
+	// batch_execute runs four of these at once. 100MB extrapolated to ~1GB per
+	// call and ~4GB per batch; 16MB keeps the worst case near 600MB and is still
+	// far above any output a caller can usefully read.
+	hardCapBytes: 16 * 1024 * 1024,
 	searchMaxBytes: 40_960,
 	batchMaxBytes: 81_920,
 	searchLimit: 3,
@@ -54,6 +61,7 @@ const DEFAULTS: Config = {
 	compressionLevel: "normal",
 	persistDb: false,
 	dbDir: null,
+	maxIndexedSources: 500,
 };
 
 /** Overrides applied per compression level */
@@ -93,6 +101,7 @@ const ConfigSchema = z.object({
 	compressionLevel: z.enum(["normal", "compact", "ultra"]).optional(),
 	persistDb: z.boolean().optional(),
 	dbDir: z.string().nullable().optional(),
+	maxIndexedSources: z.number().int().nonnegative().optional(),
 });
 
 function parseIntEnv(key: string): number | undefined {
@@ -237,6 +246,19 @@ function loadEnvConfig(): Partial<Config> {
 }
 
 let _config: Config | null = null;
+
+/**
+ * The project root, resolved the same way everywhere.
+ *
+ * Three call sites disagreed: the server used `CLAUDE_PROJECT_DIR ?? cwd`,
+ * src/index.ts passed only `CLAUDE_PROJECT_DIR` (so a client that does not set
+ * it never read the project config), and the CLI passed nothing at all — while
+ * the store still put a persistent DB under `cwd`, i.e. inside a directory whose
+ * config had been refused.
+ */
+export function resolveProjectDir(): string {
+	return process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+}
 
 export function loadConfig(projectDir?: string): Config {
 	if (_config) return _config;

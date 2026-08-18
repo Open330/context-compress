@@ -52,6 +52,18 @@ const NON_GLOBAL_IPV6_RANGES: IpRange[] = [
 ];
 
 /**
+ * RFC 3056 6to4: 2002::/16 embeds the IPv4 destination in bytes 2-5, so
+ * 2002:7f00:1::1 routes to 127.0.0.1 through any 6to4 relay on the host.
+ */
+const SIX_TO_FOUR_PREFIX: IpRange = { bytes: [0x20, 0x02], prefixLength: 16 };
+/**
+ * RFC 4380 Teredo: 2001:0::/32 carries the *server* IPv4 in bytes 4-7. The
+ * client address in the low bytes is obfuscated, so the server address is what
+ * a resolver would actually reach.
+ */
+const TEREDO_PREFIX: IpRange = { bytes: [0x20, 0x01, 0x00, 0x00], prefixLength: 32 };
+
+/**
  * RFC 6052 well-known NAT64 prefix. An address in `64:ff9b::/96` is not a
  * destination in its own right: a NAT64 gateway forwards it to the IPv4 address
  * embedded in the low 32 bits, so `64:ff9b::7f00:1` reaches 127.0.0.1. The
@@ -154,6 +166,14 @@ function isNonGlobalIp(ip: IpLiteral): boolean {
 	// through as "global".
 	if (isIpv4Mapped || matchesRange(ip.bytes, NAT64_WELL_KNOWN_PREFIX)) {
 		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(12), range));
+	}
+	// Transition formats that tunnel to an embedded IPv4 destination: check the
+	// address they actually reach, not the IPv6 wrapper.
+	if (matchesRange(ip.bytes, SIX_TO_FOUR_PREFIX)) {
+		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(2, 6), range));
+	}
+	if (matchesRange(ip.bytes, TEREDO_PREFIX)) {
+		return NON_GLOBAL_IPV4_RANGES.some((range) => matchesRange(ip.bytes.slice(4, 8), range));
 	}
 
 	return NON_GLOBAL_IPV6_RANGES.some((range) => matchesRange(ip.bytes, range));

@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolveProjectDir } from "../config.js";
 import { deduplicateLines, groupErrorLines, stripAnsi, stripProgressLines } from "../executor.js";
 import {
 	applyCommandFilter,
@@ -278,7 +278,8 @@ export async function runWrap(
 		if (stream) {
 			runStreaming(proc, resolve);
 		} else {
-			const captureCapBytes = options.captureCapBytes ?? loadConfig().hardCapBytes;
+			const captureCapBytes =
+				options.captureCapBytes ?? loadConfig(resolveProjectDir()).hardCapBytes;
 			runBuffered(proc, cmdLine, mode, captureCapBytes, resolve);
 		}
 	});

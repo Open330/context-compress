@@ -365,20 +365,44 @@ Without context-compress, 12 operations consume **133% of the 200K context windo
 
 ## Configuration
 
-The MCP server loads its settings in this order: **ENV vars** →
-**`.context-compress.json`** → **defaults**. The standalone PreToolUse hook does
-not load that file; hook controls are environment-only.
+The MCP server loads its settings in this order: **ENV vars** → project
+**`.context-compress.json`** → home **`.context-compress.json`** → **defaults**.
+The standalone PreToolUse hook does not load that file; hook controls are
+environment-only.
 
 ### Server Environment Variables
 
-```bash
-# Enable debug logging (stderr)
-CONTEXT_COMPRESS_DEBUG=1
+Every server setting has an environment override. All of them are optional.
 
-# Pass specific env vars to subprocesses (default: none)
-CONTEXT_COMPRESS_PASSTHROUGH_ENV=GH_TOKEN,AWS_PROFILE
+| Variable | Default | What it does |
+|:--|:--|:--|
+| `CONTEXT_COMPRESS_DEBUG` | `0` | Log to stderr, including otherwise-silent catch blocks |
+| `CONTEXT_COMPRESS_PASSTHROUGH_ENV` | *(none)* | Comma-separated env vars copied into subprocesses |
+| `CONTEXT_COMPRESS_LEVEL` | `normal` | `normal` \| `compact` \| `ultra` — scales every budget below |
+| `CONTEXT_COMPRESS_MAX_OUTPUT_BYTES` | `102400` | Max bytes returned to the caller per execution |
+| `CONTEXT_COMPRESS_HARD_CAP_BYTES` | `16777216` | Capture ceiling; the process is killed past it |
+| `CONTEXT_COMPRESS_SEARCH_MAX_BYTES` | `40960` | Byte budget for a whole `search` response |
+| `CONTEXT_COMPRESS_BATCH_MAX_BYTES` | `81920` | Byte budget for a whole `batch_execute` response |
+| `CONTEXT_COMPRESS_SEARCH_LIMIT` | `3` | Results per query |
+| `CONTEXT_COMPRESS_SEARCH_WINDOW_MS` | `60000` | Throttling window |
+| `CONTEXT_COMPRESS_SEARCH_REDUCE_AFTER` | `3` | Calls in the window before results are reduced to 1 |
+| `CONTEXT_COMPRESS_SEARCH_BLOCK_AFTER` | `8` | Calls in the window before `search` is refused |
+| `CONTEXT_COMPRESS_INTENT_SEARCH_THRESHOLD` | `5000` | Output size above which `intent` triggers indexing |
+| `CONTEXT_COMPRESS_INTENT_BUDGET_BYTES` | `1800` | Byte budget for content inlined into an intent summary |
+| `CONTEXT_COMPRESS_PERSIST_DB` | `0` | Keep the knowledge base across restarts — see below |
+| `CONTEXT_COMPRESS_DB_DIR` | *(none)* | Where the persistent database lives; implies persistence |
+| `CONTEXT_COMPRESS_MODE` | `balanced` | Default compression mode for `filter`/`wrap` |
 
-```
+### The knowledge base is ephemeral by default
+
+`persistDb` defaults to **false**: the database lives in a private temporary
+directory and is deleted when the MCP server exits. Indexed content is
+searchable for the life of that server process, not across restarts.
+
+To keep it, set `CONTEXT_COMPRESS_PERSIST_DB=1` (or `dbDir`), which stores it
+under `.context-compress/` in your project. A persistent store retains the most
+recent `maxIndexedSources` (default 500) and prunes older ones, so it does not
+grow without bound.
 
 ### Config File
 
@@ -391,6 +415,14 @@ Create `.context-compress.json` in your project root or home directory:
   "maxOutputBytes": 102400
 }
 ```
+
+**A project file may not set security-relevant keys.** `passthroughEnvVars`,
+`persistDb`, `dbDir`, and `hardCapBytes` are honored only from your home file or
+the environment. A project file travels with the repository, so an untrusted
+clone could otherwise name your credentials in `passthroughEnvVars` and have
+them copied into every subprocess — including a `postinstall` script. Those keys
+are ignored with a warning on stderr when they appear in a project file; every
+other key layers over your home settings normally.
 
 Hook-only keys such as `blockCurl`, `blockWebFetch`, `nudgeOnRead`, and
 `nudgeOnGrep` are not part of the JSON-file schema.
@@ -416,7 +448,15 @@ CONTEXT_COMPRESS_MODE=balanced
 
 # Override the context-compress binary used by the hook
 CONTEXT_COMPRESS_BIN=/usr/local/bin/context-compress
+
+# Stop appending MCP routing guidance to Task/Agent subagent prompts
+CONTEXT_COMPRESS_ROUTE_SUBAGENTS=0
 ```
+
+When the hook rewrites a subagent prompt it now tells the parent agent what it
+appended, so a capped or redirected response is never mistaken for the
+subagent's own judgement. Agents whose tool set does not include the MCP tools
+are left alone.
 
 `CONTEXT_COMPRESS_MODE` also configures direct CLI `wrap`/`filter` calls. Auto
 mode prefers the Anthropic API when `ANTHROPIC_API_KEY` is set in your shell or

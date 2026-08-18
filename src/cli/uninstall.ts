@@ -103,19 +103,24 @@ export async function uninstall(): Promise<void> {
 		);
 	}
 
-	// Also check project-level .mcp.json
+	// Project-level .mcp.json in the CURRENT directory.
+	//
+	// This edits whatever directory the command happens to run in, which is a
+	// surprise: running `uninstall` from an unrelated checkout rewrote that
+	// project's config with no mention of the file. It is now reported by path
+	// before writing, and skipped entirely unless the entry is actually ours.
 	try {
-		const cwd = process.cwd();
-		const mcpJson = resolve(cwd, ".mcp.json");
+		const mcpJson = resolve(process.cwd(), ".mcp.json");
 		const mcp = JSON.parse(readFileSync(mcpJson, "utf-8"));
 		const servers = mcp.mcpServers as Record<string, unknown> | undefined;
 		if (servers && "context-compress" in servers) {
 			delete servers["context-compress"];
+			copyFileSync(mcpJson, `${mcpJson}.bak`);
 			writeFileSync(mcpJson, `${JSON.stringify(mcp, null, 2)}\n`, "utf-8");
-			changes.push("Removed context-compress from .mcp.json");
+			changes.push(`Removed context-compress from ${mcpJson} (backup: ${mcpJson}.bak)`);
 		}
 	} catch {
-		// May not exist
+		// May not exist, or is not ours to touch.
 	}
 
 	// 3. Clean leftover temp directories.
