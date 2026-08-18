@@ -95,6 +95,12 @@ export async function createServer(config: Config) {
 	// installed meant an embedding process — notably the test runner, which calls
 	// createServer twice per file — inherited handlers that call process.exit(1),
 	// so one async fault truncated the whole run with no diagnostic.
+	const onSignal = (label: string) => () => {
+		debug(`Received ${label}, shutting down`);
+		removeProcessListeners();
+		shutdown();
+		process.exit(0);
+	};
 	const onFatal = (label: string) => (err: unknown) => {
 		debug(`${label}:`, err);
 		shutdown();
@@ -106,8 +112,11 @@ export async function createServer(config: Config) {
 			(...args: never[]) => void,
 		]
 	> = [
-		["SIGINT", shutdown],
-		["SIGTERM", shutdown],
+		// A signal must actually terminate. Running shutdown() alone closed the
+		// store and left the process alive, so every later tool call answered
+		// "The database connection is not open" until the client sent SIGKILL.
+		["SIGINT", onSignal("SIGINT")],
+		["SIGTERM", onSignal("SIGTERM")],
 		["beforeExit", shutdown],
 		["uncaughtException", onFatal("Uncaught exception")],
 		["unhandledRejection", onFatal("Unhandled rejection")],
@@ -115,11 +124,11 @@ export async function createServer(config: Config) {
 	for (const [event, handler] of listeners) {
 		process.on(event, handler as (...args: unknown[]) => void);
 	}
-	const removeProcessListeners = (): void => {
+	function removeProcessListeners(): void {
 		for (const [event, handler] of listeners) {
 			process.off(event, handler as (...args: unknown[]) => void);
 		}
-	};
+	}
 
 	const server = new McpServer({
 		name: "context-compress",

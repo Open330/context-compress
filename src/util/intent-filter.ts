@@ -1,5 +1,5 @@
 import type { Config } from "../config.js";
-import { extractErrorLines } from "../format-filter.js";
+import { countErrorLines } from "../format-filter.js";
 import type { SessionTracker } from "../stats.js";
 import type { ContentStore } from "../store.js";
 import type { SearchHit } from "../types.js";
@@ -51,15 +51,17 @@ export function createIntentFilter(deps: IntentFilterDeps) {
 			sourceIds: [indexed.sourceId],
 		});
 		const terms = store.getDistinctiveTerms(indexed.sourceId);
-		const errorLines = extractErrorLines(output);
+		const errors = countErrorLines(output);
 
 		let filtered = `Indexed ${indexed.totalChunks} sections from ${sourceLabel}.\n`;
 		filtered += `${searchResults.results.length} sections matched "${intent}":\n\n`;
 		filtered += renderHits(searchResults.results, config.intentBudgetBytes);
 
-		if (errorLines.length > 0) {
-			filtered += `\n⚠ ${errorLines.length} error/warning line(s) in output:\n`;
-			filtered += errorLines.map((l) => `  ${l}`).join("\n");
+		if (errors.lines.length > 0) {
+			const shown =
+				errors.total > errors.lines.length ? ` (showing first ${errors.lines.length})` : "";
+			filtered += `\n⚠ ${errors.total} error/warning line(s) in output${shown}:\n`;
+			filtered += errors.lines.map((l) => `  ${l}`).join("\n");
 			filtered += "\n";
 		}
 		if (terms.length > 0 && config.compressionLevel !== "ultra") {

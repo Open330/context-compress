@@ -23,10 +23,11 @@
  * command fingerprint the auto-mode cache uses, so it persists across sessions.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { FilterMode } from "../filters.js";
+import { writeJsonAtomic } from "./atomic-json.js";
 
 const DEFAULT_PATH = join(homedir(), ".context-compress", "regret.json");
 const RERUN_WINDOW_MS = 30_000;
@@ -79,8 +80,7 @@ function load(path: string): RegretMap {
 
 function save(path: string, map: RegretMap): void {
 	try {
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, JSON.stringify(map, null, 2));
+		writeJsonAtomic(path, map);
 	} catch {
 		/* best-effort */
 	}

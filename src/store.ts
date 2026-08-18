@@ -25,6 +25,8 @@ import type {
 import { detectInjectionPatterns } from "./utils.js";
 
 const MAX_VOCABULARY = 10_000;
+/** Prune only once the overshoot reaches this, to amortize the FTS5 scans. */
+const PRUNE_BATCH = 25;
 
 const STOPWORDS = new Set([
 	"the",
@@ -265,11 +267,13 @@ export class ContentStore {
 			);
 		`);
 
-		// Older databases predate the column; adding it is idempotent-by-catch.
-		try {
+		// Older databases predate the column. Add it only when it is genuinely
+		// missing: a bare catch also swallowed SQLITE_BUSY from a concurrent
+		// opener, after which prepare() failed and the server silently fell back
+		// to an in-memory store for the whole session.
+		const columns = this.db.prepare("PRAGMA table_info(sources)").all() as Array<{ name: string }>;
+		if (!columns.some((column) => column.name === "injection_warnings")) {
 			this.db.exec("ALTER TABLE sources ADD COLUMN injection_warnings TEXT NOT NULL DEFAULT ''");
-		} catch {
-			// Already present.
 		}
 
 		this.hasTrigramTable =
@@ -288,9 +292,24 @@ export class ContentStore {
 		this.vocabInsertStmt = this.db.prepare("INSERT OR IGNORE INTO vocabulary (word) VALUES (?)");
 	}
 
+	/**
+	 * Re-read whether the trigram table exists rather than trusting the flag
+	 * captured at construction. Another process on the same persistent database
+	 * can create it at any time; a stale `false` skipped this connection's
+	 * trigram writes and then re-backfilled the whole corpus, doubling it.
+	 */
+	private trigramTableExists(): boolean {
+		if (this.hasTrigramTable) return true;
+		this.hasTrigramTable =
+			this.db
+				.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_trigram'")
+				.get() !== undefined;
+		return this.hasTrigramTable;
+	}
+
 	/** Lazily create trigram table only when porter search returns 0 results */
 	private ensureTrigramTable(): void {
-		if (this.hasTrigramTable) return;
+		if (this.trigramTableExists()) return;
 		debug("Creating trigram FTS5 table (lazy)");
 
 		this.db.exec(`
@@ -344,7 +363,7 @@ export class ContentStore {
 
 		const insertSource = this.insertSourceStmt;
 		const insertChunk = this.insertChunkStmt;
-		const insertTrigram = this.hasTrigramTable
+		const insertTrigram = this.trigramTableExists()
 			? this.db.prepare(
 					"INSERT INTO chunks_trigram (title, content, source_id, content_type) VALUES (?, ?, ?, ?)",
 				)
@@ -402,13 +421,20 @@ export class ContentStore {
 	 */
 	private pruneOldSources(): void {
 		if (this.maxSources <= 0) return;
+
+		// Prune in batches. `source_id` is UNINDEXED, so each DELETE is a full
+		// virtual-table scan; running one per index() once the limit was reached
+		// cost 19.5ms -> 83.5ms per index on a 500-source store. Letting a bounded
+		// overshoot accumulate amortizes those scans, while a small configured
+		// limit still prunes promptly.
+		const batch = Math.max(1, Math.min(PRUNE_BATCH, Math.floor(this.maxSources / 10)));
 		const excess = this.db
 			.prepare("SELECT id FROM sources ORDER BY id DESC LIMIT -1 OFFSET ?")
 			.all(this.maxSources) as Array<{ id: number }>;
-		if (excess.length === 0) return;
+		if (excess.length < batch) return;
 
 		const deleteChunks = this.db.prepare("DELETE FROM chunks WHERE source_id = ?");
-		const deleteTrigram = this.hasTrigramTable
+		const deleteTrigram = this.trigramTableExists()
 			? this.db.prepare("DELETE FROM chunks_trigram WHERE source_id = ?")
 			: null;
 		const deleteSource = this.db.prepare("DELETE FROM sources WHERE id = ?");
@@ -420,7 +446,44 @@ export class ContentStore {
 				this.distinctiveTermsCache.delete(id);
 			}
 		})();
+		this.pruneVocabulary();
 		debug(`Pruned ${excess.length} source(s) past the ${this.maxSources} retention limit`);
+	}
+
+	/**
+	 * Drop vocabulary words that no surviving chunk still contains.
+	 *
+	 * The table is capped at MAX_VOCABULARY and was never pruned, so it became a
+	 * one-way first-come set: measured, it saturated after 83 indexed sources —
+	 * inside a single busy session — and from then on nothing new was learned.
+	 * Layer 3 of search (fuzzy correction) was silently dead for every source
+	 * indexed afterwards.
+	 */
+	private pruneVocabulary(): void {
+		const count = (this.vocabCountStmt.get() as { cnt: number }).cnt;
+		// Only worth the scan once the table is near its ceiling.
+		if (count < MAX_VOCABULARY * 0.9) return;
+
+		const rows = this.db.prepare("SELECT content FROM chunks LIMIT 5000").all() as Array<{
+			content: string;
+		}>;
+		const live = new Set<string>();
+		for (const row of rows) {
+			for (const word of row.content.split(WORD_SPLIT_RE)) {
+				if (word.length >= 3) live.add(word.toLowerCase());
+			}
+		}
+		if (live.size === 0) return;
+
+		const words = this.db.prepare("SELECT word FROM vocabulary").all() as Array<{ word: string }>;
+		const stale = words.filter((row) => !live.has(row.word.toLowerCase()));
+		if (stale.length === 0) return;
+
+		const remove = this.db.prepare("DELETE FROM vocabulary WHERE word = ?");
+		this.db.transaction(() => {
+			for (const { word } of stale) remove.run(word);
+		})();
+		debug(`Pruned ${stale.length} stale vocabulary word(s)`);
 	}
 
 	/**

@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { CumulativeStats, SessionStats } from "./types.js";
+import { writeJsonAtomic } from "./util/atomic-json.js";
 import { regretSummary } from "./util/regret.js";
 import { formatBytes } from "./utils.js";
 
@@ -128,7 +129,7 @@ export class SessionTracker {
 		}
 
 		try {
-			writeFileSync(this.cumulativeFile, JSON.stringify(cumulative, null, 2));
+			writeJsonAtomic(this.cumulativeFile, cumulative);
 			this.savedKeptOut = keptOut;
 			this.savedReturned = totalReturned;
 			for (const [name, count] of Object.entries(snap.calls)) {

@@ -152,16 +152,26 @@ const KEEP_VERBATIM = ERROR_LINE;
  * Used as a safety net so the most task-critical lines survive any summary.
  */
 export function extractErrorLines(text: string, max = 5): string[] {
-	const out: string[] = [];
+	return countErrorLines(text, max).lines;
+}
+
+/**
+ * Distinct error/warning lines plus how many there are in total.
+ *
+ * Callers rendered `lines.length` as a statement about the document, so a run
+ * with 40 distinct errors was reported as "5 error/warning line(s) in output"
+ * and the caller fixed five and moved on.
+ */
+export function countErrorLines(text: string, max = 5): { lines: string[]; total: number } {
+	const lines: string[] = [];
 	const seen = new Set<string>();
 	for (const line of text.split("\n")) {
 		const t = line.trim();
 		if (!t || !ERROR_LINE.test(t) || seen.has(t)) continue;
 		seen.add(t);
-		out.push(t);
-		if (out.length >= max) break;
+		if (lines.length < max) lines.push(t);
 	}
-	return out;
+	return { lines, total: seen.size };
 }
 
 /**

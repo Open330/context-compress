@@ -12,10 +12,11 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { FilterMode } from "../filters.js";
+import { writeJsonAtomic } from "./atomic-json.js";
 import { observeAndAdjust } from "./regret.js";
 
 interface CacheEntry {
@@ -57,8 +58,7 @@ function loadCache(): CacheMap {
 
 function saveCache(cache: CacheMap): void {
 	try {
-		mkdirSync(dirname(CACHE_PATH), { recursive: true });
-		writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2));
+		writeJsonAtomic(CACHE_PATH, cache);
 	} catch {
 		/* ignore — cache is best-effort */
 	}

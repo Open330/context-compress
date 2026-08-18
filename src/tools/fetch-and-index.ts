@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isPrivateHost, resolveAndValidate } from "../network.js";
 import type { ExecResult } from "../types.js";
+import { truncateToBytes } from "../util/byte-budget.js";
 import { buildFetchCode } from "../util/fetch-code.js";
 import { detectInjectionPatterns } from "../utils.js";
 import type { ToolContext } from "./context.js";
@@ -103,12 +104,12 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 			const indexed = store.index(markdown, label);
 			tracker.trackIndexed(Buffer.byteLength(markdown));
 
-			const preview = responseMarkdown.slice(0, 3072);
+			const preview = truncateToBytes(responseMarkdown, 3072);
 			const terms = store.getDistinctiveTerms(indexed.sourceId);
 
 			let output = `Indexed "${label}": ${indexed.totalChunks} chunks.\n\n`;
 			output += `**Preview:**\n${preview}`;
-			if (responseMarkdown.length > 3072) output += "\n…(truncated)";
+			if (Buffer.byteLength(responseMarkdown) > 3072) output += "\n…(truncated)";
 			if (terms.length > 0) {
 				output += `\n\nSearchable terms: ${terms.join(", ")}`;
 			}

@@ -1,8 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { byteLength, truncateToBytes } from "../util/byte-budget.js";
 import type { ToolContext } from "./context.js";
 
 export function registerDiscoverTool(server: McpServer, ctx: ToolContext): void {
-	const { store, tracker, dbFallback } = ctx;
+	const { store, tracker, dbFallback, config } = ctx;
 
 	server.registerTool(
 		"discover",
@@ -95,8 +96,12 @@ export function registerDiscoverTool(server: McpServer, ctx: ToolContext): void 
 				);
 			}
 
-			const output = lines.join("\n");
-			tracker.trackCall("discover", Buffer.byteLength(output));
+			let output = lines.join("\n");
+			// Every other content-rendering tool budgets its response; this one grew
+			// with the number of indexed sources (measured 47KB at 500) and with a
+			// caller-supplied source label.
+			output = truncateToBytes(output, config.searchMaxBytes);
+			tracker.trackCall("discover", byteLength(output));
 			return { content: [{ type: "text" as const, text: output }] };
 		},
 	);
