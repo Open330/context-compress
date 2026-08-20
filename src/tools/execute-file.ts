@@ -116,8 +116,12 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 				// byte `npm test` rollup with no PASS lines came back as 2,798 bytes
 				// with 45 of them. The exception is an empty response: there is nothing
 				// to preserve, and the summary is the only account of what was indexed.
-				const worthSwapping =
-					Buffer.byteLength(filtered) < Buffer.byteLength(output) || output.trim() === "";
+				// Measured against the whole response, stderr included. Testing `output`
+				// alone treated a failing command that writes only to stderr as having
+				// no response to preserve, so the summary replaced a 1,897-byte answer
+				// carrying every error line with 12,028 bytes carrying none of them.
+				const currentBytes = Buffer.byteLength(output) + Buffer.byteLength(stderrBlock);
+				const worthSwapping = Buffer.byteLength(filtered) < currentBytes || currentBytes === 0;
 				if (filtered !== indexableOutput && worthSwapping) {
 					output = filtered;
 					// The corpus the summary was built from already contains stderr.

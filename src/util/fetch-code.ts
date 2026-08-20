@@ -88,7 +88,26 @@ for await (const chunk of resp) {
 // fetch, which the executor patches; a raw http.get is invisible to it, so
 // report the transferred size explicitly.
 if (typeof __cm_net === "number") __cm_net += bodyBytes;
-const html = Buffer.concat(__chunks).toString("utf8");`;
+const __body = Buffer.concat(__chunks);
+// Decoding every page as UTF-8 turned any other encoding into replacement
+// characters — permanently, because the corrupted text is what gets indexed and
+// returned. Honour the Content-Type charset, then a <meta charset> in the head,
+// and fall back to UTF-8. Node ships full ICU, so TextDecoder handles the
+// legacy encodings without a new dependency.
+let __enc = "utf-8";
+const __ctMatch = /charset=["']?([\\w-]+)/i.exec(String(resp.headers["content-type"] || ""));
+if (__ctMatch) {
+    __enc = __ctMatch[1].toLowerCase();
+} else {
+    const __meta = /<meta[^>]+charset=["']?([\\w-]+)/i.exec(__body.subarray(0, 4096).toString("latin1"));
+    if (__meta) __enc = __meta[1].toLowerCase();
+}
+let html;
+try {
+    html = new TextDecoder(__enc).decode(__body);
+} catch {
+    html = __body.toString("utf8");
+}`;
 
 	return `${fetchSetup}\n${htmlToMarkdownSnippet()}`;
 }

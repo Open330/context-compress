@@ -308,14 +308,52 @@ function smartTruncate(output: string, maxBytes: number): string {
 	// and that a single huge line can never return nothing. Nothing is lost
 	// either way: the executor indexes `indexableStdout` before truncation, so
 	// `search` still reaches the full text.
-	if (headBytes + tailBytes < budget / 2 && tailStart > headEnd) {
+	// Sample only when a line was dropped because it was too LARGE to admit, not
+	// because there were too many. Ordinary truncation already shows both ends and
+	// says how much it cut; adding a middle sample to every truncated response
+	// would cost up to an eighth of the budget for nothing. Gating on the retained
+	// ratio instead was wrong in the other direction: 5,000 short lines followed by
+	// a 2MB line filled the budget, the branch never fired, and the verdict at the
+	// end of that line was absent from every response.
+	let oversizeDropped = 0;
+	for (let i = headEnd; i < tailStart; i++) {
+		const size = Buffer.byteLength(lines[i]);
+		if (size > oversizeDropped) oversizeDropped = size;
+	}
+	if (oversizeDropped > Math.max(headTarget, tailTarget) && tailStart > headEnd) {
 		const open = "... [sample of the truncated region] ...\n";
+		const middle = "\n... [sample skips ahead] ...\n";
 		const close = "\n... [sample ends] ...\n";
-		const overhead = Buffer.byteLength(open) + Buffer.byteLength(close);
+		const overhead =
+			Buffer.byteLength(open) + Buffer.byteLength(middle) + Buffer.byteLength(close);
 		const room = maxBytes - Buffer.byteLength(result) - overhead;
-		const cap = Math.min(room, Math.max(2048, Math.floor(budget / 8)));
+		// The sample may be as large as the content that legitimately fit, so it can
+		// never crowd out real lines; never more than an eighth of the budget; and
+		// never less than 2KB, or one huge line would return nothing again. Sizing it
+		// off the budget alone was the same mistake in a smaller costume: on a build
+		// log with 919 bytes of useful lines it still returned 12,780 bytes of base64,
+		// 93.3% of the response, where the rejected byte-slice returned 99.0%.
+		//
+		// Filling the rest of the budget is deliberately NOT a goal. A line too large
+		// to admit is low-information-density by construction, the marker states how
+		// many bytes were dropped, and the executor indexes the full text before
+		// truncating, so `search` still reaches it. Believing the budget had to be
+		// spent is what produced the dilution in the first place.
+		const cap = Math.min(room, Math.max(2048, Math.min(Math.floor(budget / 8), headBytes + tailBytes)));
 		if (cap > 0) {
-			const sample = sliceUtf8(lines.slice(headEnd, tailStart).join("\n"), cap);
+			const dropped = lines.slice(headEnd, tailStart).join("\n");
+			// Both ends, not just the head: a build's verdict is the last thing it
+			// writes, and when the oversized line IS the tail, sampling its head alone
+			// dropped `END-OF-BUILD-VERDICT` from every response.
+			const half = Math.max(1, Math.floor(cap / 2));
+			const front = sliceUtf8(dropped, half);
+			const backRaw = Buffer.from(dropped, "utf8");
+			const backSlice = backRaw.subarray(Math.max(0, backRaw.length - half));
+			let cut = 0;
+			while (cut < backSlice.length && (backSlice[cut] & 0xc0) === 0x80) cut++;
+			const back = backSlice.subarray(cut).toString("utf8");
+			const sample =
+				Buffer.byteLength(dropped) <= cap ? dropped : `${front}${middle}${back}`;
 			if (sample) result = headText + separator + open + sample + close + tailText;
 		}
 	}

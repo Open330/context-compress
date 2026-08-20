@@ -105,7 +105,11 @@ describe("buildFetchCode", () => {
 	it("counts raw bytes, not decoded characters, against the body cap", () => {
 		const code = buildFetchCode("https://example.com");
 		assert.ok(!code.includes('setEncoding("utf8")'), "must stay on Buffers to count bytes");
-		assert.ok(code.includes('Buffer.concat(__chunks).toString("utf8")'));
+		// The body is assembled as a Buffer and decoded once, after the cap check.
+		// The decoder itself is charset-driven now, so this asserts the contract
+		// (raw bytes counted, one decode at the end) rather than one expression.
+		assert.ok(code.includes("Buffer.concat(__chunks)"), "the body must be concatenated as bytes");
+		assert.ok(code.includes("bodyBytes += chunk.length"), "the cap must count raw bytes");
 	});
 
 	it("uses node:https for https URLs and node:http for http", () => {

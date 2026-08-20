@@ -219,12 +219,41 @@ describe("truncation neither collapses nor dilutes", () => {
 			assert.ok(out.includes(line), `dropped a line that fit: ${line}`);
 		}
 		const blobBytes = (out.match(/QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph/g) ?? []).length * 36;
+		// Tied to the retained lines, not to the budget. An earlier version of this
+		// assertion allowed a quarter of the budget while the code capped at an
+		// eighth, so it passed a response that was still 93.3% blob — the assertion
+		// has to be at least as strict as the contract, or it certifies drift.
+		const usefulBytes = [...head, ...tail].reduce((n, l) => n + Buffer.byteLength(l) + 1, 0);
 		assert.ok(
-			blobBytes <= 102_400 / 4,
-			`the sample crowded out the response: ${blobBytes} of ${Buffer.byteLength(out)} bytes`,
+			blobBytes <= Math.max(2048, usefulBytes),
+			`the sample crowded out the response: ${blobBytes} blob bytes vs ${usefulBytes} useful`,
 		);
 		// ...but it must not be zero either, or this is the collapse defect again.
 		assert.ok(blobBytes > 0, "the oversized line was dropped without a sample");
+	});
+
+	it("samples both ends of an oversized line, so a trailing verdict survives", () => {
+		// A build's verdict is the last thing it writes. When the oversized line IS
+		// the tail and short lines have already filled the budget, sampling its head
+		// alone — or not sampling at all — dropped the answer from every response.
+		const shorts = Array.from({ length: 5_000 }, (_, i) => `line ${i} ordinary build output`);
+		const lastLine = `${"Z".repeat(2 * 1024 * 1024)} END-OF-BUILD-VERDICT`;
+		const out = smartTruncate(`${shorts.join("\n")}\n${lastLine}\n`, 102_400);
+
+		assert.ok(Buffer.byteLength(out) <= 102_400, "budget exceeded");
+		assert.ok(out.includes("END-OF-BUILD-VERDICT"), "the verdict at the end of the line was lost");
+		assert.ok(out.includes("line 0 ordinary"), "the ordinary head lines were lost");
+	});
+
+	it("does not sample when lines were dropped for quantity rather than size", () => {
+		// Ordinary truncation already shows both ends and says how much it cut.
+		// Sampling there would cost up to an eighth of the budget for nothing.
+		const out = smartTruncate(
+			`${Array.from({ length: 50_000 }, (_, i) => `line ${i} of an ordinary long log`).join("\n")}\n`,
+			102_400,
+		);
+		assert.ok(!out.includes("sample of the truncated region"), "sampled an ordinary long log");
+		assert.ok(Buffer.byteLength(out) <= 102_400, "budget exceeded");
 	});
 
 	it("never returns more than the budget, even below the marker's own size", () => {

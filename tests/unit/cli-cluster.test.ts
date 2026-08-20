@@ -145,6 +145,11 @@ describe("cleanupStaleDbs", () => {
 
 		writeFileSync(join(stale, "store.db"), "x");
 		const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+		// Age the CONTENTS too. A directory's mtime changes only when an entry is
+		// added or removed, which sqlite writes never do, so age is now taken from
+		// the newest file inside — otherwise a busy peer server's store looked
+		// abandoned after an hour and was deleted out from under it.
+		utimesSync(join(stale, "store.db"), old, old);
 		utimesSync(stale, old, old);
 		utimesSync(staleExec, old, old);
 

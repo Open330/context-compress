@@ -3,6 +3,7 @@ import { countErrorLines } from "../format-filter.js";
 import type { SessionTracker } from "../stats.js";
 import type { ContentStore } from "../store.js";
 import type { SearchHit } from "../types.js";
+import { truncateToBytes } from "./byte-budget.js";
 import { compactLabel } from "./label.js";
 
 interface IntentFilterDeps {
@@ -102,8 +103,11 @@ function renderHits(hits: SearchHit[], budget: number): string {
 /** Trim a snippet to at most `max` bytes, marking truncation. */
 function clip(s: string, max: number): string {
 	if (Buffer.byteLength(s) <= max) return s;
-	// Slice on characters; good enough for mostly-ASCII tool output.
-	return `${s.slice(0, Math.max(0, max - 1))}…`;
+	// Measuring bytes and then slicing CHARACTERS is not "good enough for mostly
+	// ASCII": one CJK or emoji snippet overshot the budget by 2.71x at the `ultra`
+	// default of 500 bytes, which is exactly the setting a caller picks to keep
+	// responses small. The byte-safe helper is already in the tree.
+	return truncateToBytes(s, max, "…");
 }
 
 export type ApplyIntentFilter = ReturnType<typeof createIntentFilter>;

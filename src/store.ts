@@ -1112,7 +1112,21 @@ export function cleanupStaleDbs(): number {
 
 			const path = join(dir, entry.name);
 			try {
-				if (now - statSync(path).mtimeMs < MIN_AGE_MS) continue;
+				// Age by the newest FILE inside. A directory's mtime changes only when
+				// an entry is added or removed, which sqlite writes never do, so a
+				// live peer server's store looked an hour old after an hour of use and
+				// a newly started server deleted it out from under it.
+				let newest = statSync(path).mtimeMs;
+				for (const child of readdirSync(path, { withFileTypes: true })) {
+					try {
+						const m = statSync(join(path, child.name)).mtimeMs;
+						if (m > newest) newest = m;
+					} catch {
+						/* raced with the owner; treat as live */
+						newest = now;
+					}
+				}
+				if (now - newest < MIN_AGE_MS) continue;
 				rmSync(path, { recursive: true, force: true });
 				cleaned++;
 			} catch (e) {

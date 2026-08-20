@@ -262,8 +262,15 @@ function segmentInvokesFetchTool(segment: string): boolean {
 			continue;
 		}
 		if (KEYWORDS.test(basename)) continue; // shell keyword introduces a command
-		// After a wrapper, skip its plain operands (`timeout 10`, `sudo -u nobody`).
-		if (sawWrapper && OPERAND.test(basename)) continue;
+		// After a wrapper, skip its plain operands (`timeout 10`, `sudo -u nobody`),
+		// but only up to the next word. Leaving the flag set let the scan walk past
+		// the real command into its ARGUMENTS: `sudo apt install curl` and
+		// `timeout 5 npm ls curl` were denied, with advice that does not apply,
+		// because `curl` appeared as an argument to apt and npm.
+		if (sawWrapper && OPERAND.test(basename)) {
+			sawWrapper = false;
+			continue;
+		}
 		break; // an ordinary command: stop before its arguments
 	}
 	return false;

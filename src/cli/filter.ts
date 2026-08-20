@@ -363,7 +363,10 @@ function writeBufferedStderr(
 	}
 	if (capped) {
 		process.stderr.write(
-			`context-compress wrap: combined stdout/stderr exceeded the ${formatBytes(captureCapBytes)} capture limit; later output was not captured. The command itself ran to completion. Re-run with --stream or increase CONTEXT_COMPRESS_HARD_CAP_BYTES.\n`,
+			// Only claim completion when nothing killed the child. Saying a
+			// SIGKILLed process "ran to completion" — and suppressing the signal
+			// line, which this branch used to do — is the opposite of the truth.
+			`context-compress wrap: combined stdout/stderr exceeded the ${formatBytes(captureCapBytes)} capture limit; later output was not captured.${signal ? ` The command was then killed by ${signal}.` : " The command itself ran to completion."} Re-run with --stream or increase CONTEXT_COMPRESS_HARD_CAP_BYTES.\n`,
 		);
 	} else if (signal) {
 		process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
@@ -385,9 +388,9 @@ function runBuffered(
 	 * whole stream was buffered, so losing the tail is a regression, not a
 	 * trade-off; a bounded ring restores it without restoring unbounded memory.
 	 */
-	type Sink = { head: Buffer[]; tail: Buffer[]; tailBytes: number };
-	const outSink: Sink = { head: [], tail: [], tailBytes: 0 };
-	const errSink: Sink = { head: [], tail: [], tailBytes: 0 };
+	type Sink = { head: Buffer[]; tail: Buffer[]; tailBytes: number; seen: number };
+	const outSink: Sink = { head: [], tail: [], tailBytes: 0, seen: 0 };
+	const errSink: Sink = { head: [], tail: [], tailBytes: 0, seen: 0 };
 	// Bound the ring by the capture cap as well, so total retention stays within
 	// twice the cap even when the cap is deliberately tiny.
 	const tailCap = Math.min(maxOutputBytes, captureCapBytes);
@@ -395,6 +398,7 @@ function runBuffered(
 	let capped = false;
 
 	const capture = (chunk: Buffer, sink: Sink): void => {
+		sink.seen += chunk.length;
 		let rest = chunk;
 		if (!capped) {
 			const remaining = captureCapBytes - capturedBytes;
@@ -422,18 +426,42 @@ function runBuffered(
 	};
 
 	/** Head, a marker for the gap, then the most recent `tailCap` bytes. */
+	/** Decode without emitting U+FFFD for a character split at a buffer edge. */
+	const decodeTrimmed = (buf: Buffer, trimStart: boolean): string => {
+		let start = 0;
+		let end = buf.length;
+		if (trimStart) while (start < end && (buf[start] & 0xc0) === 0x80) start++;
+		// A trailing partial character has no continuation left to complete it.
+		let back = end - 1;
+		let seen = 0;
+		while (back >= start && (buf[back] & 0xc0) === 0x80 && seen < 3) {
+			back--;
+			seen++;
+		}
+		if (back >= start) {
+			const lead = buf[back];
+			const needed = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+			if (needed > 1 && back + needed > end) end = back;
+		}
+		return buf.subarray(start, end).toString("utf-8");
+	};
+
 	const assemble = (sink: Sink): string => {
-		const head = Buffer.concat(sink.head).toString("utf-8");
+		// The cap can land mid-character: the head split had no guard, so 2 of 3
+		// offsets emitted a replacement character into the compressed response.
+		const head = decodeTrimmed(Buffer.concat(sink.head), false);
 		if (sink.tail.length === 0) return head;
 		let tail = Buffer.concat(sink.tail);
-		const dropped = capturedBytes + sink.tailBytes - Buffer.byteLength(head);
 		if (tail.length > tailCap) tail = tail.subarray(tail.length - tailCap);
-		// The ring can start mid-character; drop the orphaned continuation bytes
-		// rather than emitting U+FFFD.
-		let start = 0;
-		while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++;
+		// Everything this stream produced, minus what survived. The previous
+		// expression mixed the global capture counter with one sink's ring and never
+		// counted a single ring eviction, so 1MB, 10MB and 100MB of loss all reported
+		// "64.0KB past the limit" — wrong by up to 1,600x on the number whose whole
+		// job is to tell the caller how much they are missing.
+		const dropped = sink.seen - Buffer.byteLength(head) - tail.length;
+
 		const marker = `\n... [middle of the stream not captured — ${formatBytes(Math.max(0, dropped))} past the ${formatBytes(captureCapBytes)} capture limit] ...\n`;
-		return head + marker + tail.subarray(start).toString("utf-8");
+		return head + marker + decodeTrimmed(tail, true);
 	};
 
 	proc.stdout?.on("data", (chunk: Buffer) => capture(chunk, outSink));

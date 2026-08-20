@@ -65,11 +65,16 @@ export function assembleExecResponse(
 ): string {
 	const footer = formatExecStatusFooter(result);
 	const room = Math.max(0, budget - (footer === null ? 0 : Buffer.byteLength(footer)));
+	// Reserve half for stderr so a chatty stderr cannot hide stdout, but reserve it
+	// only against what the body actually uses. Clamping stderr to half
+	// unconditionally threw away half the budget on a command that writes only to
+	// stderr — measured, a stderr-only failure returned 51,214 of 102,400 bytes.
+	const stderrReserve = Math.min(Buffer.byteLength(stderrBlock), Math.floor(room / 2));
+	const bodyText = truncateToBytes(body, Math.max(0, room - stderrReserve));
 	const stderrText = truncateToBytes(
 		stderrBlock,
-		Math.min(Buffer.byteLength(stderrBlock), Math.floor(room / 2)),
+		Math.max(0, room - Buffer.byteLength(bodyText)),
 	);
-	const bodyText = truncateToBytes(body, Math.max(0, room - Buffer.byteLength(stderrText)));
 	const combined = bodyText + stderrText;
 	return footer === null ? combined : withExecStatus(combined, result);
 }

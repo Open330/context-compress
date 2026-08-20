@@ -39,8 +39,15 @@ function validateCumulative(value: unknown): CumulativeStats | null {
 	if (typeof v.firstSeen !== "string" || typeof v.lastSeen !== "string") return null;
 	// Normalized rather than rejected: files written before `perCommand` existed
 	// are legitimate, and the caller indexes into it unconditionally.
-	const perCommand =
-		typeof v.perCommand === "object" && v.perCommand !== null ? v.perCommand : {};
+	const raw = typeof v.perCommand === "object" && v.perCommand !== null ? v.perCommand : {};
+	// Entry-level too: a `calls` value that survives as a string turns `+= delta`
+	// into concatenation, so the file grows a value like "many1111" and the report
+	// renders nonsense such as "9.53e+301MB" — written back to disk on every save.
+	const perCommand: Record<string, { calls: number }> = {};
+	for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+		const calls = (entry as { calls?: unknown })?.calls;
+		if (typeof calls === "number" && Number.isFinite(calls)) perCommand[name] = { calls };
+	}
 	return { ...v, perCommand } as CumulativeStats;
 }
 

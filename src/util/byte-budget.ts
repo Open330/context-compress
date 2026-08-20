@@ -68,10 +68,19 @@ class BlockBudget {
 			// Block size is driven by caller-supplied labels and titles, neither of
 			// which is bounded, so this is reachable without a huge document. A
 			// clipped answer beats no answer, and truncateToBytes says it was cut.
-			if (this.kept.length === 0 && this.used < this.limit) {
-				this.kept.push(truncateToBytes(block, this.limit - this.used));
-				this.used = this.limit;
-				return true;
+			// Applies at any position, not only the first. A block that alone exceeds
+			// the limit can never fit in any arrangement, so dropping it is not a
+			// scheduling decision — it is a guaranteed loss. `search` maps one block
+			// per query, so an oversized block in position 2 returned 41 bytes and
+			// none of the answer: the original defect, one slot over.
+			const neverFits = byteLength(block) + this.separatorBytes > this.limit;
+			if (neverFits && this.used < this.limit) {
+				const room = this.limit - this.used - (this.kept.length > 0 ? this.separatorBytes : 0);
+				if (room > 0) {
+					this.kept.push(truncateToBytes(block, room));
+					this.used = this.limit;
+					return true;
+				}
 			}
 			this.dropped++;
 			return false;
