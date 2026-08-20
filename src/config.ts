@@ -123,7 +123,14 @@ function parseIntEnv(key: string): number | undefined {
  * the control that is supposed to contain it defeats the control. They are
  * honored only from the user's home file or the environment.
  */
-const USER_SCOPE_ONLY_KEYS = [
+/**
+ * Keys a project-local `.context-compress.json` may not set. A project file
+ * travels with the repository, so it is attacker-controlled. Exported so the
+ * README's list of restricted keys can be asserted against this one — the two
+ * drifted apart once already, and a doc that under-reports the list tells the
+ * reader to configure something that is silently dropped.
+ */
+export const USER_SCOPE_ONLY_KEYS = [
 	"passthroughEnvVars",
 	"persistDb",
 	"dbDir",

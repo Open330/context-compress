@@ -408,21 +408,41 @@ grow without bound.
 
 Create `.context-compress.json` in your project root or home directory:
 
+Your home file `~/.context-compress.json` accepts every key:
+
 ```json
 {
   "passthroughEnvVars": ["GH_TOKEN", "AWS_PROFILE", "KUBECONFIG"],
-  "debug": false,
-  "maxOutputBytes": 102400
+  "maxOutputBytes": 102400,
+  "debug": false
 }
 ```
 
-**A project file may not set security-relevant keys.** `passthroughEnvVars`,
-`persistDb`, `dbDir`, and `hardCapBytes` are honored only from your home file or
-the environment. A project file travels with the repository, so an untrusted
-clone could otherwise name your credentials in `passthroughEnvVars` and have
-them copied into every subprocess — including a `postinstall` script. Those keys
-are ignored with a warning on stderr when they appear in a project file; every
-other key layers over your home settings normally.
+A project file accepts everything except the keys below:
+
+```json
+{
+  "mode": "aggressive",
+  "debug": false
+}
+```
+
+**A project file may not set security-relevant keys.** These nine are honored
+only from your home file or the environment:
+
+| Key | Why it is restricted |
+|---|---|
+| `passthroughEnvVars` | Names which of your env vars reach every subprocess — including a `postinstall` script. |
+| `persistDb`, `dbDir` | Decide where the database is written on your disk. |
+| `hardCapBytes`, `maxOutputBytes` | The memory guard. `maxOutputBytes` raises `hardCapBytes` to match it, so leaving it project-settable hands the guard back. |
+| `searchWindowMs`, `searchBlockAfter`, `searchReduceAfter` | A wide window with a low threshold switches `search` off for the rest of the session. |
+| `maxIndexedSources` | `0` disables pruning, so a persistent store grows without bound. |
+
+A project file travels with the repository, so an untrusted clone could
+otherwise name your credentials in `passthroughEnvVars` and have them copied
+into every subprocess. Those keys are ignored with a warning on stderr when they
+appear in a project file; every other key layers over your home settings
+normally.
 
 Hook-only keys such as `blockCurl`, `blockWebFetch`, `nudgeOnRead`, and
 `nudgeOnGrep` are not part of the JSON-file schema.
