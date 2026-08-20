@@ -21,6 +21,29 @@ function tokenCost(tokens: number): string {
 	return `~$${sonnetCost.toFixed(2)} (Sonnet)`;
 }
 
+/**
+ * The file lives under the project directory, so its shape is not ours to trust:
+ * it is committed by whoever wrote the repository. Parsing it and handing the
+ * result to arithmetic threw out of the `stats` tool — a missing `perCommand`
+ * produced "Cannot read properties of undefined", and a numeric `firstSeen`
+ * produced "cumulative.firstSeen.split is not a function". Anything unexpected
+ * is treated as absent, which the callers already handle.
+ */
+function validateCumulative(value: unknown): CumulativeStats | null {
+	if (typeof value !== "object" || value === null) return null;
+	const v = value as Record<string, unknown>;
+	const numbers = ["totalBytesSaved", "totalBytesProcessed", "totalCalls", "totalSessions"];
+	for (const key of numbers) {
+		if (typeof v[key] !== "number" || !Number.isFinite(v[key] as number)) return null;
+	}
+	if (typeof v.firstSeen !== "string" || typeof v.lastSeen !== "string") return null;
+	// Normalized rather than rejected: files written before `perCommand` existed
+	// are legitimate, and the caller indexes into it unconditionally.
+	const perCommand =
+		typeof v.perCommand === "object" && v.perCommand !== null ? v.perCommand : {};
+	return { ...v, perCommand } as CumulativeStats;
+}
+
 export class SessionTracker {
 	private stats: SessionStats = {
 		calls: {},
@@ -70,7 +93,7 @@ export class SessionTracker {
 		if (!this.cumulativeFile) return null;
 		try {
 			const data = readFileSync(this.cumulativeFile, "utf-8");
-			return JSON.parse(data);
+			return validateCumulative(JSON.parse(data));
 		} catch {
 			return null;
 		}

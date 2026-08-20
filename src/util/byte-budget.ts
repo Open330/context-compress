@@ -62,6 +62,17 @@ class BlockBudget {
 	offer(block: string): boolean {
 		const cost = byteLength(block) + (this.kept.length > 0 ? this.separatorBytes : 0);
 		if (this.used + cost > this.limit) {
+			// A first block bigger than the whole budget used to vanish, leaving the
+			// caller an omission note and no content: measured, a search whose only
+			// matching block was oversized returned 61 bytes and none of the answer.
+			// Block size is driven by caller-supplied labels and titles, neither of
+			// which is bounded, so this is reachable without a huge document. A
+			// clipped answer beats no answer, and truncateToBytes says it was cut.
+			if (this.kept.length === 0 && this.used < this.limit) {
+				this.kept.push(truncateToBytes(block, this.limit - this.used));
+				this.used = this.limit;
+				return true;
+			}
 			this.dropped++;
 			return false;
 		}

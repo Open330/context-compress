@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
 import { truncateToBytes } from "../util/byte-budget.js";
-import { formatExecStatusFooter, withExecStatus } from "../util/exec-status.js";
+import { assembleExecResponse } from "../util/exec-status.js";
 import { isWithinProject } from "../util/path.js";
 import type { ToolContext } from "./context.js";
 
@@ -98,14 +98,31 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 
 			let output = result.stdout;
 			let indexableOutput = result.indexableStdout;
+			// Kept out of `output` so the budget can reserve room for it below; a
+			// concatenation here is clamped head-first and loses the diagnostic.
+			let stderrBlock = "";
 			if (result.stderr && result.exitCode !== 0) {
-				output += `\n\nSTDERR:\n${result.stderr}`;
-				indexableOutput += `\n\nSTDERR:\n${result.stderr}`;
+				stderrBlock = `\n\nSTDERR:\n${result.stderr}`;
+				indexableOutput += stderrBlock;
 			}
 
 			if (intent) {
 				const filtered = applyIntentFilter(indexableOutput, intent, `file:${filePath}`);
-				if (filtered !== indexableOutput) output = filtered;
+				// Index the raw corpus, but hold the response to one invariant: asking a
+				// question about the output must not enlarge it. The filter's own
+				// threshold sees the raw bytes, so a chatty command whose curated
+				// response was already small got swapped for a bigger summary rebuilt
+				// from the noise the command filter had just removed — measured, a 227
+				// byte `npm test` rollup with no PASS lines came back as 2,798 bytes
+				// with 45 of them. The exception is an empty response: there is nothing
+				// to preserve, and the summary is the only account of what was indexed.
+				const worthSwapping =
+					Buffer.byteLength(filtered) < Buffer.byteLength(output) || output.trim() === "";
+				if (filtered !== indexableOutput && worthSwapping) {
+					output = filtered;
+					// The corpus the summary was built from already contains stderr.
+					stderrBlock = "";
+				}
 			}
 
 			// See execute.ts: a nonzero exit with no output must not read as success.
@@ -113,14 +130,7 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 			// then clamping cut it straight back off, so a run that failed with a
 			// nonzero exit came back looking merely truncated — the caller could not
 			// tell a broken command from a chatty one.
-			const footer = formatExecStatusFooter(result);
-			const budget = ctx.config.maxOutputBytes;
-			if (footer === null) {
-				output = truncateToBytes(output, budget);
-			} else {
-				const room = Math.max(0, budget - Buffer.byteLength(footer));
-				output = withExecStatus(truncateToBytes(output, room), result);
-			}
+			output = assembleExecResponse(output, stderrBlock, result, ctx.config.maxOutputBytes);
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute_file", responseBytes);

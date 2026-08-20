@@ -1,5 +1,6 @@
 import {
 	chmodSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -210,6 +211,18 @@ function levenshtein(a: string, b: string, maxDist?: number): number {
 	return prev[b.length];
 }
 
+/** Throws when `target` exists and is a symbolic link. Absent is fine. */
+function assertNotSymlinked(target: string): void {
+	try {
+		if (lstatSync(target).isSymbolicLink()) {
+			throw new Error(`context-compress: refusing symlinked database path ${target}`);
+		}
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw e;
+	}
+}
+
 export class ContentStore {
 	private db: Database.Database;
 	/** 0 disables pruning. */
@@ -240,8 +253,18 @@ export class ContentStore {
 			path = options;
 		} else if (options?.persistDb || options?.dbDir) {
 			const dir = options.dbDir ?? join(resolveProjectDir(), ".context-compress");
+			// `dbDir` and `persistDb` are user-scope-only precisely so an untrusted
+			// repository cannot choose where indexed content — the full uncompressed
+			// output of every command — is written. The DEFAULT destination is inside
+			// the project, and both mkdir and the sqlite open follow symlinks, so a
+			// committed symlink reached the same result with no config file at all:
+			// measured, `.context-compress/store.db` pointing outside the project
+			// created a 41KB database at the repository's chosen path. Refuse it;
+			// createServer already falls back to an in-memory store.
+			assertNotSymlinked(dir);
 			mkdirSync(dir, { recursive: true });
 			path = join(dir, "store.db");
+			assertNotSymlinked(path);
 			debug("Using persistent DB at", path);
 		} else {
 			const explicitPath = typeof options === "object" ? options?.dbPath : undefined;
@@ -494,7 +517,12 @@ export class ContentStore {
 		// Only worth the scan once the table is near its ceiling.
 		if (count < MAX_VOCABULARY * 0.9) return;
 
-		const rows = this.db.prepare("SELECT content FROM chunks LIMIT 5000").all() as Array<{
+		// Newest first: an unordered LIMIT takes the OLDEST surviving chunks, so on
+		// a store with many chunks per source the "live" set omitted recent content
+		// and marked its words stale — pruning away exactly what was just learned.
+		const rows = this.db
+			.prepare("SELECT content FROM chunks ORDER BY rowid DESC LIMIT 5000")
+			.all() as Array<{
 			content: string;
 		}>;
 		const live = new Set<string>();
@@ -735,8 +763,6 @@ export class ContentStore {
 	private updateVocabulary(content: string): void {
 		const currentCount = (this.vocabCountStmt.get() as { cnt: number }).cnt;
 
-		if (currentCount >= MAX_VOCABULARY) return;
-
 		// Sample first 50KB to avoid processing entire large documents
 		const sample = content.length > 51_200 ? content.slice(0, 51_200) : content;
 		const words = sample
@@ -744,11 +770,34 @@ export class ContentStore {
 			.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
 
 		const unique = new Set(words.map((w) => w.toLowerCase()));
-		const insert = this.vocabInsertStmt;
 
+		// Make room rather than give up. Returning early once the table was full
+		// left it a first-come set whenever stale-word pruning had nothing to free,
+		// which is the normal state for a large retention window: the surviving
+		// sources' own words fill the table, so nothing is stale and nothing new is
+		// ever learned. Measured at maxIndexedSources 500 over 700 sources —
+		// vocabulary pinned at 10,000, and sources 400 and 699 were fully indexed
+		// but unknown to fuzzy correction, which answered a one-character typo of
+		// their content with no correction at all. Evicting the oldest words keeps
+		// the table bounded and keeps it learning; the eviction is capped so one
+		// index call cannot rewrite the whole table.
+		const room = MAX_VOCABULARY - currentCount;
+		if (unique.size > room) {
+			const evict = Math.min(unique.size - room, Math.floor(MAX_VOCABULARY * 0.2));
+			if (evict > 0) {
+				this.db
+					.prepare(
+						"DELETE FROM vocabulary WHERE rowid IN (SELECT rowid FROM vocabulary ORDER BY rowid LIMIT ?)",
+					)
+					.run(evict);
+			}
+		}
+
+		const insert = this.vocabInsertStmt;
+		const available = MAX_VOCABULARY - (this.vocabCountStmt.get() as { cnt: number }).cnt;
 		let added = 0;
 		for (const word of unique) {
-			if (currentCount + added >= MAX_VOCABULARY) break;
+			if (added >= available) break;
 			insert.run(word);
 			added++;
 		}

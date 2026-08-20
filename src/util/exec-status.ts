@@ -1,4 +1,5 @@
 import type { ExecResult } from "../types.js";
+import { truncateToBytes } from "./byte-budget.js";
 
 /** Closed status vocabulary shared by every tool that reports an execution. */
 export type ExecutionStatus = "completed" | "failed" | "killed" | "unknown";
@@ -41,4 +42,34 @@ export function withExecStatus(output: string, result: ExecResult): string {
 	const footer = formatExecStatusFooter(result);
 	if (footer === null) return output;
 	return `${output.trim() === "" ? "(no output)" : output}${footer}`;
+}
+
+/**
+ * Assemble a tool response — body, then the STDERR block, then the status
+ * footer — inside `budget`.
+ *
+ * The pieces have to be budgeted, not concatenated and clamped. `truncateToBytes`
+ * keeps the head, and the executor has already expanded stdout to fill the whole
+ * budget, so a failing build's diagnostic sat entirely in the bytes that got cut:
+ * measured, 4,609 bytes of stderr survived as 150, with the last error line gone.
+ * The footer had the same problem and was fixed the same way.
+ *
+ * stderr is capped at half of what the footer leaves, so a chatty stderr cannot
+ * hide stdout either.
+ */
+export function assembleExecResponse(
+	body: string,
+	stderrBlock: string,
+	result: ExecResult,
+	budget: number,
+): string {
+	const footer = formatExecStatusFooter(result);
+	const room = Math.max(0, budget - (footer === null ? 0 : Buffer.byteLength(footer)));
+	const stderrText = truncateToBytes(
+		stderrBlock,
+		Math.min(Buffer.byteLength(stderrBlock), Math.floor(room / 2)),
+	);
+	const bodyText = truncateToBytes(body, Math.max(0, room - Buffer.byteLength(stderrText)));
+	const combined = bodyText + stderrText;
+	return footer === null ? combined : withExecStatus(combined, result);
 }
