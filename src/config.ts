@@ -46,12 +46,16 @@ const DEFAULTS: Config = {
 	intentSearchThreshold: 5_000,
 	intentBudgetBytes: 1_800,
 	maxOutputBytes: 102_400,
-	// Measured peak RSS is 9-13x the captured bytes (16MB captured -> 292MB on
-	// error-shaped output) because the post-capture pipeline holds several full
-	// copies. Peak tracks roughly 12 x concurrency x cap, and the binding limit is
-	// MAX_CONCURRENT_EXECUTIONS (8), not BATCH_CONCURRENCY (4): measured 736MB at
-	// 4 and 898MB at 8. The old 100MB cap extrapolated to ~4.8GB. 16MB keeps the
-	// worst case under ~0.9GB and is far above any output a caller can read.
+	// Peak RSS is a large multiple of the captured bytes because the post-capture
+	// pipeline holds several full copies, and the binding limit is
+	// MAX_CONCURRENT_EXECUTIONS (8), not BATCH_CONCURRENCY (4). Re-measured on
+	// Node 24 / darwin-arm64 with error-shaped output at this 16MB cap:
+	// concurrency 1 -> 472MB, 4 -> 746MB, 8 -> 1,201MB peak. An earlier note here
+	// claimed the worst case stayed under ~0.9GB; that figure no longer holds and
+	// the real ceiling is ~1.2GB, still well inside the default old-space. The
+	// old 100MB cap extrapolated to several gigabytes. Numbers are platform- and
+	// version-dependent, so re-measure before relying on the headroom rather than
+	// trusting this comment.
 	hardCapBytes: 16 * 1024 * 1024,
 	searchMaxBytes: 40_960,
 	batchMaxBytes: 81_920,
