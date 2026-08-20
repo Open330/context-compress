@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
 import { truncateToBytes } from "../util/byte-budget.js";
-import { withExecStatus } from "../util/exec-status.js";
+import { formatExecStatusFooter, withExecStatus } from "../util/exec-status.js";
 import { isWithinProject } from "../util/path.js";
 import type { ToolContext } from "./context.js";
 
@@ -109,12 +109,18 @@ export function registerExecuteFileTool(server: McpServer, ctx: ToolContext): vo
 			}
 
 			// See execute.ts: a nonzero exit with no output must not read as success.
-			output = withExecStatus(output, result);
-
-			// stderr is appended above and is not covered by the executor's stdout
-			// cap, so bound the COMBINED response — the configured cap is a promise
-			// about what reaches the caller, not about one stream.
-			output = truncateToBytes(output, ctx.config.maxOutputBytes);
+			// Reserve the status footer's bytes BEFORE truncating. Appending it and
+			// then clamping cut it straight back off, so a run that failed with a
+			// nonzero exit came back looking merely truncated — the caller could not
+			// tell a broken command from a chatty one.
+			const footer = formatExecStatusFooter(result);
+			const budget = ctx.config.maxOutputBytes;
+			if (footer === null) {
+				output = truncateToBytes(output, budget);
+			} else {
+				const room = Math.max(0, budget - Buffer.byteLength(footer));
+				output = withExecStatus(truncateToBytes(output, room), result);
+			}
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute_file", responseBytes);

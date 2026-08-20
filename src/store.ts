@@ -27,6 +27,19 @@ import { detectInjectionPatterns } from "./utils.js";
 const MAX_VOCABULARY = 10_000;
 /** Prune only once the overshoot reaches this, to amortize the FTS5 scans. */
 const PRUNE_BATCH = 25;
+/**
+ * Renderers separate hits with `--- [source] ---`. Indexed content is untrusted,
+ * so a chunk containing that exact shape forged an attribution line and made the
+ * text after it appear to come from a different, more trusted source. Defang the
+ * bracket rather than dropping the line, so nothing is silently lost.
+ */
+const ATTRIBUTION_RE = /^(\s*-{3,}\s*)\[/gm;
+function neutralizeAttribution(text: string): string {
+	return text.replace(ATTRIBUTION_RE, "$1(");
+}
+
+/** Longest word that may be offered as a distinctive term. */
+const MAX_TERM_CHARS = 64;
 /** Bytes of chunk text tokenized per getDistinctiveTerms call. */
 const TERM_SAMPLE_BYTES = 256 * 1024;
 
@@ -588,8 +601,8 @@ export class ContentStore {
 			}>;
 
 			return rows.map((row) => ({
-				title: row.title,
-				snippet: extractSnippet(row.highlighted),
+				title: neutralizeAttribution(row.title),
+				snippet: neutralizeAttribution(extractSnippet(row.highlighted)),
 				source: row.label,
 				score: Math.abs(row.rank),
 				injectionWarnings: row.injection_warnings
@@ -730,7 +743,12 @@ export class ContentStore {
 			const words = new Set(
 				content
 					.split(WORD_SPLIT_RE)
-					.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()))
+					// Cap word length: scoring actively prefers long identifiers, and a
+					// chunk can hold an 8192-character "word", so a fetched page could
+					// drive 40 of them into a response with no other bound.
+					.filter(
+						(w) => w.length >= 3 && w.length <= MAX_TERM_CHARS && !STOPWORDS.has(w.toLowerCase()),
+					)
 					.map((w) => w.toLowerCase()),
 			);
 			for (const word of words) {

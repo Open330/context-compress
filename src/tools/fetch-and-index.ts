@@ -8,7 +8,7 @@ import { detectInjectionPatterns } from "../utils.js";
 import type { ToolContext } from "./context.js";
 
 export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): void {
-	const { executor, store, tracker, withExecutionLimit } = ctx;
+	const { config, executor, store, tracker, withExecutionLimit } = ctx;
 
 	server.registerTool(
 		"fetch_and_index",
@@ -118,6 +118,10 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 				output += `\n\n⚠ Content safety notice: detected patterns (${injectionWarnings.join(", ")}). Review indexed content before relying on it.`;
 			}
 
+			// Clamp the assembled response like every sibling tool does. The preview was
+			// budgeted but the terms footer was not, and a remote page controls both the
+			// term count and their length — measured 323KB against a 102KB budget.
+			output = truncateToBytes(output, config.maxOutputBytes);
 			tracker.trackCall("fetch_and_index", Buffer.byteLength(output));
 
 			return { content: [{ type: "text" as const, text: output }] };

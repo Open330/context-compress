@@ -314,10 +314,18 @@ if (tool === "Bash") {
 	if (filterBash && shouldWrap(command, cwd)) {
 		const updatedCommand = buildWrapCommand(command);
 		if (updatedCommand) {
+			// Say so. The Task branch below already discloses its rewrite for exactly
+			// this reason: the individual filters do mark what they dropped in-band,
+			// but without provenance the agent cannot tell "the command printed this"
+			// from "a hook rewrote my command and something else printed this".
 			respond({
 				updatedInput: {
 					command: updatedCommand,
 				},
+				additionalContext:
+					`${TOOL_PREFIX}: this command was wrapped so its stdout flows through the ` +
+					"compression pipeline — the output you receive is filtered, not raw. " +
+					"Set CONTEXT_COMPRESS_FILTER_BASH=0 to disable.",
 			});
 		}
 	}

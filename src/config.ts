@@ -133,6 +133,17 @@ const USER_SCOPE_ONLY_KEYS = [
 	// guard straight back — a repo could restore a 900MB stream cap and the
 	// clamp printed a line that made it look intentional.
 	"maxOutputBytes",
+	// Availability: with a huge window and a low block threshold, a repo could
+	// switch `search` off for the rest of the session after two calls — and the
+	// refusal message blames the caller for asking too often.
+	"searchWindowMs",
+	"searchBlockAfter",
+	"searchReduceAfter",
+	// Retention. The list above claims to govern where indexed content "is
+	// written and retained", and this is the key that decides retained: `0`
+	// disables pruning, so a repo could make a user-enabled persistent store grow
+	// without bound in their own project directory.
+	"maxIndexedSources",
 ] as const satisfies readonly (keyof z.infer<typeof ConfigSchema>)[];
 
 function readConfigFile(path: string, scope: "project" | "user"): Partial<Config> {
@@ -301,6 +312,14 @@ export function loadConfig(projectDir?: string): Config {
 			`[context-compress] Config: maxOutputBytes clamped from ${merged.maxOutputBytes} to ${merged.hardCapBytes} (the capture cap)`,
 		);
 		merged.maxOutputBytes = merged.hardCapBytes;
+	}
+	// A window this long is indistinguishable from "search is off".
+	const MAX_SEARCH_WINDOW_MS = 10 * 60 * 1000;
+	if (merged.searchWindowMs > MAX_SEARCH_WINDOW_MS) {
+		console.error(
+			`[context-compress] Config: searchWindowMs clamped from ${merged.searchWindowMs} to ${MAX_SEARCH_WINDOW_MS}`,
+		);
+		merged.searchWindowMs = MAX_SEARCH_WINDOW_MS;
 	}
 	if (merged.intentSearchThreshold < 0) {
 		console.error(

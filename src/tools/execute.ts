@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ALL_LANGUAGES, type ExecResult, type Language } from "../types.js";
 import { truncateToBytes } from "../util/byte-budget.js";
-import { withExecStatus } from "../util/exec-status.js";
+import { formatExecStatusFooter, withExecStatus } from "../util/exec-status.js";
 import type { ToolContext } from "./context.js";
 
 const LANGUAGE_ENUM = ALL_LANGUAGES as unknown as [Language, ...Language[]];
@@ -99,12 +99,18 @@ PREFER THIS OVER BASH for: API calls (gh, curl, aws), test runners (npm test, py
 
 			// Applied last so it survives the intent filter: without it, exit 7 with
 			// no output is indistinguishable from a successful empty run.
-			output = withExecStatus(output, result);
-
-			// stderr is appended above and is not covered by the executor's stdout
-			// cap, so bound the COMBINED response — the configured cap is a promise
-			// about what reaches the caller, not about one stream.
-			output = truncateToBytes(output, ctx.config.maxOutputBytes);
+			// Reserve the status footer's bytes BEFORE truncating. Appending it and
+			// then clamping cut it straight back off, so a run that failed with a
+			// nonzero exit came back looking merely truncated — the caller could not
+			// tell a broken command from a chatty one.
+			const footer = formatExecStatusFooter(result);
+			const budget = ctx.config.maxOutputBytes;
+			if (footer === null) {
+				output = truncateToBytes(output, budget);
+			} else {
+				const room = Math.max(0, budget - Buffer.byteLength(footer));
+				output = withExecStatus(truncateToBytes(output, room), result);
+			}
 
 			const responseBytes = Buffer.byteLength(output);
 			tracker.trackCall("execute", responseBytes);
