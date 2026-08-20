@@ -162,10 +162,17 @@ describe("integration: batch execute flow", () => {
 				timeout: 1_000,
 			});
 			const text = response.content[0].text;
-			assert.match(text, /\*\*First command\*\*: 1 lines — truncated \(exit 0\)/);
+			// `batch_execute` never returns per-command output, so the inventory is the
+			// only quantitative signal the caller gets — and it must describe the
+			// corpus that was indexed, not the compressed copy that is discarded.
+			// Counting `stdout` reported this 3,006-line corpus as "1 lines", which
+			// gave an agent no reason to search what it had just paid to index.
+			const corpusLines = batchCorpus("x").split("\n").length;
+			assert.ok(corpusLines > 3_000, "the fixture must be large enough to matter");
+			assert.match(text, new RegExp(`\\*\\*First command\\*\\*: ${corpusLines} lines — truncated \\(exit 0\\)`));
 			assert.match(
 				text,
-				/\*\*Second command\*\*: 1 lines — killed, truncated \(exit unknown\)/,
+				new RegExp(`\\*\\*Second command\\*\\*: ${corpusLines} lines — killed, truncated \\(exit unknown\\)`),
 			);
 			assert.ok(!text.includes("rpfhiddenpercommandsentinel"));
 			assert.ok(!text.includes("rpfhiddencombinedsentinel"));

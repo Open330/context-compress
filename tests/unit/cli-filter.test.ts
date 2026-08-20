@@ -111,8 +111,18 @@ describe("filter/wrap option validation", () => {
 });
 
 describe("runWrap buffered capture", () => {
-	it("kills the command and returns an actionable error when the combined cap is exceeded", () => {
-		const childScript = "process.stdout.write('o'.repeat(24));process.stderr.write('e'.repeat(24))";
+	it("stops capturing at the cap without killing the command or faking its exit code", () => {
+		// `hardCapBytes` is the MCP server's memory guard, where a tool response is
+		// held in RAM. `wrap` is transparent passthrough of the user's own command,
+		// and applying the guard by killing the process tree reported a 46.8MB build
+		// that exited 0 as exit 1, with its final `ALL-TESTS-PASSED` line missing and
+		// any work after the cap never run.
+		const childScript = [
+			"process.stdout.write('o'.repeat(4096))",
+			"process.stderr.write('e'.repeat(4096))",
+			"process.stdout.write('\\nBUILD-SUCCEEDED\\n')",
+			"process.exit(0)",
+		].join(";");
 		const wrapArgs = [
 			"--mode",
 			"conservative",
@@ -123,27 +133,31 @@ describe("runWrap buffered capture", () => {
 		];
 		const helperScript = [
 			'import { runWrap } from "./src/cli/filter.ts"',
-			`process.exitCode = await runWrap(${JSON.stringify(wrapArgs)}, { captureCapBytes: 32 })`,
+			`process.exitCode = await runWrap(${JSON.stringify(wrapArgs)}, { captureCapBytes: 512 })`,
 		].join(";");
 
 		const result = spawnSync(
 			process.execPath,
 			["--import", "tsx", "--input-type=module", "-e", helperScript],
-			{ encoding: "utf-8", cwd: process.cwd(), timeout: 5_000 },
+			{ encoding: "utf-8", cwd: process.cwd(), timeout: 10_000 },
 		);
 
 		assert.strictEqual(result.error, undefined);
-		assert.strictEqual(result.status, 1);
-		assert.ok(
-			Buffer.byteLength(result.stdout) <= 33,
-			`retained stdout plus its newline stays bounded (received ${Buffer.byteLength(result.stdout)} bytes)`,
-		);
+		assert.strictEqual(result.status, 0, "the command succeeded; the cap is our limit, not its outcome");
+		// The verdict is the last line, so a cap that only keeps a head loses the
+		// one line the caller needs.
+		assert.match(result.stdout, /BUILD-SUCCEEDED/, "the tail of a capped stream must survive");
+		// Retention stays bounded: a head and a rolling tail, each within the cap.
 		const markerStart = result.stderr.indexOf("context-compress wrap:");
 		assert.notStrictEqual(markerStart, -1);
-		const stdoutPayload = result.stdout.endsWith("\n") ? result.stdout.slice(0, -1) : result.stdout;
-		const stderrPayload = result.stderr.slice(0, markerStart);
-		assert.strictEqual(Buffer.byteLength(stdoutPayload) + Buffer.byteLength(stderrPayload), 32);
-		assert.match(result.stderr, /combined stdout\/stderr exceeded the 32B capture limit/);
+		// Retention is a head plus a rolling tail per stream, each bounded by the
+		// cap — well under the 8KB the child wrote.
+		const retained =
+			Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr.slice(0, markerStart));
+		assert.ok(retained <= 512 * 4 + 512, `retention stayed bounded (${retained} bytes)`);
+		assert.ok(retained < 8192, `retention is well under what the child wrote (${retained} bytes)`);
+		assert.match(result.stderr, /exceeded the 512B capture limit/);
+		assert.match(result.stderr, /ran to completion/);
 		assert.match(result.stderr, /--stream/);
 		assert.match(result.stderr, /CONTEXT_COMPRESS_HARD_CAP_BYTES/);
 	});

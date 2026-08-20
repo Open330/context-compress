@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 import { compressOutput, runWrap } from "../../src/cli/filter.js";
 import { loadConfig, resetConfig } from "../../src/config.js";
+import { smartTruncate } from "../../src/executor.js";
 import { applyCommandFilter, filterTestOutput } from "../../src/filters.js";
 import { countErrorLines } from "../../src/format-filter.js";
 import { isPrivateHost } from "../../src/network.js";
@@ -156,16 +157,17 @@ describe("IPv4-translated IPv6 is classified", () => {
 	});
 });
 
-describe("truncation spends the budget whatever the line shape", () => {
-	// Line-based admission cannot spend the budget when one line is longer than
-	// it. Two earlier guards each passed a narrow test and failed in the field:
-	// an index check was defeated by the empty element a trailing newline
-	// produces, and an emptiness check was defeated by ANY single short line —
-	// including `//# sourceMappingURL=…`, which webpack/esbuild/rollup/terser all
-	// emit by default, and the executor's own `[output capped …]` marker.
-	//
-	// So this asserts the CLASS, not a shape: for every arrangement of one
-	// oversized line among short ones, the response must actually use its budget.
+describe("truncation neither collapses nor dilutes", () => {
+	// A line longer than the budget is admitted by neither the head nor the tail
+	// loop. Two guards failed here and a third caused a worse defect:
+	//   - comparing indices counted the empty element from a trailing newline;
+	//   - testing for emptiness was defeated by one short line, and
+	//     `//# sourceMappingURL=...` is emitted by default by webpack, esbuild,
+	//     rollup and terser, so 512KB bundles returned 110 bytes;
+	//   - replacing the line result with a byte slice fixed that and made a build
+	//     log 99% base64 blob at 106x the context cost.
+	// So the contract has two halves, and a test that checks one half licenses the
+	// other failure. Both are asserted for every shape.
 	const huge = "var x=1;".repeat(64_000); // ~512KB on one line
 	const shapes: Array<[name: string, text: string]> = [
 		["bare, no trailing newline", huge],
@@ -177,26 +179,68 @@ describe("truncation spends the budget whatever the line shape", () => {
 		["among many short lines", `${huge}\n${Array.from({ length: 40 }, (_, i) => `n${i}`).join("\n")}\n`],
 		["CRLF line endings", `${huge}\r\nDone.\r\n`],
 		["multi-byte content", `${"한".repeat(80_000)}\nend\n`],
+		["single-line JSON payload", JSON.stringify({ items: Array.from({ length: 20_000 }, (_, i) => ({ id: i })) })],
 	];
 
+	const budget = 20_000;
+	/** Bytes that are not one of the truncator's own `... [...] ...` markers. */
+	function contentBytes(out: string): number {
+		return Buffer.byteLength(out.replace(/\.\.\. \[[^\]]*\] \.\.\./g, ""));
+	}
+
 	for (const [name, text] of shapes) {
-		it(`keeps content: ${name}`, () => {
-			const budget = 20_000;
+		it(`returns content, not markers: ${name}`, () => {
 			const out = compressOutput(text, "cat bundle.min.js", "balanced", budget);
 			const bytes = Buffer.byteLength(out);
 
 			assert.ok(bytes <= budget, `${name}: budget exceeded (${bytes})`);
-			// The real bar is that the budget was USED, not merely that something
-			// came back — a marker alone is 70-110 bytes and passes a non-empty check.
-			assert.ok(bytes >= budget * 0.5, `${name}: only ${bytes} of ${budget} bytes used`);
+			// A marker-only response is 70-110 bytes and passes a non-empty check,
+			// which is how the second guard shipped. Require real content.
+			assert.ok(contentBytes(out) >= 2000, `${name}: only ${contentBytes(out)} content bytes`);
 			assert.match(out, /truncated/, `${name}: truncation must be stated`);
 			assert.ok(!out.includes("\uFFFD"), `${name}: multi-byte character was split`);
 		});
 	}
 
+	it("keeps every line that fits and never lets the sample crowd them out", () => {
+		// The shape that the byte-slice fallback ruined: useful lines at both ends,
+		// one oversized blob in the middle carrying nothing an agent can use.
+		const head = Array.from({ length: 10 }, (_, i) => `[build] compiling module-${i}.ts ... ok`);
+		const tail = Array.from({ length: 10 }, (_, i) => `[error] TS2345 src/f${i}.ts: not assignable`);
+		const blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph".repeat(15_000); // ~540KB, one line
+		const out = compressOutput(
+			`${head.join("\n")}\n${blob}\n${tail.join("\n")}\n`,
+			"npm run build",
+			"balanced",
+			102_400,
+		);
+
+		for (const line of [...head, ...tail]) {
+			assert.ok(out.includes(line), `dropped a line that fit: ${line}`);
+		}
+		const blobBytes = (out.match(/QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph/g) ?? []).length * 36;
+		assert.ok(
+			blobBytes <= 102_400 / 4,
+			`the sample crowded out the response: ${blobBytes} of ${Buffer.byteLength(out)} bytes`,
+		);
+		// ...but it must not be zero either, or this is the collapse defect again.
+		assert.ok(blobBytes > 0, "the oversized line was dropped without a sample");
+	});
+
+	it("never returns more than the budget, even below the marker's own size", () => {
+		// `sliceUtf8(result, maxBytes - 20) + marker` appended a 20-byte marker
+		// unconditionally, returning 20 bytes for a 5-byte budget — 400% of a cap
+		// the executor documents as a guarantee.
+		for (const budget of [1, 5, 10, 20, 21, 100, 160, 162, 1024]) {
+			const out = smartTruncate(`${"x".repeat(1_000_000)}\n`, budget);
+			assert.ok(
+				Buffer.byteLength(out) <= budget,
+				`budget ${budget}: returned ${Buffer.byteLength(out)} bytes`,
+			);
+		}
+	});
+
 	it("keeps the executor's own cap notice alongside the content", async () => {
-		// The executor appends `[output capped …]` as its own line, which is exactly
-		// the short line that used to defeat the guard: 16MB in, 117 bytes out.
 		const { SubprocessExecutor } = await import("../../src/executor.js");
 		const { detectRuntimes } = await import("../../src/runtime/index.js");
 		const runtimes = await detectRuntimes();
@@ -210,9 +254,8 @@ describe("truncation spends the budget whatever the line shape", () => {
 				code: `const c="x".repeat(1024*1024); for(let i=0;i<5;i++) process.stdout.write(c);`,
 				timeout: 30_000,
 			});
-			const bytes = Buffer.byteLength(r.stdout);
-			assert.ok(bytes >= config.maxOutputBytes * 0.5, `only ${bytes} bytes returned`);
-			assert.ok(bytes <= config.maxOutputBytes, `budget exceeded: ${bytes}`);
+			assert.ok(Buffer.byteLength(r.stdout) <= config.maxOutputBytes, "budget exceeded");
+			assert.ok(contentBytes(r.stdout) >= 2000, "the response is markers only");
 			assert.ok(r.stdout.includes("output capped"), "the cap notice must survive");
 			assert.ok(r.stdout.includes("xxxxx"), "actual content must survive");
 		} finally {

@@ -284,37 +284,50 @@ function smartTruncate(output: string, maxBytes: number): string {
 		tailStart = i;
 	}
 
-	const headLines = lines.slice(0, headEnd);
-	const tailLines = lines.slice(tailStart);
-	// Line-based admission cannot spend the budget when one line is longer than
-	// it — minified JS/CSS, a single-line JSON blob, `tr -d '\n'` output. Measure
-	// what was actually RETAINED against the budget.
-	//
-	// Two weaker guards failed here before. Comparing indices treated the empty
-	// element from a trailing newline as a kept line. Testing for emptiness was
-	// defeated by any one short line: `//# sourceMappingURL=…`, which webpack,
-	// esbuild, rollup and terser all emit by default, turned a 512KB bundle into
-	// 110 bytes — and the executor manufactures the same shape itself by
-	// appending its own `[output capped …]` marker.
-	if (headBytes + tailBytes < budget / 2) {
-		const marker = "\n... [truncated] ...\n";
-		// Keep whatever tail lines were admitted: they carry the executor's own
-		// cap/kill notices, which are the most informative bytes in the response.
-		const tailText = tailLines.join("\n");
-		const room = Math.max(0, maxBytes - Buffer.byteLength(marker) - Buffer.byteLength(tailText));
-		return sliceUtf8(output, room) + marker + tailText;
-	}
-
+	const headText = lines.slice(0, headEnd).join("\n");
+	const tailText = lines.slice(tailStart).join("\n");
 	const truncatedLines = lines.length - headEnd - (lines.length - tailStart);
 	const truncatedBytes = Buffer.byteLength(output) - headBytes - tailBytes;
-
 	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
 
-	const result = headLines.join("\n") + separator + tailLines.join("\n");
+	let result = headText + separator + tailText;
+
+	// A line longer than the budget is admitted by neither loop, so the line path
+	// can return almost nothing: a 512KB minified bundle came back as 110 bytes,
+	// and 16MB of single-line stdout as 117. Replacing the line result with a byte
+	// slice fixed that and caused a worse defect — a build log whose only oversized
+	// line was a 540KB base64 blob came back 99.0% blob, 106x the context cost,
+	// with no information the 964-byte line result did not already carry.
+	//
+	// The two shapes are structurally identical: in both, every short line is
+	// admitted and one huge line is dropped. No test on the retained lines can
+	// separate "the huge line is the payload" from "the huge line is noise", so
+	// neither branch is right. Take both: keep every line that fit AND add a
+	// bounded sample of what was dropped. The exact fraction is not load-bearing —
+	// what matters is that the sample can never crowd out the lines that did fit,
+	// and that a single huge line can never return nothing. Nothing is lost
+	// either way: the executor indexes `indexableStdout` before truncation, so
+	// `search` still reaches the full text.
+	if (headBytes + tailBytes < budget / 2 && tailStart > headEnd) {
+		const open = "... [sample of the truncated region] ...\n";
+		const close = "\n... [sample ends] ...\n";
+		const overhead = Buffer.byteLength(open) + Buffer.byteLength(close);
+		const room = maxBytes - Buffer.byteLength(result) - overhead;
+		const cap = Math.min(room, Math.max(2048, Math.floor(budget / 8)));
+		if (cap > 0) {
+			const sample = sliceUtf8(lines.slice(headEnd, tailStart).join("\n"), cap);
+			if (sample) result = headText + separator + open + sample + close + tailText;
+		}
+	}
+
 	// The reserve is a generous estimate; clamp in case the separator ran long.
 	if (Buffer.byteLength(result) <= maxBytes) return result;
 	const marker = "\n... [truncated] ...";
-	return sliceUtf8(result, Math.max(0, maxBytes - Buffer.byteLength(marker))) + marker;
+	const markerBytes = Buffer.byteLength(marker);
+	// Appending a marker that does not itself fit returned 20 bytes for a 5-byte
+	// budget — 400% of a cap this function documents as a guarantee.
+	if (markerBytes >= maxBytes) return sliceUtf8(result, maxBytes);
+	return sliceUtf8(result, maxBytes - markerBytes) + marker;
 }
 
 export { deduplicateLines, groupErrorLines, smartTruncate, stripAnsi, stripProgressLines };

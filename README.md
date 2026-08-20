@@ -427,7 +427,7 @@ A project file accepts everything except the keys below:
 }
 ```
 
-**A project file may not set security-relevant keys.** These nine are honored
+**A project file may not set security-relevant keys.** These ten are honored
 only from your home file or the environment:
 
 | Key | Why it is restricted |
@@ -437,6 +437,7 @@ only from your home file or the environment:
 | `hardCapBytes`, `maxOutputBytes` | The memory guard. `maxOutputBytes` raises `hardCapBytes` to match it, so leaving it project-settable hands the guard back. |
 | `searchWindowMs`, `searchBlockAfter`, `searchReduceAfter` | A wide window with a low threshold switches `search` off for the rest of the session. |
 | `maxIndexedSources` | `0` disables pruning, so a persistent store grows without bound. |
+| `compressionLevel` | Rewrites `maxOutputBytes`, `searchMaxBytes`, `batchMaxBytes` and `searchLimit`, so it reaches the budgets above indirectly. |
 
 A project file travels with the repository, so an untrusted clone could
 otherwise name your credentials in `passthroughEnvVars` and have them copied

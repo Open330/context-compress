@@ -65,6 +65,12 @@ const DEFAULTS: Config = {
 	maxIndexedSources: 500,
 };
 
+/**
+ * The smallest response budget that can carry content rather than markers alone.
+ * Applies to `hardCapBytes` too, because the budget is clamped down to it.
+ */
+const MIN_OUTPUT_BYTES = 1024;
+
 /** Overrides applied per compression level */
 const LEVEL_OVERRIDES: Record<CompressionLevel, Partial<Config>> = {
 	normal: {},
@@ -151,6 +157,16 @@ export const USER_SCOPE_ONLY_KEYS = [
 	// disables pruning, so a repo could make a user-enabled persistent store grow
 	// without bound in their own project directory.
 	"maxIndexedSources",
+	// Indirection. `compressionLevel` is not itself sensitive, but LEVEL_OVERRIDES
+	// rewrites `maxOutputBytes`, `searchMaxBytes`, `batchMaxBytes`, `searchLimit`
+	// and `intentSearchThreshold` — four of which are protected above. A project
+	// file containing nothing but `{"compressionLevel":"normal"}` cancelled a
+	// user's `ultra` and restored every default budget: maxOutputBytes 25,600 ->
+	// 102,400, searchMaxBytes 10,240 -> 40,960, batchMaxBytes 20,480 -> 81,920,
+	// searchLimit 1 -> 3 — while stderr printed that `maxOutputBytes` had been
+	// refused, which made the refusal look effective. Set it from the home file
+	// or CONTEXT_COMPRESS_COMPRESSION_LEVEL.
+	"compressionLevel",
 ] as const satisfies readonly (keyof z.infer<typeof ConfigSchema>)[];
 
 function readConfigFile(path: string, scope: "project" | "user"): Partial<Config> {
@@ -302,11 +318,22 @@ export function loadConfig(projectDir?: string): Config {
 	}
 
 	// Sanity checks on final config (log when values are clamped)
-	if (merged.maxOutputBytes < 1024) {
+	// `hardCapBytes` needs the same floor as the budget it bounds. Without it the
+	// floor below was self-defeating: maxOutputBytes was raised to 1024 and then
+	// clamped straight back down to an arbitrarily small capture cap, and at any
+	// effective budget of 11..162 bytes the truncator could return only markers —
+	// a response with no content at all.
+	if (merged.hardCapBytes < MIN_OUTPUT_BYTES) {
 		console.error(
-			`[context-compress] Config: maxOutputBytes clamped from ${merged.maxOutputBytes} to 1024`,
+			`[context-compress] Config: hardCapBytes clamped from ${merged.hardCapBytes} to ${MIN_OUTPUT_BYTES}`,
 		);
-		merged.maxOutputBytes = 1024;
+		merged.hardCapBytes = MIN_OUTPUT_BYTES;
+	}
+	if (merged.maxOutputBytes < MIN_OUTPUT_BYTES) {
+		console.error(
+			`[context-compress] Config: maxOutputBytes clamped from ${merged.maxOutputBytes} to ${MIN_OUTPUT_BYTES}`,
+		);
+		merged.maxOutputBytes = MIN_OUTPUT_BYTES;
 	}
 	// Clamp the RESPONSE budget down to the capture cap, never the capture cap up.
 	// `hardCapBytes` is the memory guard: a per-execution stream past ~512MB makes

@@ -25,6 +25,8 @@ import type {
 import { detectInjectionPatterns } from "./utils.js";
 
 const MAX_VOCABULARY = 10_000;
+/** Liveness probes per misspelled word in fuzzy correction. */
+const MAX_FUZZY_PROBES = 5;
 /** Prune only once the overshoot reaches this, to amortize the FTS5 scans. */
 const PRUNE_BATCH = 25;
 /** Hard ceiling on ids bound into one prune statement, well under SQLite's 32766. */
@@ -658,15 +660,45 @@ export class ContentStore {
 				.prepare("SELECT word FROM vocabulary WHERE length(word) BETWEEN ? AND ? LIMIT 500")
 				.all(minLen, maxLen) as Array<{ word: string }>;
 
-			let bestWord = word;
-			let bestDist = maxDist + 1;
+			// Rank every candidate, then take the closest one that a search can
+			// actually reach. `vocabulary` has no `source_id`, so retention pruning
+			// leaves the words of deleted sources behind, and picking the single
+			// strict minimum handed the correction to whichever tied word was
+			// inserted first — always the older, already-deleted one. Measured: two
+			// stores with identical live content, one of which had earlier indexed
+			// and since pruned a source containing `zebracornxx`, answered the same
+			// query with 1 hit and 0 hits. Layer 3 reported nothing for content that
+			// was still fully indexed.
+			const ranked = candidates
+				.map(({ word: candidate }) => ({
+					candidate,
+					dist: levenshtein(word.toLowerCase(), candidate.toLowerCase(), maxDist),
+				}))
+				.filter((entry) => entry.dist <= maxDist)
+				.sort((a, b) => a.dist - b.dist);
 
-			for (const { word: candidate } of candidates) {
-				const dist = levenshtein(word.toLowerCase(), candidate.toLowerCase(), maxDist);
-				if (dist < bestDist && dist <= maxDist) {
-					bestDist = dist;
+			let bestWord = word;
+			// An exact vocabulary hit is not a typo, so it is never corrected — even
+			// when the source that taught the word has since been pruned. Answering a
+			// query for deleted content with a one-character neighbour's content
+			// would be worse than answering nothing: the caller asked for something
+			// specific and would get a different source back.
+			if (ranked.length > 0 && ranked[0].dist === 0) {
+				corrected.push(word);
+				continue;
+			}
+			// Bounded: each probe is an FTS lookup, and this is already search's
+			// slowest layer. A vocabulary full of dead words must not turn one query
+			// into hundreds.
+			for (const { candidate } of ranked.slice(0, MAX_FUZZY_PROBES)) {
+				if (this.wordIsReachable(candidate)) {
 					bestWord = candidate;
+					break;
 				}
+				// No chunk can match it, so no search will ever use it. Dropping it
+				// here keeps the table from filling with words that only mislead —
+				// the same saturation that killed fuzzy search once already.
+				this.db.prepare("DELETE FROM vocabulary WHERE word = ?").run(candidate);
 			}
 
 			if (bestWord !== word) anyChanged = true;
@@ -674,6 +706,27 @@ export class ContentStore {
 		}
 
 		return anyChanged ? corrected.join(" ") : null;
+	}
+
+	/**
+	 * Can `porterSearch` still reach this word? That is exactly the question the
+	 * caller needs answered — a correction the search cannot resolve is worse than
+	 * no correction, because the caller stops at the first non-empty correction.
+	 * MATCH uses the same porter index the real query will use, so agreement is
+	 * structural rather than approximate, and it is an index lookup, not a scan.
+	 */
+	private wordIsReachable(word: string): boolean {
+		const sanitized = sanitizeQuery(word);
+		if (!sanitized) return false;
+		try {
+			return (
+				this.db.prepare("SELECT 1 FROM chunks WHERE chunks MATCH ? LIMIT 1").get(sanitized) !==
+				undefined
+			);
+		} catch {
+			// A term FTS5 rejects cannot be reached by a query either.
+			return false;
+		}
 	}
 
 	/**

@@ -11,7 +11,12 @@ function formatCommandResult(
 	result: ExecResult,
 ): { corpus: string; inventory: string } {
 	const output = result.indexableStdout || "(no output)";
-	const lineCount = (result.stdout || "(no output)").split("\n").length;
+	// The inventory is the only quantitative signal `batch_execute` returns — it
+	// never returns per-command output. Counting `stdout` counted the compressed
+	// copy that is then discarded, so 80,001 indexed lines were reported as "2
+	// lines" and an agent had no reason to search the 6.7MB it had just paid to
+	// index. Count what `store.index` actually received.
+	const lineCount = (result.indexableStdout || "(no output)").split("\n").length;
 	const status = getExecutionStatus(result);
 	const exitCode = result.exitCode === null ? "unknown" : String(result.exitCode);
 	const diagnostics = [

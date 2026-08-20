@@ -304,9 +304,9 @@ export async function runWrap(
 		if (stream) {
 			runStreaming(proc, resolve);
 		} else {
-			const captureCapBytes =
-				options.captureCapBytes ?? loadConfig(resolveProjectDir()).hardCapBytes;
-			runBuffered(proc, cmdLine, mode, captureCapBytes, resolve);
+			const cfg = loadConfig(resolveProjectDir());
+			const captureCapBytes = options.captureCapBytes ?? cfg.hardCapBytes;
+			runBuffered(proc, cmdLine, mode, captureCapBytes, cfg.maxOutputBytes, resolve);
 		}
 	});
 }
@@ -328,16 +328,42 @@ function killProcessTree(pid: number): void {
 	}
 }
 
+/**
+ * `wrap` compresses stdout and then wrote stderr back untouched: no ANSI strip,
+ * no dedup/grouping, and never counted against `maxOutputBytes`. Claude Code's
+ * Bash tool returns stderr to the model, so those bytes are context, not a
+ * terminal — and `setup --auto` turns this path on by default, which makes it
+ * the path most callers actually get. `SubprocessExecutor` fixed exactly this
+ * for the `execute` tool; the CLI pipeline that claims to mirror it did not.
+ *
+ * Measured on a build emitting 60k coloured error lines: `execute` returned
+ * 102,400 bytes with no escape sequences, `wrap` returned 4,020,042 bytes with
+ * 60,000 of them.
+ */
+function normalizeStderr(stderr: string, maxOutputBytes: number): string {
+	let text = stripAnsi(stderr);
+	// Same threshold as the executor: below it, grouping costs more than it saves.
+	if (text.length > 10_000) {
+		text = groupErrorLines(deduplicateLines(stripProgressLines(text)));
+	}
+	return smartTruncate(text, maxOutputBytes);
+}
+
 function writeBufferedStderr(
 	stderr: string,
 	signal: NodeJS.Signals | null,
 	capped: boolean,
 	captureCapBytes: number,
+	maxOutputBytes: number,
 ): void {
-	if (stderr) process.stderr.write(stderr);
+	if (stderr) {
+		const normalized = normalizeStderr(stderr, maxOutputBytes);
+		process.stderr.write(normalized);
+		if (normalized && !normalized.endsWith("\n")) process.stderr.write("\n");
+	}
 	if (capped) {
 		process.stderr.write(
-			`context-compress wrap: combined stdout/stderr exceeded the ${formatBytes(captureCapBytes)} capture limit; process killed. Re-run with --stream or increase CONTEXT_COMPRESS_HARD_CAP_BYTES.\n`,
+			`context-compress wrap: combined stdout/stderr exceeded the ${formatBytes(captureCapBytes)} capture limit; later output was not captured. The command itself ran to completion. Re-run with --stream or increase CONTEXT_COMPRESS_HARD_CAP_BYTES.\n`,
 		);
 	} else if (signal) {
 		process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
@@ -349,32 +375,69 @@ function runBuffered(
 	cmdLine: string,
 	mode: RequestedMode,
 	captureCapBytes: number,
+	maxOutputBytes: number,
 	resolve: (code: number) => void,
 ): void {
-	const stdoutChunks: Buffer[] = [];
-	const stderrChunks: Buffer[] = [];
+	/**
+	 * Capture keeps a head and a rolling tail per stream. A build's verdict is its
+	 * last line, and capping by "stop capturing" put a 46.8MB build's
+	 * `ALL-TESTS-PASSED` on the wrong side of the cap. Before the cap existed the
+	 * whole stream was buffered, so losing the tail is a regression, not a
+	 * trade-off; a bounded ring restores it without restoring unbounded memory.
+	 */
+	type Sink = { head: Buffer[]; tail: Buffer[]; tailBytes: number };
+	const outSink: Sink = { head: [], tail: [], tailBytes: 0 };
+	const errSink: Sink = { head: [], tail: [], tailBytes: 0 };
+	// Bound the ring by the capture cap as well, so total retention stays within
+	// twice the cap even when the cap is deliberately tiny.
+	const tailCap = Math.min(maxOutputBytes, captureCapBytes);
 	let capturedBytes = 0;
 	let capped = false;
 
-	const capture = (chunk: Buffer, chunks: Buffer[]): void => {
-		if (capped) return;
-
-		const remaining = captureCapBytes - capturedBytes;
-		if (chunk.length <= remaining) {
-			chunks.push(chunk);
-			capturedBytes += chunk.length;
-			return;
+	const capture = (chunk: Buffer, sink: Sink): void => {
+		let rest = chunk;
+		if (!capped) {
+			const remaining = captureCapBytes - capturedBytes;
+			if (rest.length <= remaining) {
+				sink.head.push(rest);
+				capturedBytes += rest.length;
+				return;
+			}
+			if (remaining > 0) sink.head.push(Buffer.from(rest.subarray(0, remaining)));
+			rest = rest.subarray(Math.max(0, remaining));
+			capturedBytes = captureCapBytes;
+			capped = true;
+			// Do NOT kill the child. `hardCapBytes` is the MCP server's memory guard,
+			// where output is held in RAM for a tool response; `wrap` is transparent
+			// passthrough of the user's own command. Applying the guard by killing the
+			// process tree reported that 46.8MB build as exit 1 when it exited 0, and
+			// any work it would have done after the cap never ran.
 		}
-
-		// Retain only the portion within the cap; never keep the overflowing chunk.
-		if (remaining > 0) chunks.push(Buffer.from(chunk.subarray(0, remaining)));
-		capturedBytes = captureCapBytes;
-		capped = true;
-		if (proc.pid) killProcessTree(proc.pid);
+		if (rest.length === 0) return;
+		sink.tail.push(Buffer.from(rest));
+		sink.tailBytes += rest.length;
+		while (sink.tail.length > 1 && sink.tailBytes - sink.tail[0].length >= tailCap) {
+			sink.tailBytes -= (sink.tail.shift() as Buffer).length;
+		}
 	};
 
-	proc.stdout?.on("data", (chunk: Buffer) => capture(chunk, stdoutChunks));
-	proc.stderr?.on("data", (chunk: Buffer) => capture(chunk, stderrChunks));
+	/** Head, a marker for the gap, then the most recent `tailCap` bytes. */
+	const assemble = (sink: Sink): string => {
+		const head = Buffer.concat(sink.head).toString("utf-8");
+		if (sink.tail.length === 0) return head;
+		let tail = Buffer.concat(sink.tail);
+		const dropped = capturedBytes + sink.tailBytes - Buffer.byteLength(head);
+		if (tail.length > tailCap) tail = tail.subarray(tail.length - tailCap);
+		// The ring can start mid-character; drop the orphaned continuation bytes
+		// rather than emitting U+FFFD.
+		let start = 0;
+		while (start < tail.length && (tail[start] & 0xc0) === 0x80) start++;
+		const marker = `\n... [middle of the stream not captured — ${formatBytes(Math.max(0, dropped))} past the ${formatBytes(captureCapBytes)} capture limit] ...\n`;
+		return head + marker + tail.subarray(start).toString("utf-8");
+	};
+
+	proc.stdout?.on("data", (chunk: Buffer) => capture(chunk, outSink));
+	proc.stderr?.on("data", (chunk: Buffer) => capture(chunk, errSink));
 
 	proc.on("error", (err) => {
 		process.stderr.write(`context-compress wrap: ${err.message}\n`);
@@ -382,16 +445,18 @@ function runBuffered(
 	});
 
 	proc.on("close", (code, signal) => {
-		const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
-		const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+		const stdout = assemble(outSink);
+		const stderr = assemble(errSink);
 		// auto mode triggers an LLM call; concrete modes are sync. Both flow
 		// through compressOutputAsync.
 		compressOutputAsync(stdout, cmdLine, mode).then(({ output: compressed }) => {
 			process.stdout.write(compressed);
 			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
-			writeBufferedStderr(stderr, signal, capped, captureCapBytes);
+			writeBufferedStderr(stderr, signal, capped, captureCapBytes, maxOutputBytes);
 			// Signal-killed children report code=null — never mask that as success.
-			resolve(capped ? 1 : (code ?? 1));
+			// A capture cap is our limit, not the command's outcome: report what the
+			// command actually returned.
+			resolve(code ?? 1);
 		});
 	});
 }
