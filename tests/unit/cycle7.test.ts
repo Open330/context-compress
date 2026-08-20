@@ -156,38 +156,65 @@ describe("IPv4-translated IPv6 is classified", () => {
 	});
 });
 
-describe("truncation keeps content when no whole line fits", () => {
-	it("byte-slices a single line longer than the budget", async () => {
-		// smartTruncate admits whole lines, so when the only line exceeded both the
-		// head and tail targets it returned the separator and nothing else —
-		// measured 20,000 bytes of input coming back as 73 bytes of marker.
-		// Minified JS/CSS and single-line JSON hit this.
+describe("truncation spends the budget whatever the line shape", () => {
+	// Line-based admission cannot spend the budget when one line is longer than
+	// it. Two earlier guards each passed a narrow test and failed in the field:
+	// an index check was defeated by the empty element a trailing newline
+	// produces, and an emptiness check was defeated by ANY single short line —
+	// including `//# sourceMappingURL=…`, which webpack/esbuild/rollup/terser all
+	// emit by default, and the executor's own `[output capped …]` marker.
+	//
+	// So this asserts the CLASS, not a shape: for every arrangement of one
+	// oversized line among short ones, the response must actually use its budget.
+	const huge = "var x=1;".repeat(64_000); // ~512KB on one line
+	const shapes: Array<[name: string, text: string]> = [
+		["bare, no trailing newline", huge],
+		["bare, trailing newline", `${huge}\n`],
+		["with a sourceMappingURL comment", `${huge}\n//# sourceMappingURL=b.min.js.map\n`],
+		["with a trailing status line", `${huge}\nDone.\n`],
+		["with a short leading line", `OK\n${huge}\n`],
+		["between short lines", `start\n${huge}\nend\n`],
+		["among many short lines", `${huge}\n${Array.from({ length: 40 }, (_, i) => `n${i}`).join("\n")}\n`],
+		["CRLF line endings", `${huge}\r\nDone.\r\n`],
+		["multi-byte content", `${"한".repeat(80_000)}\nend\n`],
+	];
+
+	for (const [name, text] of shapes) {
+		it(`keeps content: ${name}`, () => {
+			const budget = 20_000;
+			const out = compressOutput(text, "cat bundle.min.js", "balanced", budget);
+			const bytes = Buffer.byteLength(out);
+
+			assert.ok(bytes <= budget, `${name}: budget exceeded (${bytes})`);
+			// The real bar is that the budget was USED, not merely that something
+			// came back — a marker alone is 70-110 bytes and passes a non-empty check.
+			assert.ok(bytes >= budget * 0.5, `${name}: only ${bytes} of ${budget} bytes used`);
+			assert.match(out, /truncated/, `${name}: truncation must be stated`);
+			assert.ok(!out.includes("\uFFFD"), `${name}: multi-byte character was split`);
+		});
+	}
+
+	it("keeps the executor's own cap notice alongside the content", async () => {
+		// The executor appends `[output capped …]` as its own line, which is exactly
+		// the short line that used to defeat the guard: 16MB in, 117 bytes out.
 		const { SubprocessExecutor } = await import("../../src/executor.js");
 		const { detectRuntimes } = await import("../../src/runtime/index.js");
 		const runtimes = await detectRuntimes();
-		if (!runtimes.has("shell")) return;
+		if (!runtimes.has("javascript")) return;
 
-		const executor = new SubprocessExecutor(runtimes, { ...loadConfig(), maxOutputBytes: 4_096 });
+		const config = { ...loadConfig(), hardCapBytes: 2 * 1024 * 1024 };
+		const executor = new SubprocessExecutor(runtimes, config);
 		try {
-			// BOTH shapes. The first version of this test used `printf` only — no
-			// trailing newline — which was the single shape the broken fallback
-			// happened to cover, so it passed on an implementation that dropped
-			// 100% of the output for every real command.
-			for (const [label, emit] of [
-				["with trailing newline", 'print s'],
-				["without trailing newline", 'printf "%s", s'],
-			] as const) {
-				const r = await executor.execute({
-					language: "shell",
-					code: `awk 'BEGIN{s="";for(i=0;i<20000;i++) s=s "x"; ${emit}}'`,
-					timeout: 30_000,
-				});
-				const bytes = Buffer.byteLength(r.stdout);
-				assert.ok(bytes > 1_000, `${label}: only ${bytes} bytes survived`);
-				assert.ok(bytes <= 4_096, `${label}: budget exceeded: ${bytes}`);
-				assert.match(r.stdout, /truncated/, `${label}: truncation must be stated`);
-				assert.ok(r.stdout.startsWith("x"), `${label}: the head must be kept`);
-			}
+			const r = await executor.execute({
+				language: "javascript",
+				code: `const c="x".repeat(1024*1024); for(let i=0;i<5;i++) process.stdout.write(c);`,
+				timeout: 30_000,
+			});
+			const bytes = Buffer.byteLength(r.stdout);
+			assert.ok(bytes >= config.maxOutputBytes * 0.5, `only ${bytes} bytes returned`);
+			assert.ok(bytes <= config.maxOutputBytes, `budget exceeded: ${bytes}`);
+			assert.ok(r.stdout.includes("output capped"), "the cap notice must survive");
+			assert.ok(r.stdout.includes("xxxxx"), "actual content must survive");
 		} finally {
 			executor.shutdown();
 		}

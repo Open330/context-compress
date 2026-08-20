@@ -286,18 +286,23 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	const headLines = lines.slice(0, headEnd);
 	const tailLines = lines.slice(tailStart);
-	// Nothing of substance fit: the content is one line longer than the whole
-	// budget (minified JS/CSS, a single-line JSON blob, `tr -d '\n'` output).
-	// Admitting only whole lines returned the separator and nothing else.
+	// Line-based admission cannot spend the budget when one line is longer than
+	// it — minified JS/CSS, a single-line JSON blob, `tr -d '\n'` output. Measure
+	// what was actually RETAINED against the budget.
 	//
-	// Test the retained CONTENT, not the indices. Output ending in a newline —
-	// which is essentially all of it — splits to [huge, ""], and the tail loop
-	// admits that empty element, so an index check saw a kept line where there
-	// were no kept bytes. A 48KB minified file came back as 73 bytes of marker.
-	if (headLines.join("").length === 0 && tailLines.join("").length === 0) {
-		const marker = "\n... [truncated] ...";
-		const room = Math.max(0, maxBytes - Buffer.byteLength(marker));
-		return sliceUtf8(output, room) + marker;
+	// Two weaker guards failed here before. Comparing indices treated the empty
+	// element from a trailing newline as a kept line. Testing for emptiness was
+	// defeated by any one short line: `//# sourceMappingURL=…`, which webpack,
+	// esbuild, rollup and terser all emit by default, turned a 512KB bundle into
+	// 110 bytes — and the executor manufactures the same shape itself by
+	// appending its own `[output capped …]` marker.
+	if (headBytes + tailBytes < budget / 2) {
+		const marker = "\n... [truncated] ...\n";
+		// Keep whatever tail lines were admitted: they carry the executor's own
+		// cap/kill notices, which are the most informative bytes in the response.
+		const tailText = tailLines.join("\n");
+		const room = Math.max(0, maxBytes - Buffer.byteLength(marker) - Buffer.byteLength(tailText));
+		return sliceUtf8(output, room) + marker + tailText;
 	}
 
 	const truncatedLines = lines.length - headEnd - (lines.length - tailStart);
