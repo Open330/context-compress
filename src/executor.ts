@@ -286,21 +286,24 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	const headLines = lines.slice(0, headEnd);
 	const tailLines = lines.slice(tailStart);
-	const truncatedLines = lines.length - headEnd - (lines.length - tailStart);
-	const truncatedBytes = Buffer.byteLength(output) - headBytes - tailBytes;
-
-	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
-
-	// Nothing fit: the content is one line longer than the whole budget (minified
-	// JS/CSS, a single-line JSON blob, `tr -d '\n'` output). Admitting only whole
-	// lines returned the separator and nothing else — 20,000 bytes of input came
-	// back as 73 bytes of marker. Fall back to a byte slice so the caller still
-	// sees the head of the content.
-	if (headEnd === 0 && tailStart >= lines.length) {
+	// Nothing of substance fit: the content is one line longer than the whole
+	// budget (minified JS/CSS, a single-line JSON blob, `tr -d '\n'` output).
+	// Admitting only whole lines returned the separator and nothing else.
+	//
+	// Test the retained CONTENT, not the indices. Output ending in a newline —
+	// which is essentially all of it — splits to [huge, ""], and the tail loop
+	// admits that empty element, so an index check saw a kept line where there
+	// were no kept bytes. A 48KB minified file came back as 73 bytes of marker.
+	if (headLines.join("").length === 0 && tailLines.join("").length === 0) {
 		const marker = "\n... [truncated] ...";
 		const room = Math.max(0, maxBytes - Buffer.byteLength(marker));
 		return sliceUtf8(output, room) + marker;
 	}
+
+	const truncatedLines = lines.length - headEnd - (lines.length - tailStart);
+	const truncatedBytes = Buffer.byteLength(output) - headBytes - tailBytes;
+
+	const separator = `\n... [${truncatedLines} lines / ${formatBytes(truncatedBytes)} truncated — showing first ${headEnd} + last ${lines.length - tailStart} lines] ...\n`;
 
 	const result = headLines.join("\n") + separator + tailLines.join("\n");
 	// The reserve is a generous estimate; clamp in case the separator ran long.

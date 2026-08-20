@@ -27,6 +27,8 @@ import { detectInjectionPatterns } from "./utils.js";
 const MAX_VOCABULARY = 10_000;
 /** Prune only once the overshoot reaches this, to amortize the FTS5 scans. */
 const PRUNE_BATCH = 25;
+/** Hard ceiling on ids bound into one prune statement, well under SQLite's 32766. */
+const PRUNE_MAX_PER_CALL = 500;
 /**
  * Renderers separate hits with `--- [source] ---`. Indexed content is untrusted,
  * so a chunk containing that exact shape forged an attribution line and made the
@@ -443,9 +445,15 @@ export class ContentStore {
 		// overshoot accumulate amortizes those scans, while a small configured
 		// limit still prunes promptly.
 		const batch = Math.max(1, Math.min(PRUNE_BATCH, Math.floor(this.maxSources / 10)));
+		// Cap how many are deleted per call. Every id becomes a bound parameter, and
+		// SQLite refuses past SQLITE_MAX_VARIABLE_NUMBER (32766) — `prepare` throws,
+		// which wedged every write path permanently: index() commits its own
+		// transaction BEFORE pruning, so each failed call added another source while
+		// reporting failure. Reachable on a store built before retention existed, or
+		// after a large limit is lowered. A leftover backlog drains on later calls.
 		const excess = this.db
-			.prepare("SELECT id FROM sources ORDER BY id DESC LIMIT -1 OFFSET ?")
-			.all(this.maxSources) as Array<{ id: number }>;
+			.prepare("SELECT id FROM sources ORDER BY id DESC LIMIT ? OFFSET ?")
+			.all(PRUNE_MAX_PER_CALL, this.maxSources) as Array<{ id: number }>;
 		if (excess.length < batch) return;
 
 		// One statement for the whole batch. `source_id` is UNINDEXED, so each

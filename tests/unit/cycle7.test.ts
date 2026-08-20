@@ -169,16 +169,25 @@ describe("truncation keeps content when no whole line fits", () => {
 
 		const executor = new SubprocessExecutor(runtimes, { ...loadConfig(), maxOutputBytes: 4_096 });
 		try {
-			const r = await executor.execute({
-				language: "shell",
-				code: `awk 'BEGIN{s="";for(i=0;i<20000;i++) s=s "x"; printf "%s", s}'`,
-				timeout: 30_000,
-			});
-			const bytes = Buffer.byteLength(r.stdout);
-			assert.ok(bytes > 1_000, `only ${bytes} bytes survived — content was dropped`);
-			assert.ok(bytes <= 4_096, `budget exceeded: ${bytes}`);
-			assert.match(r.stdout, /truncated/, "truncation must still be stated");
-			assert.ok(r.stdout.startsWith("x"), "the head of the content must be kept");
+			// BOTH shapes. The first version of this test used `printf` only — no
+			// trailing newline — which was the single shape the broken fallback
+			// happened to cover, so it passed on an implementation that dropped
+			// 100% of the output for every real command.
+			for (const [label, emit] of [
+				["with trailing newline", 'print s'],
+				["without trailing newline", 'printf "%s", s'],
+			] as const) {
+				const r = await executor.execute({
+					language: "shell",
+					code: `awk 'BEGIN{s="";for(i=0;i<20000;i++) s=s "x"; ${emit}}'`,
+					timeout: 30_000,
+				});
+				const bytes = Buffer.byteLength(r.stdout);
+				assert.ok(bytes > 1_000, `${label}: only ${bytes} bytes survived`);
+				assert.ok(bytes <= 4_096, `${label}: budget exceeded: ${bytes}`);
+				assert.match(r.stdout, /truncated/, `${label}: truncation must be stated`);
+				assert.ok(r.stdout.startsWith("x"), `${label}: the head must be kept`);
+			}
 		} finally {
 			executor.shutdown();
 		}
@@ -311,6 +320,36 @@ describe("indexed content cannot forge a source attribution line", () => {
 				hits.some((hit) => hit.snippet.includes("internal-runbook")),
 				"content must be defanged, not dropped",
 			);
+		} finally {
+			store.close();
+		}
+	});
+});
+
+
+describe("retention drains a large backlog instead of wedging", () => {
+	it("bounds the ids bound into one prune statement", async () => {
+		// Every id became a bound parameter with no ceiling, so past SQLite's 32766
+		// limit `prepare` threw — and index() commits before pruning, so each failed
+		// call added a source while reporting failure. A permanent wedge on every
+		// write path, reachable on a store built before retention existed.
+		const { ContentStore } = await import("../../src/store.js");
+		const dbDir = mkdtempSync(join(tmpdir(), "cc-drain-"));
+		dirs.push(dbDir);
+
+		let store = new ContentStore({ persistDb: true, dbDir, maxIndexedSources: 0 });
+		try {
+			for (let i = 0; i < 1_200; i++) store.index(`row ${i}`, `src-${i}`);
+		} finally {
+			store.close();
+		}
+
+		store = new ContentStore({ persistDb: true, dbDir, maxIndexedSources: 100 });
+		try {
+			assert.doesNotThrow(() => store.index("after", "after-1"));
+			for (let i = 0; i < 10; i++) store.index(`drain ${i}`, `drain-${i}`);
+			const remaining = store.getStats().totalSources;
+			assert.ok(remaining < 1_200, `backlog did not drain: ${remaining}`);
 		} finally {
 			store.close();
 		}
