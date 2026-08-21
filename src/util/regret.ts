@@ -115,10 +115,16 @@ export function observeAndAdjust(
 	};
 
 	// A fast re-run after an aggressive compression is our regret signal.
-	const isFastRerun = rec.lastSeen > 0 && now - rec.lastSeen <= window;
+	// A negative delta satisfies `<= window`, so a clock moved backwards — a
+	// timezone-naive restore, an NTP correction, a VM resume — read as a burst of
+	// fast re-runs. Measured across six runs ten minutes apart with the clock
+	// going backwards: five fabricated regrets, a persistent downgrade from
+	// aggressive to balanced, and an 83% regret rate reported in `stats`.
+	const delta = now - rec.lastSeen;
+	const isFastRerun = rec.lastSeen > 0 && delta >= 0 && delta <= window;
 	if (isFastRerun && rec.lastMode === "aggressive") {
 		rec.regrets++;
-	} else if (rec.regrets > 0 && rec.lastSeen > 0 && now - rec.lastSeen > window) {
+	} else if (rec.regrets > 0 && rec.lastSeen > 0 && delta > window) {
 		// Decay on a run that was NOT a fast re-run. Without this, `regrets` only
 		// ever grew: once a fingerprint crossed the threshold it was pinned to
 		// balanced forever, and because the post-adjustment mode was stored below,

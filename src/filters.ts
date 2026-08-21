@@ -546,7 +546,17 @@ export function filterTestOutput(stdout: string): FilterResult {
 	// Drop per-file PASS lines from the summary (the FAIL lines + counts are
 	// what the agent needs; 200 PASS lines just inflate context).
 	if (failures.length > 0) {
-		const rollup = summary.filter((l) => !/^PASS\s/i.test(l));
+		// Jest writes ` PASS  path/to.test.ts` with a leading space, and SUMMARY_RE
+		// admits it via `^\s*`, so anchoring the drop at column 0 kept every one of
+		// them. Measured on 1,000 passing files plus one failure: 46,105 -> 414 bytes
+		// when the badge starts at column 0, and 48,105 -> 48,222 — larger than the
+		// input — in Jest's actual format. The flagship case of the flagship filter
+		// did nothing on the most common JS test runner.
+		//
+		// Also drop lines already emitted as failures: a FAIL badge is both a failure
+		// and a summary line, so it was printed twice.
+		const emitted = new Set(failures);
+		const rollup = summary.filter((l) => !/^\s*PASS\s/i.test(l) && !emitted.has(l));
 		return {
 			output: withOmissionNote([...failures, "", ...rollup], lines),
 			filtered: true,

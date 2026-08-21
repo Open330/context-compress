@@ -52,7 +52,7 @@ const PACKAGE_SEGMENT = /(?:^|[\\/])context-compress(?:[\\/]|$)/;
 const CLI_BASENAME = /(?:^|[\\/])context-compress(?:\.cmd|\.exe|\.ps1)?$/;
 
 /** The script path inside a generated `node <path>` / `tsx <path>` command. */
-function runnerScriptPath(command: string): string | null {
+export function runnerScriptPath(command: string): string | null {
 	const match = /^(?:node|tsx)\s+(.+)$/.exec(command.trim());
 	return match ? unquote(match[1].trim()) : null;
 }

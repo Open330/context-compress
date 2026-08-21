@@ -182,12 +182,16 @@ function groupErrorLines(output: string): string {
 	const resultLines: string[] = [];
 	let groupedCount = 0;
 
+	// Keys in the order they were first seen, so a line can be put back where it
+	// was if its group turns out to be a singleton.
+	const keyOf: Array<string | null> = [];
 	for (const line of lines) {
 		const match = line.match(ERROR_RE);
 		if (match) {
 			const prefix = match[1].trim();
 			const msg = match[2].trim();
 			const key = `${prefix}|${msg}`;
+			keyOf.push(key);
 
 			const existing = errorGroups.get(key);
 			if (existing) {
@@ -204,25 +208,39 @@ function groupErrorLines(output: string): string {
 			groupedCount++;
 			continue;
 		}
+		keyOf.push(null);
 		resultLines.push(line);
 	}
 
 	// Only apply grouping if it actually reduces output
 	if (groupedCount < 4 || errorGroups.size === groupedCount) return output;
 
+	// A line that appears once is not a repetition, and moving it to a trailing
+	// block costs its context: four distinct Jest failures were separated from the
+	// `●` names directly above them to save four lines. Put singletons back where
+	// they were and group only what actually repeats.
+	resultLines.length = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const key = keyOf[i];
+		if (key === null) {
+			resultLines.push(lines[i]);
+			continue;
+		}
+		const group = errorGroups.get(key);
+		if (group && group.count === 1) {
+			resultLines.push(lines[i]);
+			errorGroups.delete(key);
+		}
+	}
+	if (errorGroups.size === 0) return output;
+
 	const grouped: string[] = [];
 	for (const [, group] of errorGroups) {
-		if (group.count === 1) {
-			grouped.push(
-				group.message + (group.locations.length ? ` at line ${group.locations[0]}` : ""),
-			);
-		} else {
-			let line = `${group.message} (×${group.count})`;
-			if (group.locations.length > 0) {
-				line += ` [lines: ${group.locations.join(", ")}]`;
-			}
-			grouped.push(line);
+		let line = `${group.message} (×${group.count})`;
+		if (group.locations.length > 0) {
+			line += ` [lines: ${group.locations.join(", ")}]`;
 		}
+		grouped.push(line);
 	}
 
 	if (grouped.length > 0) {
@@ -236,7 +254,10 @@ function groupErrorLines(output: string): string {
 		for (const line of grouped) resultLines.push(line);
 	}
 
-	return resultLines.join("\n");
+	// The comment above says "only if it actually reduces output", but the guard
+	// counted lines. Measure what it claims to measure.
+	const result = resultLines.join("\n");
+	return Buffer.byteLength(result) < Buffer.byteLength(output) ? result : output;
 }
 
 /**

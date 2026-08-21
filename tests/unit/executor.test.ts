@@ -500,13 +500,14 @@ describe("groupErrorLines scale", () => {
 		// thrown from inside the child's close listener, so the execute promise never
 		// settled and the server's uncaughtException handler exited the process —
 		// a `tsc`/`eslint` run on a large monorepo could kill the MCP server.
-		const lines = Array.from(
-			{ length: 130_000 },
-			(_, i) => `src/f${i}.ts: error TS2304: cannot find name x${i}`,
-		);
-		// One duplicate, so the "grouping does not reduce output" early return does
-		// not short-circuit before the spread.
-		lines.push(lines[0]);
+		// Each message twice: a line that appears once is left where it is, so only
+		// messages that actually repeat produce a group — which is what has to be
+		// large here for the spread to overflow.
+		const lines: string[] = [];
+		for (let i = 0; i < 130_000; i++) {
+			const line = `src/f${i}.ts: error TS2304: cannot find name x${i}`;
+			lines.push(line, line);
+		}
 
 		const output = groupErrorLines(lines.join("\n"));
 

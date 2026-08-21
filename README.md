@@ -297,6 +297,10 @@ Result on this repository (RTK 0.39.0 vs context-compress 2026.5.0):
 | `ls -laR src/` | 3.8 KB | **229 B (94%)** | 3.8 KB (0%) | 3.1 KB (19%) | 877 B (78%) | aggressive (78%) |
 | `find *.ts` | 1.0 KB | 589 B (44%) | 1.0 KB (0%) | **183 B (83%)** | **183 B (83%)** | aggressive (83%) |
 | `npm test` | 21.8 KB | 114 B (99%) | 16.7 KB (24%) | **120 B (99%)** | **120 B (99%)** | balanced (99%) |
+
+> The `npm test` row was measured on `node --test` output. Jest and Vitest
+> indent their `PASS`/`FAIL` badges by one space; that shape was not compressed
+> at all until v2026.7.2 — it came back marginally larger than the input.
 | **Overall** (byte-weighted) | **85.9 KB** | 15.0 KB (82.5%) | 80.8 KB (6.0%) | 21.2 KB (75.4%) | **6.0 KB (93.0%)** | 19.0 KB (77.9%) |
 
 Three things to take from this table:
@@ -534,7 +538,7 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
 context-compress/
 ├── src/
 │   ├── index.ts              # MCP server entry
-│   ├── server.ts             # Wires deps, registers tools (132 lines, was 845)
+│   ├── server.ts             # Wires deps, registers tools (177 lines, was 845)
 │   ├── executor.ts           # SubprocessExecutor + ANSI/dedup pipeline
 │   ├── filters.ts            # Command-aware filters (git, npm, ls, find, ps, ...)
 │   ├── store.ts              # ContentStore (FTS5 + BM25 + Porter + trigram + Levenshtein)
@@ -577,8 +581,8 @@ context-compress/
 │       ├── doctor.ts         # `doctor` — diagnostics
 │       └── uninstall.ts      # `uninstall` — clean removal
 ├── tests/
-│   ├── unit/                 # 18 unit test files
-│   └── integration/          # 3 integration test files
+│   ├── unit/                 # 41 unit test files
+│   └── integration/          # 4 integration test files
 ├── scripts/
 │   ├── benchmark.ts          # Synthetic compression benchmark
 │   ├── benchmark-real.ts     # Real-command benchmark on this repo
@@ -589,7 +593,7 @@ context-compress/
 └── dist/                     # Compiled output (build artifact)
 ```
 
-> `server.ts` is now thin (132 lines) — it constructs deps, builds a `ToolContext`, registers the 8 tool modules, and wires shutdown. All tool handlers live under `src/tools/`, all reusable helpers under `src/util/`.
+> `server.ts` is now thin (177 lines) — it constructs deps, builds a `ToolContext`, registers the 8 tool modules, and wires shutdown. All tool handlers live under `src/tools/`, all reusable helpers under `src/util/`.
 
 ---
 

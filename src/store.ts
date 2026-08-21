@@ -673,7 +673,15 @@ export class ContentStore {
 	 * Fuzzy correction using vocabulary + Levenshtein distance.
 	 */
 	private fuzzyCorrect(query: string): string | null {
-		const words = query.split(/\s+/).filter((w) => w.length >= 3);
+		// A word longer than MAX_TERM_CHARS is not a plausible typo target, and
+		// levenshtein() only early-exits once a row's minimum exceeds maxDist — a
+		// near-miss stays inside the band for the whole matrix and runs the full
+		// O(n*m). Measured, one search() against a 20,000-character vocabulary word
+		// differing by one character: 2,872ms of blocked event loop, and search
+		// accepts up to 16 queries per call.
+		const words = query
+			.split(/\s+/)
+			.filter((w) => w.length >= 3 && w.length <= MAX_TERM_CHARS);
 		if (words.length === 0) return null;
 
 		const corrected: string[] = [];
@@ -767,7 +775,12 @@ export class ContentStore {
 		const sample = content.length > 51_200 ? content.slice(0, 51_200) : content;
 		const words = sample
 			.split(WORD_SPLIT_RE)
-			.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
+			.filter(
+				(w) =>
+					// Same bound on the other side: an unbounded word in the table is what
+					// the query above would have to be compared against.
+					w.length >= 3 && w.length <= MAX_TERM_CHARS && !STOPWORDS.has(w.toLowerCase()),
+			);
 
 		const unique = new Set(words.map((w) => w.toLowerCase()));
 

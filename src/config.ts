@@ -279,6 +279,12 @@ function loadEnvConfig(): Partial<Config> {
 		partial.compressionLevel = level;
 	}
 
+	// The README states every server setting has an environment override, and this
+	// key is refused from a project file, so the environment was the ONLY way to
+	// set it — and there was no way.
+	const maxIndexed = parseIntEnv("CONTEXT_COMPRESS_MAX_INDEXED_SOURCES");
+	if (maxIndexed !== undefined) partial.maxIndexedSources = maxIndexed;
+
 	if (process.env.CONTEXT_COMPRESS_PERSIST_DB === "1") {
 		partial.persistDb = true;
 	}

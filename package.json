@@ -47,7 +47,9 @@
     "hooks/",
     "skills/",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "license": "MIT",
   "repository": {
