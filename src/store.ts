@@ -679,9 +679,7 @@ export class ContentStore {
 		// O(n*m). Measured, one search() against a 20,000-character vocabulary word
 		// differing by one character: 2,872ms of blocked event loop, and search
 		// accepts up to 16 queries per call.
-		const words = query
-			.split(/\s+/)
-			.filter((w) => w.length >= 3 && w.length <= MAX_TERM_CHARS);
+		const words = query.split(/\s+/).filter((w) => w.length >= 3 && w.length <= MAX_TERM_CHARS);
 		if (words.length === 0) return null;
 
 		const corrected: string[] = [];
@@ -773,14 +771,12 @@ export class ContentStore {
 
 		// Sample first 50KB to avoid processing entire large documents
 		const sample = content.length > 51_200 ? content.slice(0, 51_200) : content;
-		const words = sample
-			.split(WORD_SPLIT_RE)
-			.filter(
-				(w) =>
-					// Same bound on the other side: an unbounded word in the table is what
-					// the query above would have to be compared against.
-					w.length >= 3 && w.length <= MAX_TERM_CHARS && !STOPWORDS.has(w.toLowerCase()),
-			);
+		const words = sample.split(WORD_SPLIT_RE).filter(
+			(w) =>
+				// Same bound on the other side: an unbounded word in the table is what
+				// the query above would have to be compared against.
+				w.length >= 3 && w.length <= MAX_TERM_CHARS && !STOPWORDS.has(w.toLowerCase()),
+		);
 
 		const unique = new Set(words.map((w) => w.toLowerCase()));
 
