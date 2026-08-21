@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { loadConfig } from "../config.js";
+import { loadConfig, resolveProjectDir } from "../config.js";
 import { SubprocessExecutor } from "../executor.js";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
 import { getVersion } from "../util/version.js";
@@ -19,6 +19,61 @@ function readSettings(): Record<string, unknown> | null {
 		return JSON.parse(readFileSync(path, "utf-8"));
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Whether a store directory can actually be written to. The leaf is created on
+ * first use, so a missing directory is fine as long as the nearest existing
+ * ancestor is writable — but an existing, unwritable path is not.
+ */
+function isWritableTarget(dir: string): boolean {
+	let probe = dir;
+	for (;;) {
+		if (existsSync(probe)) {
+			try {
+				accessSync(probe, constants.W_OK);
+				return true;
+			} catch {
+				return false;
+			}
+		}
+		const parent = dirname(probe);
+		if (parent === probe) return false;
+		probe = parent;
+	}
+}
+
+/**
+ * Report whether the content store is durable. Returns the warning count.
+ *
+ * Split out of doctor() because that function already exceeds the cognitive
+ * complexity budget; inlining another branch made a flagged function worse.
+ */
+function reportIndexPersistence(): number {
+	try {
+		const { persistDb, dbDir } = loadConfig();
+		if (persistDb) {
+			const dir = dbDir ?? join(resolveProjectDir(), ".context-compress");
+			// createServer falls back to ":memory:" when the DB cannot be opened, so a
+			// configured-but-unwritable dbDir is silently non-persistent at runtime.
+			if (!isWritableTarget(dir)) {
+				console.log(`  [WARN] Index dir is not writable: ${dir}`);
+				console.log("         The store falls back to :memory: — persistence is off.");
+				return 1;
+			}
+			console.log(`  [PASS] Index persisted at ${join(dir, "store.db")}`);
+			return 0;
+		}
+		console.log("  [WARN] Index is in-memory — search() cannot reach anything indexed");
+		console.log("         before this process started, and cumulative stats are never");
+		console.log("         written. Compression still works; retrieval does not persist.");
+		console.log("         Enable: CONTEXT_COMPRESS_PERSIST_DB=1 (or set dbDir).");
+		return 1;
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.log(`  [WARN] Index persistence: could not read config — ${msg}`);
+		return 1;
 	}
 }
 
@@ -170,7 +225,15 @@ export async function doctor(): Promise<number> {
 		console.log(`  [FAIL] FTS5: ${msg}`);
 	}
 
-	// 6. Version
+	// 6. Index persistence — the FTS5 check above proves the capability exists, not
+	// that anything is kept. With the default persistDb=false the store opens at
+	// ":memory:", so search() only ever sees what this process indexed and the
+	// cumulative stats file is never written. Both look identical to a healthy
+	// install until you restart, and doctor previously reported "All checks passed".
+	console.log("\n  Checking index persistence...");
+	warnings += reportIndexPersistence();
+
+	// 7. Version
 	const version = getVersion("unknown");
 	console.log(`\n  Version: v${version}`);
 
