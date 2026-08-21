@@ -307,8 +307,15 @@ export async function pickModeAuto(
 	// Cache the BASE decision (not the regret-adjusted one); regret is re-applied
 	// from its own evolving state on every call so it can recover if re-runs stop.
 	if (!opts.noCache && source !== "cache") {
-		cache[fp] = { mode: baseMode, expires: now + TTL_MS };
-		saveCache(cache);
+		// Re-read immediately before writing. `cache` was loaded before an await that
+		// can take seconds (the LLM call), so writing the stale copy back dropped
+		// every entry another concurrent or cross-process call had learned in the
+		// meantime: measured, 8 concurrent calls persisted 1 entry where 8 sequential
+		// calls persisted 8. The write itself is already atomic; only the snapshot
+		// was stale.
+		const fresh = loadCache();
+		fresh[fp] = { mode: baseMode, expires: now + TTL_MS };
+		saveCache(fresh);
 	}
 	return { mode, source, regretAdjusted };
 }

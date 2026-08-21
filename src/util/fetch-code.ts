@@ -61,7 +61,13 @@ options.headers = { Host: ${JSON.stringify(parsed.host)} };`
 const url = ${JSON.stringify(parsed.toString())};
 const http = require(${JSON.stringify(isHttps ? "node:https" : "node:http")});
 const options = {};
+// Without this a gzip/deflate body is decoded as text: raw DEFLATE bytes became
+// 23 replacement characters and were indexed that way. Nothing here inflates, so
+// ask the server not to compress. The pinning block below replaces
+// options.headers wholesale, so this is merged after it.
+const __acceptIdentity = { "accept-encoding": "identity" };
 ${pinning}
+options.headers = Object.assign({}, options.headers, __acceptIdentity);
 const resp = await new Promise((resolve, reject) => {
     const req = http.get(url, options, resolve);
     req.on("error", reject);
@@ -94,12 +100,17 @@ const __body = Buffer.concat(__chunks);
 // returned. Honour the Content-Type charset, then a <meta charset> in the head,
 // and fall back to UTF-8. Node ships full ICU, so TextDecoder handles the
 // legacy encodings without a new dependency.
+const __ce = String(resp.headers["content-encoding"] || "").toLowerCase();
+if (__ce && __ce !== "identity") {
+    console.error("Compressed response not supported: content-encoding " + __ce);
+    process.exit(1);
+}
 let __enc = "utf-8";
-const __ctMatch = /charset=["']?([\\w-]+)/i.exec(String(resp.headers["content-type"] || ""));
+const __ctMatch = /charset\\s*=\\s*["']?([\\w.:-]+)/i.exec(String(resp.headers["content-type"] || ""));
 if (__ctMatch) {
     __enc = __ctMatch[1].toLowerCase();
 } else {
-    const __meta = /<meta[^>]+charset=["']?([\\w-]+)/i.exec(__body.subarray(0, 4096).toString("latin1"));
+    const __meta = /<meta[^>]+charset\\s*=\\s*["']?([\\w.:-]+)/i.exec(__body.subarray(0, 4096).toString("latin1"));
     if (__meta) __enc = __meta[1].toLowerCase();
 }
 let html;

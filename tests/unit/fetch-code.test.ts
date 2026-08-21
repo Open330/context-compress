@@ -109,7 +109,13 @@ describe("buildFetchCode", () => {
 		// The decoder itself is charset-driven now, so this asserts the contract
 		// (raw bytes counted, one decode at the end) rather than one expression.
 		assert.ok(code.includes("Buffer.concat(__chunks)"), "the body must be concatenated as bytes");
+		// Asserting the accumulator line stayed green with the whole 10MB guard
+		// deleted. Assert the guard itself: the running total, its ceiling, and the
+		// exit that enforces it.
 		assert.ok(code.includes("bodyBytes += chunk.length"), "the cap must count raw bytes");
+		assert.match(code, /if \(bodyBytes > 10 \* 1024 \* 1024\)/, "the streaming cap is missing");
+		assert.match(code, /Response body too large/, "the streaming cap does not stop the read");
+		assert.match(code, /Response too large/, "the content-length pre-check is missing");
 	});
 
 	it("uses node:https for https URLs and node:http for http", () => {

@@ -261,8 +261,26 @@ function smartTruncate(output: string, maxBytes: number): string {
 	// which made a byte budget that is supposed to be a guarantee approximate.
 	const SEPARATOR_RESERVE = 160;
 	const budget = Math.max(0, maxBytes - SEPARATOR_RESERVE);
-	const headTarget = Math.floor(budget * headRatio);
-	const tailTarget = budget - headTarget;
+
+	// A line longer than the head target can be admitted by neither loop, so it
+	// would vanish with only a line count to show for it. Find it BEFORE admitting
+	// anything and hold back room for a sample: when short lines filled the budget
+	// on their own there was nothing left, and a 2MB line ending in the build's
+	// verdict disappeared from a response that had room for none of it.
+	let oversizeIndex = -1;
+	let oversizeBytes = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const size = Buffer.byteLength(lines[i]);
+		if (size > oversizeBytes) {
+			oversizeBytes = size;
+			oversizeIndex = i;
+		}
+	}
+	const hasOversize = oversizeBytes > Math.floor(budget * headRatio);
+	const sampleReserve = hasOversize ? Math.floor(budget / 8) : 0;
+	const admitBudget = budget - sampleReserve;
+	const headTarget = Math.floor(admitBudget * headRatio);
+	const tailTarget = admitBudget - headTarget;
 
 	// Collect head lines
 	let headBytes = 0;
@@ -292,68 +310,49 @@ function smartTruncate(output: string, maxBytes: number): string {
 
 	let result = headText + separator + tailText;
 
-	// A line longer than the budget is admitted by neither loop, so the line path
-	// can return almost nothing: a 512KB minified bundle came back as 110 bytes,
-	// and 16MB of single-line stdout as 117. Replacing the line result with a byte
-	// slice fixed that and caused a worse defect — a build log whose only oversized
-	// line was a 540KB base64 blob came back 99.0% blob, 106x the context cost,
-	// with no information the 964-byte line result did not already carry.
+	// The oversized line is the one thing the line path structurally cannot show,
+	// and it is often where the answer is: a minified bundle, a single-line JSON
+	// payload, or a build's final verdict appended to a 2MB line. Two earlier
+	// attempts failed in opposite directions — dropping it entirely returned 110
+	// bytes for a 512KB bundle, and replacing the line result with a byte slice
+	// returned a build log 99.0% base64. Show the lines that fit AND a bounded
+	// sample of that one line.
 	//
-	// The two shapes are structurally identical: in both, every short line is
-	// admitted and one huge line is dropped. No test on the retained lines can
-	// separate "the huge line is the payload" from "the huge line is noise", so
-	// neither branch is right. Take both: keep every line that fit AND add a
-	// bounded sample of what was dropped. The exact fraction is not load-bearing —
-	// what matters is that the sample can never crowd out the lines that did fit,
-	// and that a single huge line can never return nothing. Nothing is lost
-	// either way: the executor indexes `indexableStdout` before truncation, so
-	// `search` still reaches the full text.
-	// Sample only when a line was dropped because it was too LARGE to admit, not
-	// because there were too many. Ordinary truncation already shows both ends and
-	// says how much it cut; adding a middle sample to every truncated response
-	// would cost up to an eighth of the budget for nothing. Gating on the retained
-	// ratio instead was wrong in the other direction: 5,000 short lines followed by
-	// a 2MB line filled the budget, the branch never fired, and the verdict at the
-	// end of that line was absent from every response.
-	let oversizeDropped = 0;
-	for (let i = headEnd; i < tailStart; i++) {
-		const size = Buffer.byteLength(lines[i]);
-		if (size > oversizeDropped) oversizeDropped = size;
-	}
-	if (oversizeDropped > Math.max(headTarget, tailTarget) && tailStart > headEnd) {
-		const open = "... [sample of the truncated region] ...\n";
+	// The cap is tied to what legitimately fit, so the sample can never crowd out
+	// real content; capped at an eighth of the budget; floored at 512 bytes, which
+	// is enough to identify any format without being worth crowding out. Sizing it
+	// off the budget alone was the same mistake in a smaller costume: with 51 bytes
+	// of useful lines it still returned 2,048 bytes of blob. Filling the rest of
+	// the budget is deliberately not a goal — the marker states how much was
+	// dropped, and the executor indexes the full text before truncating.
+	// Only when that line was actually dropped — if admission kept it, it is
+	// already in the response.
+	if (hasOversize && oversizeIndex >= headEnd && oversizeIndex < tailStart) {
+		const open = "... [sample of the oversized line] ...\n";
 		const middle = "\n... [sample skips ahead] ...\n";
 		const close = "\n... [sample ends] ...\n";
-		const overhead =
-			Buffer.byteLength(open) + Buffer.byteLength(middle) + Buffer.byteLength(close);
+		const overhead = Buffer.byteLength(open) + Buffer.byteLength(middle) + Buffer.byteLength(close);
 		const room = maxBytes - Buffer.byteLength(result) - overhead;
-		// The sample may be as large as the content that legitimately fit, so it can
-		// never crowd out real lines; never more than an eighth of the budget; and
-		// never less than 2KB, or one huge line would return nothing again. Sizing it
-		// off the budget alone was the same mistake in a smaller costume: on a build
-		// log with 919 bytes of useful lines it still returned 12,780 bytes of base64,
-		// 93.3% of the response, where the rejected byte-slice returned 99.0%.
-		//
-		// Filling the rest of the budget is deliberately NOT a goal. A line too large
-		// to admit is low-information-density by construction, the marker states how
-		// many bytes were dropped, and the executor indexes the full text before
-		// truncating, so `search` still reaches it. Believing the budget had to be
-		// spent is what produced the dilution in the first place.
-		const cap = Math.min(room, Math.max(2048, Math.min(Math.floor(budget / 8), headBytes + tailBytes)));
+		const cap = Math.min(
+			room,
+			Math.max(512, Math.min(Math.floor(budget / 8), headBytes + tailBytes)),
+		);
 		if (cap > 0) {
-			const dropped = lines.slice(headEnd, tailStart).join("\n");
-			// Both ends, not just the head: a build's verdict is the last thing it
-			// writes, and when the oversized line IS the tail, sampling its head alone
-			// dropped `END-OF-BUILD-VERDICT` from every response.
+			// Sample the LINE, not the dropped region. The region can hold thousands
+			// of ordinary short lines around it, and slicing the region returned 40
+			// bytes of that filler and none of the line it exists to show.
+			const line = lines[oversizeIndex];
 			const half = Math.max(1, Math.floor(cap / 2));
-			const front = sliceUtf8(dropped, half);
-			const backRaw = Buffer.from(dropped, "utf8");
-			const backSlice = backRaw.subarray(Math.max(0, backRaw.length - half));
-			let cut = 0;
-			while (cut < backSlice.length && (backSlice[cut] & 0xc0) === 0x80) cut++;
-			const back = backSlice.subarray(cut).toString("utf8");
-			const sample =
-				Buffer.byteLength(dropped) <= cap ? dropped : `${front}${middle}${back}`;
+			const bytes = Buffer.from(line, "utf8");
+			let sample: string;
+			if (bytes.length <= cap) {
+				sample = line;
+			} else {
+				const back = bytes.subarray(bytes.length - half);
+				let cut = 0;
+				while (cut < back.length && (back[cut] & 0xc0) === 0x80) cut++;
+				sample = `${sliceUtf8(line, half)}${middle}${back.subarray(cut).toString("utf8")}`;
+			}
 			if (sample) result = headText + separator + open + sample + close + tailText;
 		}
 	}

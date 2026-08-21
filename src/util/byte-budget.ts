@@ -73,12 +73,29 @@ class BlockBudget {
 			// scheduling decision — it is a guaranteed loss. `search` maps one block
 			// per query, so an oversized block in position 2 returned 41 bytes and
 			// none of the answer: the original defect, one slot over.
+			// Clipping is only worth it when there is room for real content. The
+			// truncation marker alone is ~45 bytes, so clipping into a nearly spent
+			// budget buys a marker and costs the blocks behind it: a 50KB block
+			// clipped into 98 bytes displaced a 13-byte block that would have fit.
+			const MIN_CLIP_BYTES = 256;
+			// Leave a little behind so a later small block is not displaced by a clip
+			// that took every remaining byte: a 50KB block clipped into the rest of
+			// the budget dropped a 13-byte block that would have fit.
+			const CLIP_TAIL_ALLOWANCE = 512;
 			const neverFits = byteLength(block) + this.separatorBytes > this.limit;
-			if (neverFits && this.used < this.limit) {
-				const room = this.limit - this.used - (this.kept.length > 0 ? this.separatorBytes : 0);
+			if (neverFits && this.limit - this.used >= MIN_CLIP_BYTES + CLIP_TAIL_ALLOWANCE) {
+				const room =
+					this.limit -
+					this.used -
+					(this.kept.length > 0 ? this.separatorBytes : 0) -
+					CLIP_TAIL_ALLOWANCE;
 				if (room > 0) {
-					this.kept.push(truncateToBytes(block, room));
-					this.used = this.limit;
+					// Charge what the clip actually costs. Charging the whole limit
+					// starved every later block: a tiny third block was dropped after a
+					// 50KB second one was clipped to 32 bytes.
+					const clipped = truncateToBytes(block, room);
+					this.kept.push(clipped);
+					this.used += byteLength(clipped) + (this.kept.length > 1 ? this.separatorBytes : 0);
 					return true;
 				}
 			}

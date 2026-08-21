@@ -195,8 +195,10 @@ describe("truncation neither collapses nor dilutes", () => {
 
 			assert.ok(bytes <= budget, `${name}: budget exceeded (${bytes})`);
 			// A marker-only response is 70-110 bytes and passes a non-empty check,
-			// which is how the second guard shipped. Require real content.
-			assert.ok(contentBytes(out) >= 2000, `${name}: only ${contentBytes(out)} content bytes`);
+			// which is how the second guard shipped. Require real content — the
+			// sample floor is 512 bytes, deliberately small so a sample can never be
+			// worth crowding out the lines that fit.
+			assert.ok(contentBytes(out) >= 500, `${name}: only ${contentBytes(out)} content bytes`);
 			assert.match(out, /truncated/, `${name}: truncation must be stated`);
 			assert.ok(!out.includes("\uFFFD"), `${name}: multi-byte character was split`);
 		});
@@ -225,11 +227,25 @@ describe("truncation neither collapses nor dilutes", () => {
 		// has to be at least as strict as the contract, or it certifies drift.
 		const usefulBytes = [...head, ...tail].reduce((n, l) => n + Buffer.byteLength(l) + 1, 0);
 		assert.ok(
-			blobBytes <= Math.max(2048, usefulBytes),
+			blobBytes <= Math.max(512, usefulBytes),
 			`the sample crowded out the response: ${blobBytes} blob bytes vs ${usefulBytes} useful`,
 		);
 		// ...but it must not be zero either, or this is the collapse defect again.
 		assert.ok(blobBytes > 0, "the oversized line was dropped without a sample");
+	});
+
+	it("does not let a sample dwarf a handful of useful lines", () => {
+		// Three short lines and a 540KB blob: the sample cap is tied to what fit, so
+		// 51 bytes of useful content cannot buy 2,048 bytes of blob. Sizing the cap
+		// off the budget alone returned exactly that.
+		const out = smartTruncate(
+			`compiling app\nlinking objects\nwarning: unused var x\n${"Q".repeat(540 * 1024)}`,
+			102_400,
+		);
+		const blob = (out.match(/Q/g) ?? []).length;
+		assert.ok(blob > 0, "the oversized line was dropped without a sample");
+		assert.ok(blob <= 512, `the sample was ${blob} bytes against 51 bytes of useful content`);
+		assert.ok(out.includes("warning: unused var x"), "a line that fit was dropped");
 	});
 
 	it("samples both ends of an oversized line, so a trailing verdict survives", () => {
@@ -238,11 +254,27 @@ describe("truncation neither collapses nor dilutes", () => {
 		// alone — or not sampling at all — dropped the answer from every response.
 		const shorts = Array.from({ length: 5_000 }, (_, i) => `line ${i} ordinary build output`);
 		const lastLine = `${"Z".repeat(2 * 1024 * 1024)} END-OF-BUILD-VERDICT`;
-		const out = smartTruncate(`${shorts.join("\n")}\n${lastLine}\n`, 102_400);
-
-		assert.ok(Buffer.byteLength(out) <= 102_400, "budget exceeded");
-		assert.ok(out.includes("END-OF-BUILD-VERDICT"), "the verdict at the end of the line was lost");
-		assert.ok(out.includes("line 0 ordinary"), "the ordinary head lines were lost");
+		for (const input of [
+			`${shorts.join("\n")}\n${lastLine}\n`,
+			// Short lines on BOTH sides: admission fills the budget by itself, so the
+			// sample needs room reserved before admission or the line vanishes with
+			// only a count to show for it. It also means the dropped REGION is mostly
+			// ordinary filler — slicing the region returned 40 bytes of that and none
+			// of the line.
+			`${shorts.join("\n")}\n${lastLine}\n${shorts.join("\n")}\n`,
+		]) {
+			const out = smartTruncate(input, 102_400);
+			assert.ok(Buffer.byteLength(out) <= 102_400, "budget exceeded");
+			assert.ok(out.includes("END-OF-BUILD-VERDICT"), "the verdict at the end of the line was lost");
+			assert.ok(out.includes("line 0 ordinary"), "the ordinary head lines were lost");
+			// Room has to be held back BEFORE admission, or short lines fill the
+			// budget and the sample shrinks to a sliver that happens to end in the
+			// verdict — 21 bytes of a 2MB line, which is not a sample of anything.
+			assert.ok(
+				(out.match(/Z/g) ?? []).length >= 512,
+				`the sample carried only ${(out.match(/Z/g) ?? []).length} bytes of the line`,
+			);
+		}
 	});
 
 	it("does not sample when lines were dropped for quantity rather than size", () => {
@@ -284,7 +316,7 @@ describe("truncation neither collapses nor dilutes", () => {
 				timeout: 30_000,
 			});
 			assert.ok(Buffer.byteLength(r.stdout) <= config.maxOutputBytes, "budget exceeded");
-			assert.ok(contentBytes(r.stdout) >= 2000, "the response is markers only");
+			assert.ok(contentBytes(r.stdout) >= 500, "the response is markers only");
 			assert.ok(r.stdout.includes("output capped"), "the cap notice must survive");
 			assert.ok(r.stdout.includes("xxxxx"), "actual content must survive");
 		} finally {

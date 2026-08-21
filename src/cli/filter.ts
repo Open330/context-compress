@@ -51,7 +51,14 @@ export function compressOutput(
 	maxOutputBytes?: number,
 ): string {
 	let out = stripAnsi(stdout);
-	if (mode === "conservative") return out;
+	// Conservative means "do not FILTER", not "do not bound". Returning here
+	// skipped the response cap entirely: 8MB of stdout came back as 8,388,609
+	// bytes against a 102,400-byte budget, on the one mode a caller picks when
+	// they want the output intact — which is exactly when it is largest.
+	if (mode === "conservative") {
+		const cap = maxOutputBytes ?? loadConfig(resolveProjectDir()).maxOutputBytes;
+		return Buffer.byteLength(out) > cap ? smartTruncate(out, cap) : out;
+	}
 
 	let commandFiltered = false;
 	if (originalCmd) {
@@ -459,6 +466,10 @@ function runBuffered(
 		// "64.0KB past the limit" — wrong by up to 1,600x on the number whose whole
 		// job is to tell the caller how much they are missing.
 		const dropped = sink.seen - Buffer.byteLength(head) - tail.length;
+		// `capped` is global but the sinks are per-stream, so the stream that never
+		// overflowed was getting "… not captured — 0B past the limit …" spliced into
+		// intact output.
+		if (dropped <= 0) return head + decodeTrimmed(tail, true);
 
 		const marker = `\n... [middle of the stream not captured — ${formatBytes(Math.max(0, dropped))} past the ${formatBytes(captureCapBytes)} capture limit] ...\n`;
 		return head + marker + decodeTrimmed(tail, true);

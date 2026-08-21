@@ -1122,8 +1122,10 @@ export function cleanupStaleDbs(): number {
 						const m = statSync(join(path, child.name)).mtimeMs;
 						if (m > newest) newest = m;
 					} catch {
-						/* raced with the owner; treat as live */
-						newest = now;
+						// An entry we cannot stat — a dangling symlink, a file removed
+						// mid-scan — says nothing about liveness. Treating it as fresh
+						// made any such directory permanently un-sweepable, including the
+						// exec directories where sandboxed code runs.
 					}
 				}
 				if (now - newest < MIN_AGE_MS) continue;

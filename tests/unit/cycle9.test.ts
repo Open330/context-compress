@@ -23,6 +23,13 @@ describe("the fetch hook stops at the command, not inside its arguments", () => 
 			cwd: process.cwd(),
 			timeout: 20_000,
 		});
+		// Mapping "no deny in stdout" to "allow" makes every allow-case pass on a
+		// hook that crashed before deciding anything. Prove it ran.
+		assert.strictEqual(r.status, 0, `hook exited ${r.status}: ${r.stderr.slice(0, 300)}`);
+		assert.doesNotThrow(
+			() => JSON.parse(r.stdout || "{}"),
+			`hook emitted non-JSON: ${r.stdout.slice(0, 200)}`,
+		);
 		return r.stdout.includes('"deny"') ? "deny" : "allow";
 	};
 
@@ -35,6 +42,17 @@ describe("the fetch hook stops at the command, not inside its arguments", () => 
 		[`sudo -u nobody ${FETCH} http://x`, "deny"],
 		[`xargs -n1 ${FETCH}`, "deny"],
 		[`env FOO=1 ${FETCH} http://x`, "deny"],
+		// A wrapper can take several operands, and a flag can take a value. Consuming
+		// exactly one operand allowed all four of these — real invocations.
+		[`sudo -u nobody -g wheel ${FETCH} http://x`, "deny"],
+		[`timeout -k 5 10 ${FETCH} http://x`, "deny"],
+		[`nice -n 19 ionice -c3 ${FETCH} http://x`, "deny"],
+		[`xargs -a f -n 1 -P 4 ${FETCH}`, "deny"],
+		[`nohup ${FETCH} http://x`, "deny"],
+		[`stdbuf -o0 ${FETCH} http://x`, "deny"],
+		["timeout 30 make test", "allow"],
+		[`docker run alpine apt add ${FETCH}`, "allow"],
+		[`sudo systemctl restart ${FETCH}-daemon`, "allow"],
 	];
 
 	for (const [command, expected] of cases) {

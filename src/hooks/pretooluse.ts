@@ -251,24 +251,38 @@ function segmentInvokesFetchTool(segment: string): boolean {
 
 	// Walk the leading words, skipping environment assignments (`FOO=1 curl …`),
 	// wrappers, and their flags and operands.
+	// Two failures bracket this loop, so it is written to the shape of both.
+	// Scanning every word denied `sudo apt install <tool>` and `timeout 5 npm ls
+	// <tool>`, because the tool name appeared as an ARGUMENT to apt and npm.
+	// Consuming exactly one operand after a wrapper then allowed `sudo -u nobody
+	// -g wheel <tool>`, `timeout -k 5 10 <tool>`, `nice -n 19 ionice -c3 <tool>`
+	// and `xargs -a f -n 1 -P 4 <tool>` — real invocations, because a wrapper can
+	// take several operands and a flag can take a value.
+	//
+	// What separates them: a flag means we are still inside a wrapper's options,
+	// and a numeric operand is never a command name. Only a NON-numeric operand is
+	// a candidate command, and one of those ends the wrapper.
 	let sawWrapper = false;
+	let skippedOperand = false;
+	const NUMERIC_OPERAND = /^\d+[smhd]?$/;
 	for (const word of segment.trim().split(/\s+/).filter(Boolean)) {
 		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue; // env assignment
-		if (word.startsWith("-")) continue; // a flag belonging to a wrapper
+		if (word.startsWith("-")) {
+			// A flag re-opens the wrapper's own arguments: its value is not a command.
+			skippedOperand = false;
+			continue;
+		}
 		const basename = basenameOf(word);
 		if (FETCH_TOOLS.test(basename)) return true;
 		if (RUNNERS.test(basename)) {
 			sawWrapper = true;
+			skippedOperand = false;
 			continue;
 		}
 		if (KEYWORDS.test(basename)) continue; // shell keyword introduces a command
-		// After a wrapper, skip its plain operands (`timeout 10`, `sudo -u nobody`),
-		// but only up to the next word. Leaving the flag set let the scan walk past
-		// the real command into its ARGUMENTS: `sudo apt install curl` and
-		// `timeout 5 npm ls curl` were denied, with advice that does not apply,
-		// because `curl` appeared as an argument to apt and npm.
-		if (sawWrapper && OPERAND.test(basename)) {
-			sawWrapper = false;
+		if (sawWrapper && NUMERIC_OPERAND.test(basename)) continue; // `timeout 10`
+		if (sawWrapper && !skippedOperand && OPERAND.test(basename)) {
+			skippedOperand = true;
 			continue;
 		}
 		break; // an ordinary command: stop before its arguments
