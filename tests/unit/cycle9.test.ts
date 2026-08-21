@@ -277,3 +277,85 @@ describe("a live peer's store is not swept as stale", () => {
 		}
 	});
 });
+
+describe("wrap normalizes stderr the way execute does", () => {
+	it("strips ANSI, groups repeats, and holds stderr to the response budget", () => {
+		// `wrap` compressed stdout and wrote stderr back untouched: no ANSI strip,
+		// no grouping, and never counted against maxOutputBytes. Claude Code's Bash
+		// tool returns stderr to the model, so those bytes are context, not a
+		// terminal — and `setup --auto` makes this the path most callers get.
+		// Measured before the fix: execute returned 102,400 bytes with no escape
+		// sequences, wrap returned 4,020,042 with 60,000 of them.
+		const child = [
+			"for (let i = 0; i < 60000; i++)",
+			"process.stderr.write('\\x1b[31mE' + i + '\\x1b[0m: cannot resolve symbol qz' + i + '\\n')",
+		].join(" ");
+		const wrapArgs = [
+			"--mode",
+			"conservative",
+			"--",
+			JSON.stringify(process.execPath),
+			"-e",
+			JSON.stringify(child),
+		];
+		const helper = [
+			'import { runWrap } from "./src/cli/filter.ts"',
+			`process.exitCode = await runWrap(${JSON.stringify(wrapArgs)})`,
+		].join(";");
+
+		const r = spawnSync(
+			process.execPath,
+			["--import", "tsx", "--input-type=module", "-e", helper],
+			{
+				encoding: "utf-8",
+				cwd: process.cwd(),
+				timeout: 60_000,
+				maxBuffer: 64 * 1024 * 1024,
+			},
+		);
+
+		assert.strictEqual(r.error, undefined);
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: asserting the escapes are gone
+		assert.ok(!/\x1b\[/.test(r.stderr), "ANSI escape sequences reached the response");
+		const budget = loadConfig().maxOutputBytes;
+		assert.ok(
+			Buffer.byteLength(r.stderr) <= budget * 2,
+			`stderr was not budgeted: ${Buffer.byteLength(r.stderr)} bytes against a ${budget} budget`,
+		);
+	});
+});
+
+describe("fuzzy correction only offers words a search can reach", () => {
+	it("does not hand the correction to a pruned source's word", async () => {
+		// `vocabulary` has no source_id, so retention pruning leaves the words of
+		// deleted sources behind. Taking the single strict minimum handed the
+		// correction to whichever tied word was inserted first — always the older,
+		// already-deleted one — and porterSearch then found nothing, so the search
+		// reported nothing for content that was still fully indexed.
+		const { ContentStore } = await import("../../src/store.js");
+		const build = (withDeadSource: boolean) => {
+			const store = new ContentStore({ dbPath: ":memory:", maxIndexedSources: 2 });
+			if (withDeadSource) {
+				store.index("deployment notes zebracornxx dead payload", "dead");
+				for (let i = 0; i < 4; i++) store.index(`filler content number ${i} deployment`, `f${i}`);
+			}
+			store.index("deployment notes zebracornyy live payload", "live");
+			return store;
+		};
+
+		for (const withDeadSource of [false, true]) {
+			const store = build(withDeadSource);
+			try {
+				const result = store.search("zebracornzz");
+				assert.strictEqual(
+					result.results.length,
+					1,
+					`pruned vocabulary changed the answer (withDeadSource=${withDeadSource})`,
+				);
+				assert.strictEqual(result.corrected, "zebracornyy");
+			} finally {
+				store.close();
+			}
+		}
+	});
+});
