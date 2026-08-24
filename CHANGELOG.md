@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026.8.0 (2026-08-24)
+
+A hardening release. Thirty-five commits of review-driven defect work across the executor, the index, the network boundary and the CLI — plus four fixes for defects found by exercising the shipped tools rather than reading them.
+
+### Fixed — the tools the hook redirects you to
+
+- **Every `fetch_and_index` call to a host that requires a User-Agent failed with a bare `HTTP 403`.** Node sets no User-Agent, and the fetch snippet is pinned to the Node runtime because Bun ignores `createConnection`, so requests went out without the header. `api.github.com` rejects that outright. Bun's shim supplies a default, so the same URL succeeded through `execute()` and failed here — which also made the first attempt to reproduce it clear the header as the cause. Now sends `context-compress/<version>`.
+- **A non-200 discarded the response body.** GitHub named the missing header in that 403's body and the snippet threw it away. Failures now carry a bounded prefix of the body: 2KB read, 300 characters reported, so an HTML error page cannot become the error message.
+- **`fetch_and_index` refusing a private host was a dead end.** The refusal is correct — it is SSRF protection — but the Bash hook denies the download tools and names this tool first, so an intranet URL had nowhere to go. The message now names `execute()` as the route that works.
+- **The PreToolUse hook read heredoc bodies as commands.** `isFetchCommand` treats every newline as a command boundary, so a line inside `python3 - <<'PY' … PY` that began with a tool name — after the environment-assignment skip, `VAR=0 <tool>` in a comment was enough — was denied. Writing a doc block, a commit message or a test fixture that merely mentioned one of these tools was blocked. Heredoc bodies are stripped before the scan. A heredoc fed to `bash` is no longer caught; the block is a redirection nudge and not a security boundary, and denying ordinary edits cost more. The inline-prefix evasion is still denied.
+- **Every opt-out message named a variable but not where to set it**, and the obvious spelling — prefixing the command — is exactly what the environment-assignment skip removes before the flag is read. All three now name `~/.claude/settings.json` `"env"` and say the prefix does not work.
+- **`doctor` reported "All checks passed" while the index was not persisted.** `persistDb` defaults to false, so the store opens at `:memory:`: `search()` reaches only what the current process indexed, and the cumulative stats file is never written. Both look like a healthy install until you restart. `doctor` now reports the store mode, and warns when a configured `dbDir` is not writable — `createServer` falls back to `:memory:` there, making a bad path indistinguishable from a good one.
+
+### Fixed — compression, execution and the index
+
+- The test-runner filter kept every per-file PASS badge on Jest and Vitest output, which write `` PASS  path`` with a leading space. Measured on 1,000 passing files plus one failure: 48,105 bytes in, 48,222 out — larger than the input. Now 298.
+- `doctor` hashed its own bundled hook instead of the path `settings.json` points at, and reported a dead install as healthy.
+- Fuzzy correction ran an unbounded Levenshtein on a near-miss: one search against a 20,000-character vocabulary word blocked the event loop for 2,872ms, and `search()` accepts 16 queries per call. Bounded on both sides: 25ms.
+- A clock moved backwards fabricated regret, producing a persistent downgrade off aggressive mode.
+- Execution-slot leak, zombie server, and silent state loss on shutdown.
+- NAT64 and 6to4 SSRF paths that reached an embedded IPv4 destination the validator never inspected.
+- Truncation spent its budget unevenly depending on line shape, and a failing run's diagnostic could be clamped off the end of a full budget.
+- Untrusted content is labelled everywhere it enters context, and the index is bounded.
+
+### Changed
+
+- Hook opt-out messages name the settings file (see above).
+- `doctor` gained an index-persistence check and exits with a warning rather than a clean pass when the store is in-memory.
+
+### Notes
+
+- `persistDb` still defaults to false. The store holds the full uncompressed output of every command and its default location is inside the project; persistence stays opt-in, and `doctor` now makes the opt-out visible instead of silent.
+
 ## 2026.7.1 (2026-07-29)
 
 Modernization pass: align the hook and MCP surfaces with the current specs, and refresh the toolchain baseline.

@@ -1,6 +1,6 @@
 {
   "name": "context-compress",
-  "version": "2026.7.1",
+  "version": "2026.8.0",
   "description": "Compress tool responses and keep explicitly indexed output searchable without flooding the agent context window.",
   "author": {
     "name": "Open330",
@@ -12,7 +12,9 @@
     "context-compress": {
       "type": "stdio",
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/index.js"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/index.js"
+      ]
     }
   }
 }

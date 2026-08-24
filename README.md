@@ -525,10 +525,18 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
   [PASS] PreToolUse hook configured
   [PASS] Hook integrity: SHA-256 verified (a3f1c8d2e4...)
   [PASS] FTS5 / better-sqlite3 works
+  [WARN] Index is in-memory — search() cannot reach anything indexed
+         before this process started, and cumulative stats are never
+         written. Compression still works; retrieval does not persist.
+         Enable: CONTEXT_COMPRESS_PERSIST_DB=1 (or set dbDir).
 
-  Version: v2026.7.1
-  All checks passed.
+  Version: v2026.8.0
+  1 warning(s) — see above. No critical issues.
 ```
+
+That warning is the default: `persistDb` is opt-in, so a stock install compresses
+but does not keep its index between runs. Set `CONTEXT_COMPRESS_PERSIST_DB=1` and
+the line becomes `[PASS] Index persisted at …/store.db`.
 
 ---
 
