@@ -510,3 +510,46 @@ describe("subagent prompt rewrite (RPF-055)", () => {
 		assert.doesNotMatch(out, /FORBIDDEN/);
 	});
 });
+
+describe("pretooluse hook — heredoc bodies and opt-out hints", () => {
+	it("does not treat a heredoc body as a command position", () => {
+		// Reproduces a real denial: patching this very file was blocked because a
+		// comment line inside the heredoc read as `VAR=0 <tool>`.
+		const command = ["python3 - <<'PY'", "# VAR=0 curl is mentioned here", "PY"].join("\n");
+		const output = runHook({ tool_name: "Bash", tool_input: { command } });
+		// Allowing is silent — the hook emits JSON only when it has a decision, so
+		// an empty stdout is the pass, not a parse error.
+		const decision =
+			output.trim() === ""
+				? undefined
+				: (JSON.parse(output) as { hookSpecificOutput?: { permissionDecision?: string } })
+						.hookSpecificOutput?.permissionDecision;
+		assert.notStrictEqual(decision, "deny");
+	});
+
+	it("still blocks a real invocation after a heredoc", () => {
+		const command = ["cat <<'EOF' > /tmp/x", "text", "EOF", "curl https://example.com"].join("\n");
+		const output = runHook({ tool_name: "Bash", tool_input: { command } });
+		const parsed = JSON.parse(output) as {
+			hookSpecificOutput: { permissionDecision?: string };
+		};
+		assert.strictEqual(parsed.hookSpecificOutput.permissionDecision, "deny");
+	});
+
+	it("names settings.json in the opt-out hint and warns the prefix fails", () => {
+		// The old text named only the variable, and the natural inline spelling is
+		// exactly what the env-assignment skip removes.
+		const output = runHook({
+			tool_name: "Bash",
+			tool_input: { command: "curl https://example.com" },
+		});
+		const reason =
+			(
+				JSON.parse(output) as {
+					hookSpecificOutput: { permissionDecisionReason?: string };
+				}
+			).hookSpecificOutput.permissionDecisionReason ?? "";
+		assert.match(reason, /settings\.json/);
+		assert.match(reason, /does NOT work/);
+	});
+});

@@ -30,6 +30,24 @@ const ccMode = process.env.CONTEXT_COMPRESS_MODE;
 const COMPRESSION_MODES = new Set(["conservative", "balanced", "aggressive", "auto"]);
 
 /**
+ * How to actually turn one of these behaviours off.
+ *
+ * Each opt-out is read from `process.env` of THIS hook process, which
+ * settings.json "env" populates. The obvious spelling — prefixing the blocked
+ * command, `VAR=0 <tool> …` — cannot work: the walk in segmentInvokesFetchTool
+ * deliberately skips leading environment assignments so that `FOO=1 <tool>` is
+ * still recognised, which strips the prefix before the flag is ever consulted.
+ * Naming only the variable sent callers straight into that dead end and left
+ * them retrying it, so the message names the file instead.
+ */
+function optOutHint(name: string): string {
+	return (
+		`Set ${name}=0 in ~/.claude/settings.json "env" to disable ` +
+		`(prefixing the command with ${name}=0 does NOT work \u2014 it is stripped before this check).`
+	);
+}
+
+/**
  * Reject configuration that could be interpreted as shell control or
  * expansion syntax before constructing an updated Bash command. Quotes and
  * spaces are deliberately allowed because valid installation paths may
@@ -290,8 +308,34 @@ function segmentInvokesFetchTool(segment: string): boolean {
 	return false;
 }
 
+/**
+ * Remove heredoc bodies before looking for command positions.
+ *
+ * isFetchCommand treats every newline as a command boundary. That is right for
+ * a script and wrong for a heredoc: `python3 - <<\'PY\' … PY` carries arbitrary
+ * text, and any line inside it that happened to start with a tool name — after
+ * the env-assignment skip, `VAR=0 <tool>` inside a comment was enough — was read
+ * as an invocation. Writing a commit message, a doc block or a test fixture that
+ * mentions one of these tools at the start of a line was therefore denied.
+ *
+ * A heredoc fed to `bash` really can invoke the tool, so this trades a missed
+ * case for the false positives. That is the right way round here: the block is a
+ * redirection nudge and not a security boundary (see the note at its call site),
+ * and being unable to edit a file that mentions the word costs more than a
+ * download that was never restricted in the first place.
+ */
+function stripHeredocBodies(command: string): string {
+	// Unterminated heredoc: strip to the end rather than leave the body scannable.
+	return command.replace(
+		/<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\r?\n|$)|$)/g,
+		" ",
+	);
+}
+
 function isFetchCommand(command: string): boolean {
-	return command.split(/\||&&|\|\||;|\n|\$\(|`|\(/).some(segmentInvokesFetchTool);
+	return stripHeredocBodies(command)
+		.split(/\||&&|\|\||;|\n|\$\(|`|\(/)
+		.some(segmentInvokesFetchTool);
 }
 
 // ─── Bash: redirect data-fetching commands ───
@@ -311,7 +355,7 @@ if (tool === "Bash") {
 	if (blockCurl && isFetchCommand(command)) {
 		respond({
 			permissionDecision: "deny",
-			permissionDecisionReason: `${TOOL_PREFIX}: curl/wget blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url, source) to fetch URLs, or mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox. Set CONTEXT_COMPRESS_BLOCK_CURL=0 to disable this.`,
+			permissionDecisionReason: `${TOOL_PREFIX}: curl/wget blocked. Use mcp__${TOOL_PREFIX}__fetch_and_index(url, source) to fetch URLs, or mcp__${TOOL_PREFIX}__execute(language, code) to run HTTP calls in sandbox. ${optOutHint("CONTEXT_COMPRESS_BLOCK_CURL")}`,
 		});
 	}
 
@@ -346,7 +390,7 @@ if (tool === "Bash") {
 				additionalContext:
 					`${TOOL_PREFIX}: this command was wrapped so its stdout flows through the ` +
 					"compression pipeline — the output you receive is filtered, not raw. " +
-					"Set CONTEXT_COMPRESS_FILTER_BASH=0 to disable.",
+					optOutHint("CONTEXT_COMPRESS_FILTER_BASH"),
 			});
 		}
 	}
@@ -445,7 +489,7 @@ The parent agent context window is precious. Your full response gets injected in
 		`${TOOL_PREFIX}: appended MCP routing guidance to this subagent prompt, including a 500-word` +
 		" response cap and a request to write artifacts to files rather than return them inline." +
 		(subagentType === "Bash" ? ' Also changed subagent_type "Bash" to "general-purpose".' : "") +
-		" Set CONTEXT_COMPRESS_ROUTE_SUBAGENTS=0 to disable.";
+		` ${optOutHint("CONTEXT_COMPRESS_ROUTE_SUBAGENTS")}`;
 
 	respond({ updatedInput, additionalContext: disclosure });
 }
