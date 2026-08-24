@@ -91,6 +91,12 @@ describe("fuzzy correction is bounded by term length", () => {
 
 			// Now force one in, so the query-side bound is what has to hold.
 			db.prepare("INSERT OR IGNORE INTO vocabulary(word) VALUES (?)").run(word);
+			// Warm the query path before timing it. The first search() against a fresh
+			// store also pays SQLite statement preparation and JIT warmup, which on a
+			// loaded machine reached 819ms and failed this bound with the fix present
+			// — measured 819/197/170ms across three isolated runs of identical code.
+			// The regression this guards costs ~2,872ms, so the headroom survives.
+			store.search("alpha");
 			const started = process.hrtime.bigint();
 			store.search(`${word.slice(0, -1)}X`);
 			const ms = Number(process.hrtime.bigint() - started) / 1e6;

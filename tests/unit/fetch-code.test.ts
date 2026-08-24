@@ -142,3 +142,42 @@ describe("buildFetchCode", () => {
 		assert.ok(code.includes("<style"));
 	});
 });
+
+describe("buildFetchCode — headers and error reporting", () => {
+	it("sends a User-Agent", () => {
+		// Node sets none, and this snippet is pinned to Node, so requests went out
+		// bare. api.github.com answers that with 403 "Please make sure your request
+		// has a User-Agent header" — reproduced against the live host.
+		const code = buildFetchCode("https://api.github.com/x", "20.200.245.245");
+		assert.match(code, /"user-agent":\s*"context-compress\//);
+	});
+
+	it("keeps the User-Agent on the unpinned path too", () => {
+		const code = buildFetchCode("https://example.com/page");
+		assert.match(code, /"user-agent":\s*"context-compress\//);
+	});
+
+	it("reports the response body on a non-200", () => {
+		// A bare "HTTP 403" is unactionable when the server already said why.
+		const code = buildFetchCode("https://example.com/page");
+		assert.ok(code.includes("__errBody"), "non-200 path must collect the body");
+		assert.ok(
+			/console\.error\("HTTP " \+ resp\.statusCode \+ \(__errBody/.test(code),
+			"status message must append the body",
+		);
+	});
+
+	it("collapses whitespace in the error body, not the letter s", () => {
+		// The snippet is built from a template literal: a single backslash reaches
+		// the generated code as /s+/g and ate every run of "s", turning
+		// {"message":"Not Found"} into {"me age":"Not Found"}.
+		const code = buildFetchCode("https://example.com/page");
+		assert.ok(code.includes("replace(/\\s+/g"), "must emit an escaped \\s class");
+		assert.ok(!/replace\(\/s\+\/g/.test(code), "must not emit a bare /s+/g");
+	});
+
+	it("bounds the error body so an error page cannot become the message", () => {
+		const code = buildFetchCode("https://example.com/page");
+		assert.ok(code.includes("slice(0, 300)"));
+	});
+});

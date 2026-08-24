@@ -41,7 +41,16 @@ export function registerFetchAndIndexTool(server: McpServer, ctx: ToolContext): 
 				if (isPrivateHost(parsed.hostname)) {
 					return {
 						content: [
-							{ type: "text" as const, text: "Error: internal/private URLs are not allowed" },
+							{
+								type: "text" as const,
+								// Naming only the refusal sent callers in circles: the Bash hook
+								// denies curl and points here first, and for an intranet host
+								// this is a dead end. execute() is the route that works.
+								text:
+									"Error: internal/private URLs are not allowed (SSRF protection). " +
+									"To reach an internal host, use execute(language, code) and make the " +
+									"request there — the sandbox is not subject to this check.",
+							},
 						],
 						isError: true,
 					};

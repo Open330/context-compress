@@ -1,4 +1,5 @@
 import { htmlToMarkdownSnippet } from "./html-to-markdown.js";
+import { getVersion } from "./version.js";
 
 /** HTTP status codes that carry a Location we would have to follow. */
 const REDIRECT_CODES = [301, 302, 303, 307, 308];
@@ -64,10 +65,19 @@ const options = {};
 // Without this a gzip/deflate body is decoded as text: raw DEFLATE bytes became
 // 23 replacement characters and were indexed that way. Nothing here inflates, so
 // ask the server not to compress. The pinning block below replaces
-// options.headers wholesale, so this is merged after it.
-const __acceptIdentity = { "accept-encoding": "identity" };
+// options.headers wholesale, so these are merged after it.
+// Node sends no User-Agent of its own, and this snippet is pinned to the Node
+// runtime (see the docblock above), so requests went out without one. Hosts that
+// require the header reject that: api.github.com answers
+// "Request forbidden by administrative rules. Please make sure your request has
+// a User-Agent header" with a 403. Bun's http shim supplies a default, which is
+// why the same URL succeeded through execute() and failed here.
+const __defaultHeaders = {
+    "accept-encoding": "identity",
+    "user-agent": ${JSON.stringify(`context-compress/${getVersion("unknown")}`)},
+};
 ${pinning}
-options.headers = Object.assign({}, options.headers, __acceptIdentity);
+options.headers = Object.assign({}, options.headers, __defaultHeaders);
 const resp = await new Promise((resolve, reject) => {
     const req = http.get(url, options, resolve);
     req.on("error", reject);
@@ -76,7 +86,25 @@ if (${JSON.stringify(REDIRECT_CODES)}.includes(resp.statusCode)) {
     console.error("Redirect blocked (SSRF protection): " + resp.statusCode + " -> " + (resp.headers.location || "?"));
     process.exit(1);
 }
-if (resp.statusCode !== 200) { console.error("HTTP " + resp.statusCode); process.exit(1); }
+if (resp.statusCode !== 200) {
+    // The body is where the server says WHY. Dropping it reported a bare
+    // "HTTP 403" for a missing User-Agent, whose body named the header outright
+    // — an hour of bisecting for a message that was already on the wire.
+    // Bounded: an error page must not become the error message.
+    let __errBody = "";
+    try {
+        for await (const chunk of resp) {
+            __errBody += chunk.toString("utf8");
+            if (__errBody.length > 2048) break;
+        }
+    } catch {}
+    // Escaped twice on purpose: this is a template literal, so a single
+    // backslash reaches the generated snippet as /s+/g and deletes every run of
+    // the letter s ("message" came back as "me age").
+    __errBody = __errBody.replace(/\\s+/g, " ").trim().slice(0, 300);
+    console.error("HTTP " + resp.statusCode + (__errBody ? ": " + __errBody : ""));
+    process.exit(1);
+}
 const cl = resp.headers["content-length"];
 if (cl && parseInt(cl, 10) > 10 * 1024 * 1024) {
     console.error("Response too large: " + cl + " bytes"); process.exit(1);
