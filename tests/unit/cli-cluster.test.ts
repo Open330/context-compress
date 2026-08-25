@@ -22,7 +22,7 @@ after(() => {
  * running it from the repository root edits the repository — which is exactly
  * what happened the first time this file ran.
  */
-function runCli(args: string[], home?: string) {
+function runCli(args: string[], home?: string, envOverrides: Record<string, string> = {}) {
 	const homeDir = home ?? mkdtempSync(join(tmpdir(), "cc-cli-home-"));
 	if (!home) dirs.push(homeDir);
 	const workDir = mkdtempSync(join(tmpdir(), "cc-cli-cwd-"));
@@ -34,7 +34,7 @@ function runCli(args: string[], home?: string) {
 		cwd: workDir,
 		encoding: "utf-8",
 		timeout: 30_000,
-		env: { ...process.env, HOME: homeDir },
+		env: { ...process.env, HOME: homeDir, ...envOverrides },
 	});
 }
 
@@ -82,6 +82,23 @@ describe("uninstall exit code", () => {
 		const result = runCli(["uninstall"], homeWithSettings({ theme: "dark" }));
 		assert.strictEqual(result.status, 0, result.stderr);
 		assert.match(result.stdout, /Uninstall complete/);
+	});
+
+	it("does not fail merely because the `claude` CLI is absent", () => {
+		// CI has no `claude` on PATH, so unregisterMcpServer returned "unavailable"
+		// and uninstall exited 1 with nothing actually left behind — and blamed
+		// settings.json, which had been rewritten fine. Any host that never had
+		// Claude Code (CI, a container, a build image) could not uninstall cleanly.
+		const nodeDir = dirname(process.execPath);
+		const result = runCli(["uninstall"], homeWithSettings({ theme: "dark" }), {
+			PATH: `${nodeDir}:/usr/bin:/bin`,
+		});
+
+		assert.strictEqual(result.status, 0, result.stderr);
+		assert.ok(
+			!result.stderr.includes("settings.json could not be modified"),
+			`blamed settings.json for an MCP-registration problem: ${result.stderr}`,
+		);
 	});
 });
 

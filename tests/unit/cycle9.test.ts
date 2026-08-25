@@ -133,6 +133,39 @@ describe("wrap reports the capture cap honestly", () => {
 		assert.ok(!r.stderr.includes("ran to completion"), "a SIGKILLed command was called complete");
 		assert.match(r.stderr, /SIGKILL/, "the signal was suppressed");
 	});
+
+	it("reads a shell's 128+N exit as the signal it stands for", () => {
+		// The test above only caught this on macOS. `spawn(shell: true)` means the
+		// watched process is /bin/sh: macOS's re-raises the signal, so Node reports
+		// signal="SIGKILL", while Linux's dash exits 128+N and Node reports
+		// signal=null. Measured with the same script — darwin {code: null, signal:
+		// "SIGKILL"}, node:22-slim and node:24-slim both {code: 137, signal: null}.
+		// So every Linux run of the wrap said a killed command "ran to completion".
+		// Exiting 137 directly reproduces that shape on any platform.
+		const script = ["process.stdout.write('o'.repeat(4096))", "process.exit(137)"].join(";");
+		const wrapArgs = [
+			"--mode",
+			"conservative",
+			"--",
+			JSON.stringify(process.execPath),
+			"-e",
+			JSON.stringify(script),
+		];
+		const helper = [
+			'import { runWrap } from "./src/cli/filter.ts"',
+			`process.exitCode = await runWrap(${JSON.stringify(wrapArgs)}, { captureCapBytes: 512 })`,
+		].join(";");
+		const r = spawnSync(
+			process.execPath,
+			["--import", "tsx", "--input-type=module", "-e", helper],
+			{ encoding: "utf-8", cwd: process.cwd(), timeout: 20_000 },
+		);
+		assert.ok(
+			!r.stderr.includes("ran to completion"),
+			`a command that exited 137 was called complete: ${r.stderr}`,
+		);
+		assert.match(r.stderr, /SIGKILL/, "128+9 was not reported as SIGKILL");
+	});
 });
 
 describe("the intent summary never costs more than it saves", () => {

@@ -91,16 +91,32 @@ describe("fuzzy correction is bounded by term length", () => {
 
 			// Now force one in, so the query-side bound is what has to hold.
 			db.prepare("INSERT OR IGNORE INTO vocabulary(word) VALUES (?)").run(word);
-			// Warm the query path before timing it. The first search() against a fresh
-			// store also pays SQLite statement preparation and JIT warmup, which on a
-			// loaded machine reached 819ms and failed this bound with the fix present
-			// — measured 819/197/170ms across three isolated runs of identical code.
-			// The regression this guards costs ~2,872ms, so the headroom survives.
+			// Warm the query path, then take the FASTEST of several samples.
+			//
+			// A single timed call made this the flakiest test in the suite: the first
+			// search() against a fresh store also pays SQLite statement preparation
+			// and JIT warmup, and a busy machine stretched that well past the bound —
+			// 819ms, then 1,686ms even with the warmup in place, against passing runs
+			// of 88-197ms on the same code.
+			//
+			// Scheduling noise only ever ADDS time, so the minimum is the cleanest
+			// estimate of the real cost. The regression this guards is not marginal —
+			// an unbounded Levenshtein measured 2,872ms and would be slow in every
+			// sample — so taking the best of three keeps the guard and drops the
+			// false failures.
 			store.search("alpha");
-			const started = process.hrtime.bigint();
-			store.search(`${word.slice(0, -1)}X`);
-			const ms = Number(process.hrtime.bigint() - started) / 1e6;
-			assert.ok(ms < 500, `one search took ${ms.toFixed(0)}ms`);
+			const samples: number[] = [];
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const started = process.hrtime.bigint();
+				store.search(`${word.slice(0, -1)}X`);
+				samples.push(Number(process.hrtime.bigint() - started) / 1e6);
+			}
+			const fastest = Math.min(...samples);
+			assert.ok(
+				fastest < 500,
+				`fastest of ${samples.length} searches took ${fastest.toFixed(0)}ms ` +
+					`(all: ${samples.map((s) => s.toFixed(0)).join(", ")}ms)`,
+			);
 		} finally {
 			store.close();
 		}

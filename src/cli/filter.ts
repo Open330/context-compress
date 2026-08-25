@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { loadConfig, resolveProjectDir } from "../config.js";
 import {
 	deduplicateLines,
@@ -356,6 +357,32 @@ function normalizeStderr(stderr: string, maxOutputBytes: number): string {
 	return smartTruncate(text, maxOutputBytes);
 }
 
+/**
+ * The signal a shell-wrapped child actually died from.
+ *
+ * `spawn(..., { shell: true })` means the process Node watches is /bin/sh, not
+ * the command. When the command dies by a signal the two platforms report it
+ * differently: macOS's sh re-raises it, so Node sees `signal`; Linux's sh (dash)
+ * exits 128+N instead and Node sees `signal: null`. Measured with the same
+ * script — `darwin {code: null, signal: "SIGKILL"}`, `linux {code: 137, signal:
+ * null}`. Reading only `signal` therefore told every Linux user that a SIGKILLed
+ * command "ran to completion", which is exactly the claim this message exists to
+ * avoid making.
+ *
+ * A program may legitimately exit 137, so this can name a signal that never
+ * fired. That is the safer error of the two: the message's whole purpose is to
+ * say the output is incomplete.
+ */
+function resolveSignal(code: number | null, signal: NodeJS.Signals | null): NodeJS.Signals | null {
+	if (signal) return signal;
+	if (code === null || code <= 128 || code > 128 + 31) return null;
+	const number = code - 128;
+	for (const [name, value] of Object.entries(osConstants.signals)) {
+		if (value === number) return name as NodeJS.Signals;
+	}
+	return null;
+}
+
 function writeBufferedStderr(
 	stderr: string,
 	signal: NodeJS.Signals | null,
@@ -491,7 +518,13 @@ function runBuffered(
 		compressOutputAsync(stdout, cmdLine, mode).then(({ output: compressed }) => {
 			process.stdout.write(compressed);
 			if (compressed && !compressed.endsWith("\n")) process.stdout.write("\n");
-			writeBufferedStderr(stderr, signal, capped, captureCapBytes, maxOutputBytes);
+			writeBufferedStderr(
+				stderr,
+				resolveSignal(code, signal),
+				capped,
+				captureCapBytes,
+				maxOutputBytes,
+			);
 			// Signal-killed children report code=null — never mask that as success.
 			// A capture cap is our limit, not the command's outcome: report what the
 			// command actually returned.
@@ -520,7 +553,8 @@ function runStreaming(proc: ReturnType<typeof spawn>, resolve: (code: number) =>
 	proc.on("close", (code, signal) => {
 		const tail = compressor.flush();
 		if (tail) process.stdout.write(tail);
-		if (signal) process.stderr.write(`context-compress wrap: killed by ${signal}\n`);
+		const killedBy = resolveSignal(code, signal);
+		if (killedBy) process.stderr.write(`context-compress wrap: killed by ${killedBy}\n`);
 		// Signal-killed children report code=null — never mask that as success.
 		resolve(code ?? 1);
 	});

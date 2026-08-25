@@ -96,6 +96,18 @@ function removeMcpRegistration(changes: string[]): boolean {
 		return true;
 	}
 	if (result.status === "absent") return true;
+	if (result.status === "unavailable") {
+		// Not a failure. Without the CLI there is no registration this command could
+		// have created, and an environment that never had Claude Code — CI, a
+		// container, a build image — could otherwise never uninstall cleanly: the
+		// exit code was 1 with nothing actually left behind. Still say what to run
+		// if a registration does survive somewhere.
+		console.error(
+			`  Skipped the MCP registration (${result.detail}).\n` +
+				"  If one exists, remove it with: claude mcp remove context-compress --scope user",
+		);
+		return true;
+	}
 	console.error(
 		`  Could not remove the MCP registration (${result.detail}).\n` +
 			"  Run: claude mcp remove context-compress --scope user",
@@ -110,20 +122,25 @@ export async function uninstall(): Promise<void> {
 	// 1. Remove our hook, MCP registration, and env keys in one settings write.
 	console.log("  Removing configuration from settings.json...");
 	const settingsPath = resolve(homedir(), ".claude", "settings.json");
-	let failed = false;
+	// Collected so the summary can name the step that failed. It used to report
+	// "settings.json could not be modified" for every failure, including one that
+	// came from the MCP registration while settings.json had been rewritten fine.
+	const failures: string[] = [];
 	try {
 		changes.push(...removeFromSettings(settingsPath));
 	} catch (err) {
 		// Fail closed: a half-understood settings file is never rewritten. Report it
 		// through the exit code too — printing "Uninstall complete." and exiting 0
 		// while the hook is still installed misleads a dotfiles or CI script.
-		failed = true;
+		failures.push("settings.json could not be modified, so the hook may still be installed");
 		console.error(
 			`  Could not modify settings.json (${err instanceof Error ? err.message : String(err)})`,
 		);
 	}
 
-	if (!removeMcpRegistration(changes)) failed = true;
+	if (!removeMcpRegistration(changes)) {
+		failures.push("the MCP registration could not be removed");
+	}
 
 	// Project-level .mcp.json in the CURRENT directory.
 	//
@@ -167,10 +184,8 @@ export async function uninstall(): Promise<void> {
 		console.log("  Nothing to clean up.");
 	}
 
-	if (failed) {
-		console.error(
-			"\n  Uninstall incomplete: settings.json could not be modified, so the hook may still be installed.\n",
-		);
+	if (failures.length > 0) {
+		console.error(`\n  Uninstall incomplete: ${failures.join("; ")}.\n`);
 		process.exitCode = 1;
 		return;
 	}
