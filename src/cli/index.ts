@@ -15,6 +15,7 @@
  *   context-compress wrap <cmd>         → run cmd, compress its stdout, exit with cmd's code
  */
 
+import { describeNativeAbiFailure } from "../util/native-abi.js";
 import { getVersion } from "../util/version.js";
 
 const HELP_TEXT = `Usage: context-compress [command]
@@ -50,30 +51,41 @@ const args = process.argv.slice(2);
 const command = args[0];
 const rest = args.slice(1);
 
-if (command === undefined) {
-	// Starting the MCP server is intentionally reserved for the no-argument form.
-	await import("../index.js");
-} else if (command === "--help" || command === "-h") {
-	console.log(HELP_TEXT);
-} else if (command === "--version" || command === "-v") {
-	console.log(getVersion("unknown"));
-} else if (command === "setup" || command === "init") {
-	const { setup } = await import("./setup.js");
-	await setup(rest);
-} else if (command === "doctor") {
-	const { doctor } = await import("./doctor.js");
-	const code = await doctor();
-	process.exit(code);
-} else if (command === "uninstall") {
-	const { uninstall } = await import("./uninstall.js");
-	await uninstall();
-} else if (command === "filter") {
-	const { runFilter } = await import("./filter.js");
-	process.exit(await runFilter(rest));
-} else if (command === "wrap") {
-	const { runWrap } = await import("./filter.js");
-	process.exit(await runWrap(rest));
-} else {
-	console.error(`Unknown command: ${command}\n\n${HELP_TEXT}`);
-	process.exit(2);
+async function dispatch(): Promise<void> {
+	if (command === undefined) {
+		// Starting the MCP server is intentionally reserved for the no-argument form.
+		await import("../index.js");
+	} else if (command === "--help" || command === "-h") {
+		console.log(HELP_TEXT);
+	} else if (command === "--version" || command === "-v") {
+		console.log(getVersion("unknown"));
+	} else if (command === "setup" || command === "init") {
+		const { setup } = await import("./setup.js");
+		await setup(rest);
+	} else if (command === "doctor") {
+		const { doctor } = await import("./doctor.js");
+		const code = await doctor();
+		process.exit(code);
+	} else if (command === "uninstall") {
+		const { uninstall } = await import("./uninstall.js");
+		await uninstall();
+	} else if (command === "filter") {
+		const { runFilter } = await import("./filter.js");
+		process.exit(await runFilter(rest));
+	} else if (command === "wrap") {
+		const { runWrap } = await import("./filter.js");
+		process.exit(await runWrap(rest));
+	} else {
+		console.error(`Unknown command: ${command}\n\n${HELP_TEXT}`);
+		process.exit(2);
+	}
+}
+
+try {
+	await dispatch();
+} catch (error) {
+	const explained = describeNativeAbiFailure(error);
+	if (explained === null) throw error;
+	console.error(explained);
+	process.exit(1);
 }

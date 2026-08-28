@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { loadConfig, resolveProjectDir } from "../config.js";
 import { SubprocessExecutor } from "../executor.js";
 import { detectRuntimes, getRuntimeSummary, hasBun } from "../runtime/index.js";
+import { describeNativeAbiFailure } from "../util/native-abi.js";
 import { getVersion } from "../util/version.js";
 import { isForeignHookCommand, isOwnedHookCommand, runnerScriptPath } from "./hook-ownership.js";
 import { resolvePaths } from "./setup.js";
@@ -221,8 +222,17 @@ export async function doctor(): Promise<number> {
 		}
 	} catch (err) {
 		criticalFails++;
-		const msg = err instanceof Error ? err.message : String(err);
-		console.log(`  [FAIL] FTS5: ${msg}`);
+		// An ABI mismatch arrives here as Node's own text, which names two numbers
+		// and nothing the user can act on. doctor is the command whose whole job is
+		// to say what to do about it.
+		const abi = describeNativeAbiFailure(err);
+		if (abi) {
+			console.log(`  [FAIL] FTS5: the SQLite binding could not load.\n`);
+			for (const line of abi.split("\n")) console.log(`  ${line}`);
+		} else {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.log(`  [FAIL] FTS5: ${msg}`);
+		}
 	}
 
 	// 6. Index persistence — the FTS5 check above proves the capability exists, not
