@@ -530,7 +530,7 @@ Set `CONTEXT_COMPRESS_FILTER_BASH=1` and the PreToolUse hook will route output-h
          written. Compression still works; retrieval does not persist.
          Enable: CONTEXT_COMPRESS_PERSIST_DB=1 (or set dbDir).
 
-  Version: v2026.8.0
+  Version: v2026.8.1
   1 warning(s) — see above. No critical issues.
 ```
 

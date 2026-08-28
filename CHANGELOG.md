@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026.8.1 (2026-08-28)
+
+Three defects that only appear on a machine other than the one the release was built on.
+
+### Fixed
+
+- **`wrap` told every Linux user that a killed command had finished.** `spawn(shell: true)` means the watched process is /bin/sh, and the two platforms report a signalled child differently: macOS's sh re-raises the signal, so Node sees `signal`, while Linux's dash exits 128+N and Node sees `signal: null`. Measured with one script across three runtimes — darwin `{code: null, signal: "SIGKILL"}`, node:22-slim and node:24-slim both `{code: 137, signal: null}`. The capture-cap message reads only `signal`, so on Linux it printed "The command itself ran to completion" for a process that had been SIGKILLed — the exact claim the message exists to avoid. A shell's 128+N exit is now resolved back to the signal it stands for.
+- **`uninstall` failed on any host without the `claude` CLI.** `unregisterMcpServer` returns "unavailable" when the CLI is not on PATH, and that was treated as a failure: uninstall exited 1 with nothing actually left behind, so CI, a container or a build image could never uninstall cleanly. It also blamed "settings.json could not be modified", which had been rewritten fine. That case is now a notice that still prints the manual command, and the summary names the step that actually failed.
+- **A SQLite binding built by a different Node dumped a twelve-frame stack.** better-sqlite3 compiles its binding at install time against whichever Node ran `npm install`, and refuses to load under a different ABI — which is the normal outcome of having Homebrew's npm and nvm's node on the same PATH. Node's own message names two ABI numbers and nothing else: not the package, not the install path, not a command that would fix it. The CLI now names the running Node, the ABI the binding was built for, and the `npm rebuild --prefix <install root>` that repairs it. `doctor` needed the same fix separately — it catches the failure itself, so it had been printing Node's raw text under a `[FAIL]`.
+
+### Internal
+
+- The fuzzy-correction bound test was the flakiest in the suite. A warmup was not enough: it still measured 1,686ms on a busy machine against passing runs of 88-197ms on identical code. It now takes the fastest of three samples, since scheduling noise only adds time and the regression it guards measured 2,872ms in every run.
+
 ## 2026.8.0 (2026-08-24)
 
 A hardening release. Thirty-five commits of review-driven defect work across the executor, the index, the network boundary and the CLI — plus four fixes for defects found by exercising the shipped tools rather than reading them.
